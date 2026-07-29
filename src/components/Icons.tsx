@@ -1,0 +1,33 @@
+import {
+  BookOpen,
+  Check,
+  Clock3,
+  Copy,
+  Home,
+  Mic,
+  Plus,
+  RotateCcw,
+  Search,
+  Settings,
+  SlidersHorizontal,
+  Square,
+  Trash2,
+  X,
+} from "lucide-react";
+
+export {
+  BookOpen,
+  Check,
+  Clock3,
+  Copy,
+  Home,
+  Mic,
+  Plus,
+  RotateCcw,
+  Search,
+  Settings,
+  SlidersHorizontal,
+  Square,
+  Trash2,
+  X,
+};
