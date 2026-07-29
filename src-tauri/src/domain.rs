@@ -119,6 +119,7 @@ pub fn transition(state: DictationState, event: DictationEvent) -> DictationStat
 #[cfg(test)]
 mod tests {
     use super::{DictationEvent, DictationState, RecoveryRecording, transition};
+    use serde_json::{Value, json};
 
     fn recording() -> RecoveryRecording {
         RecoveryRecording {
@@ -232,5 +233,119 @@ mod tests {
             transition(recording_state.clone(), DictationEvent::PasteCompleted),
             recording_state
         );
+    }
+
+    #[test]
+    fn state_json_contract_uses_exact_tags_fields_and_round_trips() {
+        let cases: Vec<(DictationState, Value)> = vec![
+            (DictationState::Idle, json!({ "status": "idle" })),
+            (
+                DictationState::Recording {
+                    recording_id: "recording-1".into(),
+                    audio_path: r"C:\recordings\recording-1.wav".into(),
+                },
+                json!({
+                    "status": "recording",
+                    "recordingId": "recording-1",
+                    "audioPath": r"C:\recordings\recording-1.wav",
+                }),
+            ),
+            (
+                DictationState::Processing {
+                    recording_id: "recording-1".into(),
+                    audio_path: r"C:\recordings\recording-1.wav".into(),
+                },
+                json!({
+                    "status": "processing",
+                    "recordingId": "recording-1",
+                    "audioPath": r"C:\recordings\recording-1.wav",
+                }),
+            ),
+            (
+                DictationState::Pasting {
+                    recording_id: "recording-1".into(),
+                    audio_path: r"C:\recordings\recording-1.wav".into(),
+                    transcript: "Dzień dobry.".into(),
+                },
+                json!({
+                    "status": "pasting",
+                    "recordingId": "recording-1",
+                    "audioPath": r"C:\recordings\recording-1.wav",
+                    "transcript": "Dzień dobry.",
+                }),
+            ),
+            (
+                DictationState::Failed {
+                    recovery: recording(),
+                    error: "Model jest niedostępny.".into(),
+                },
+                json!({
+                    "status": "failed",
+                    "recovery": {
+                        "recordingId": "recording-1",
+                        "audioPath": r"C:\recordings\recording-1.wav",
+                    },
+                    "error": "Model jest niedostępny.",
+                }),
+            ),
+        ];
+
+        for (state, expected_json) in cases {
+            assert_eq!(serde_json::to_value(&state).unwrap(), expected_json);
+            assert_eq!(
+                serde_json::from_value::<DictationState>(expected_json).unwrap(),
+                state
+            );
+        }
+    }
+
+    #[test]
+    fn event_json_contract_uses_exact_tags_fields_and_round_trips() {
+        let cases: Vec<(DictationEvent, Value)> = vec![
+            (
+                DictationEvent::Start {
+                    recording_id: "recording-1".into(),
+                    audio_path: r"C:\recordings\recording-1.wav".into(),
+                },
+                json!({
+                    "type": "start",
+                    "recordingId": "recording-1",
+                    "audioPath": r"C:\recordings\recording-1.wav",
+                }),
+            ),
+            (DictationEvent::Stop, json!({ "type": "stop" })),
+            (
+                DictationEvent::TranscriptionSucceeded {
+                    transcript: "Dzień dobry.".into(),
+                },
+                json!({
+                    "type": "transcription_succeeded",
+                    "transcript": "Dzień dobry.",
+                }),
+            ),
+            (
+                DictationEvent::TranscriptionFailed {
+                    error: "Model jest niedostępny.".into(),
+                },
+                json!({
+                    "type": "transcription_failed",
+                    "error": "Model jest niedostępny.",
+                }),
+            ),
+            (
+                DictationEvent::PasteCompleted,
+                json!({ "type": "paste_completed" }),
+            ),
+            (DictationEvent::Retry, json!({ "type": "retry" })),
+            (DictationEvent::Cancel, json!({ "type": "cancel" })),
+        ];
+
+        for (event, expected_json) in cases {
+            assert_eq!(serde_json::to_value(&event).unwrap(), expected_json);
+            assert_eq!(
+                serde_json::from_value::<DictationEvent>(expected_json).unwrap(),
+                event
+            );
+        }
     }
 }
