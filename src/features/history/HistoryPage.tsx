@@ -5,6 +5,8 @@ import { EmptyState } from "../../components/EmptyState";
 import { Waveform } from "../../components/Waveform";
 import type { AppAdapter } from "../../lib/tauri";
 import type { Recording, RecordingStatus } from "../../lib/types";
+import type { ToastKind } from "../../components/Toast";
+import { useAsyncAction } from "../../lib/useAsyncAction";
 
 const labels: Record<RecordingStatus, string> = {
   completed: "Ukończono",
@@ -21,15 +23,17 @@ export function HistoryPage({
   adapter,
   recordings,
   onRefresh,
+  onToast,
 }: {
   adapter: AppAdapter;
   recordings: Recording[];
   onRefresh: () => Promise<void>;
+  onToast: (message: string, kind: ToastKind) => void;
 }) {
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<RecordingStatus | "all">("all");
   const [selectedId, setSelectedId] = useState(recordings[0]?.id);
-  const [busy, setBusy] = useState(false);
+  const { busy, pendingKey, run } = useAsyncAction(onToast);
   const normalized = search.toLocaleLowerCase("pl");
   const filtered = useMemo(() => recordings.filter((item) => {
     const matchesStatus = filter === "all" || item.status === filter;
@@ -42,10 +46,11 @@ export function HistoryPage({
     if (!selectedId && recordings[0]) setSelectedId(recordings[0].id);
   }, [recordings, selectedId]);
 
-  const action = async (fn: () => Promise<unknown>) => {
-    setBusy(true);
-    try { await fn(); await onRefresh(); } finally { setBusy(false); }
-  };
+  const action = (key: string, fn: () => Promise<unknown>) =>
+    run(key, async () => {
+      await fn();
+      await onRefresh();
+    });
 
   return (
     <section className="page history-page">
@@ -90,9 +95,9 @@ export function HistoryPage({
             {selected.error && <p className="error-note">{selected.error}</p>}
             <div className="inspector-actions">
               <button disabled={!selected.text} onClick={() => void navigator.clipboard?.writeText(selected.text ?? "")}><Copy size={15} />Kopiuj</button>
-              <button disabled={!selected.text} onClick={() => void action(() => adapter.pasteTranscript(selected.id))}>Wklej</button>
-              <button disabled={selected.status !== "failed" || !selected.audioPath || busy} onClick={() => void action(() => adapter.retryTranscription(selected.id))}><RotateCcw size={15} />Ponów</button>
-              <button className="danger-button" disabled={["recording", "processing"].includes(selected.status) || busy} onClick={() => void action(() => adapter.deleteHistory(selected.id))}><Trash2 size={15} />Usuń</button>
+              <button disabled={!selected.text || busy} onClick={() => void action("paste", () => adapter.pasteTranscript(selected.id))}>{pendingKey === "paste" ? "Wklejam…" : "Wklej"}</button>
+              <button disabled={selected.status !== "failed" || !selected.audioPath || busy} onClick={() => void action("retry", () => adapter.retryTranscription(selected.id))}><RotateCcw size={15} />{pendingKey === "retry" ? "Ponawiam…" : "Ponów"}</button>
+              <button className="danger-button" disabled={["recording", "processing"].includes(selected.status) || busy} onClick={() => void action("delete", () => adapter.deleteHistory(selected.id))}><Trash2 size={15} />{pendingKey === "delete" ? "Usuwam…" : "Usuń"}</button>
             </div>
           </> : <EmptyState title="Wybierz nagranie" description="Szczegóły pojawią się w tym miejscu." />}
         </aside>

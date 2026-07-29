@@ -730,7 +730,21 @@ impl TryFrom<RawRecording> for Recording {
 pub fn postprocess(text: &str, vocabulary: &[VocabularyEntry]) -> String {
     let whitespace = Regex::new(r"\s+").expect("static whitespace regex is valid");
     let punctuation = Regex::new(r"\s+([,.;:!?])").expect("static punctuation regex is valid");
-    let mut processed = whitespace.replace_all(text.trim(), " ").into_owned();
+    let processed = whitespace.replace_all(text.trim(), " ").into_owned();
+    let processed = apply_vocabulary(processed, vocabulary);
+    punctuation.replace_all(&processed, "$1").into_owned()
+}
+
+pub fn postprocess_for_mode(text: &str, vocabulary: &[VocabularyEntry], mode_id: &str) -> String {
+    if mode_id != "code" {
+        return postprocess(text, vocabulary);
+    }
+    let punctuation = Regex::new(r"[ \t]+([,.;:!?])").expect("static punctuation regex is valid");
+    let processed = apply_vocabulary(text.trim().to_owned(), vocabulary);
+    punctuation.replace_all(&processed, "$1").into_owned()
+}
+
+fn apply_vocabulary(mut processed: String, vocabulary: &[VocabularyEntry]) -> String {
     let mut entries = vocabulary.to_vec();
     entries.sort_by_key(|entry| std::cmp::Reverse(entry.heard.chars().count()));
     for entry in entries {
@@ -744,7 +758,7 @@ pub fn postprocess(text: &str, vocabulary: &[VocabularyEntry]) -> String {
                 .into_owned();
         }
     }
-    punctuation.replace_all(&processed, "$1").into_owned()
+    processed
 }
 
 #[cfg(test)]
@@ -1035,6 +1049,25 @@ mod tests {
             "żółw jest w Nowy Sącz, naprawdę?"
         );
         assert_eq!(postprocess("przyzolwowy", &vocabulary), "przyzolwowy");
+    }
+
+    #[test]
+    fn code_mode_preserves_lines_while_clean_mode_normalizes_them() {
+        let vocabulary = vec![VocabularyEntry {
+            id: 1,
+            heard: "parakit".into(),
+            replacement: "Parakeet".into(),
+        }];
+        let input = "fn main() {\n    parakit () ;\n}";
+
+        assert_eq!(
+            postprocess_for_mode(input, &vocabulary, "clean"),
+            "fn main() { Parakeet (); }"
+        );
+        assert_eq!(
+            postprocess_for_mode(input, &vocabulary, "code"),
+            "fn main() {\n    Parakeet ();\n}"
+        );
     }
 
     #[test]

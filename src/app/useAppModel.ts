@@ -9,6 +9,7 @@ const fallbackSettings: AppSettings = {
   autoPaste: true,
   retentionDays: 30,
   launchOnLogin: true,
+  activeMode: "clean",
 };
 
 export function useAppModel(adapter: AppAdapter, onError: (message: string) => void) {
@@ -31,6 +32,10 @@ export function useAppModel(adapter: AppAdapter, onError: (message: string) => v
   useEffect(() => {
     let active = true;
     const unlisteners: Array<() => void> = [];
+    const keepOrDispose = (unlisten: () => void) => {
+      if (active) unlisteners.push(unlisten);
+      else unlisten();
+    };
     Promise.all([adapter.getAppSnapshot(), adapter.listHistory({})])
       .then(([nextSnapshot, nextHistory]) => {
         if (!active) return;
@@ -47,8 +52,8 @@ export function useAppModel(adapter: AppAdapter, onError: (message: string) => v
       previousStatus.current = next.dictation.status;
       setSnapshot(next);
       if (wasTerminal) void refreshHistory();
-    }).then((unlisten) => unlisteners.push(unlisten));
-    adapter.onError(onError).then((unlisten) => unlisteners.push(unlisten));
+    }).then(keepOrDispose);
+    adapter.onError(onError).then(keepOrDispose);
     return () => {
       active = false;
       unlisteners.forEach((unlisten) => unlisten());

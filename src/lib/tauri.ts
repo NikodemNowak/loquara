@@ -7,6 +7,8 @@ import type {
   HistoryQuery,
   InputDeviceInfo,
   Mode,
+  ModelStatus,
+  PlatformError,
   Recording,
   SettingsUpdateResult,
   VocabularyEntry,
@@ -31,11 +33,21 @@ export interface AppAdapter {
   upsertMode(mode: Mode): Promise<void>;
   deleteMode(id: string): Promise<boolean>;
   getSettings(): Promise<AppSettings>;
+  getModelStatus(): Promise<ModelStatus>;
   updateSettings(settings: AppSettings): Promise<SettingsUpdateResult>;
   updateSettingValue(key: string, value: unknown): Promise<void>;
   onState(listener: Listener<AppSnapshot>): Promise<UnlistenFn>;
   onLevel(listener: Listener<number>): Promise<UnlistenFn>;
   onError(listener: Listener<string>): Promise<UnlistenFn>;
+}
+
+export function platformErrorMessage(payload: unknown): string {
+  if (typeof payload === "string") return payload;
+  if (payload && typeof payload === "object") {
+    const error = payload as PlatformError;
+    if (typeof error.message === "string" && error.message.trim()) return error.message;
+  }
+  return "Nieznany błąd platformy.";
 }
 
 const realAdapter: AppAdapter = {
@@ -58,6 +70,7 @@ const realAdapter: AppAdapter = {
   upsertMode: (mode) => invoke("upsert_mode", { mode }),
   deleteMode: (id) => invoke("delete_mode", { id }),
   getSettings: () => invoke("get_settings"),
+  getModelStatus: () => invoke("get_model_status"),
   updateSettings: (settings) => invoke("update_settings", { settings }),
   updateSettingValue: (key, value) =>
     invoke("update_setting_value", { key, value }),
@@ -66,12 +79,12 @@ const realAdapter: AppAdapter = {
   onLevel: (listener) =>
     listen<number>("dictation://level", (event) => listener(event.payload)),
   onError: async (listener) => {
-    const unlistenPaste = await listen<string>("dictation://paste_error", (event) =>
-      listener(String(event.payload)),
+    const unlistenPaste = await listen<unknown>("dictation://paste_error", (event) =>
+      listener(platformErrorMessage(event.payload)),
     );
     const unlistenPersistence = await listen<string>(
       "dictation://persistence_error",
-      (event) => listener(String(event.payload)),
+      (event) => listener(platformErrorMessage(event.payload)),
     );
     return () => {
       unlistenPaste();
@@ -86,6 +99,7 @@ const initialSettings: AppSettings = {
   autoPaste: true,
   retentionDays: 30,
   launchOnLogin: true,
+  activeMode: "clean",
 };
 
 const demoHistory = (): Recording[] => [
@@ -204,6 +218,13 @@ export function createBrowserAdapter(): AppAdapter {
       return before !== modes.length;
     },
     getSettings: async () => settings,
+    getModelStatus: async () => ({
+      state: "ready",
+      model: "nvidia/parakeet-tdt-0.6b-v3",
+      revision: "7c35754d166cca382ad1e53e68b01e7c575f3a1d",
+      device: null,
+      message: null,
+    }),
     updateSettings: async (next) => {
       settings = { ...next };
       snapshot = { ...snapshot, settings };

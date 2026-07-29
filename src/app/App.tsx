@@ -35,15 +35,15 @@ export function App({ adapter: adapterProp }: { adapter?: AppAdapter }) {
   if (loading) {
     content = <div className="page page-skeleton" aria-label="Wczytywanie"><span /><span /><span /></div>;
   } else if (page === "today") {
-    content = <TodayPage adapter={adapter} snapshot={snapshot} recordings={history} onSnapshot={setSnapshot} onHistory={() => setPage("history")} />;
+    content = <TodayPage adapter={adapter} snapshot={snapshot} recordings={history} onSnapshot={setSnapshot} onHistory={() => setPage("history")} onToast={toast} />;
   } else if (page === "history") {
-    content = <HistoryPage adapter={adapter} recordings={history} onRefresh={refreshHistory} />;
+    content = <HistoryPage adapter={adapter} recordings={history} onRefresh={refreshHistory} onToast={toast} />;
   } else if (page === "vocabulary") {
-    content = <VocabularyPage adapter={adapter} />;
+    content = <VocabularyPage adapter={adapter} onToast={toast} />;
   } else if (page === "modes") {
-    content = <ModesPage adapter={adapter} />;
+    content = <ModesPage adapter={adapter} settings={snapshot.settings} onSettingsChange={(settings) => setSnapshot((current) => ({ ...current, settings }))} onToast={toast} />;
   } else {
-    content = <SettingsPage adapter={adapter} initialSettings={snapshot.settings} onToast={toast} />;
+    content = <SettingsPage adapter={adapter} initialSettings={snapshot.settings} onSettingsChange={(settings) => setSnapshot((current) => ({ ...current, settings }))} onToast={toast} />;
   }
 
   return (

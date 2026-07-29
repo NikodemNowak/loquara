@@ -3,7 +3,7 @@ use crate::domain::{DictationEvent, DictationState, transition};
 use crate::platform::{self, SystemWindows, WindowTarget, WindowsApi};
 use crate::storage::{
     HistoryQuery, Mode, Recording, RecordingStatus, Retention, Storage, StorageError,
-    VocabularyEntry, postprocess,
+    VocabularyEntry, postprocess_for_mode,
 };
 use crate::transcription::{ClientError, TranscriptionResult, WorkerClient};
 use serde::{Deserialize, Serialize};
@@ -179,10 +179,16 @@ pub struct AppSettings {
     pub retention_days: Option<u32>,
     #[serde(default = "default_launch_on_login")]
     pub launch_on_login: bool,
+    #[serde(default = "default_active_mode")]
+    pub active_mode: String,
 }
 
 const fn default_launch_on_login() -> bool {
     true
+}
+
+fn default_active_mode() -> String {
+    "clean".into()
 }
 
 impl Default for AppSettings {
@@ -193,7 +199,67 @@ impl Default for AppSettings {
             auto_paste: true,
             retention_days: Some(30),
             launch_on_login: true,
+            active_mode: default_active_mode(),
         }
+    }
+}
+
+pub const MODEL_ID: &str = "nvidia/parakeet-tdt-0.6b-v3";
+pub const MODEL_REVISION: &str = "7c35754d166cca382ad1e53e68b01e7c575f3a1d";
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelStatusState {
+    Ready,
+    NotInstalled,
+    Error,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelStatus {
+    pub state: ModelStatusState,
+    pub model: String,
+    pub revision: String,
+    pub device: Option<String>,
+    pub message: Option<String>,
+}
+
+fn model_cache_root(
+    explicit_hub: Option<&str>,
+    hf_home: Option<&str>,
+    user_home: &Path,
+) -> PathBuf {
+    explicit_hub
+        .map(PathBuf::from)
+        .or_else(|| hf_home.map(|path| PathBuf::from(path).join("hub")))
+        .unwrap_or_else(|| user_home.join(".cache").join("huggingface").join("hub"))
+}
+
+fn model_snapshot_path(hub: &Path) -> PathBuf {
+    hub.join("models--nvidia--parakeet-tdt-0.6b-v3")
+        .join("snapshots")
+        .join(MODEL_REVISION)
+}
+
+fn model_status_from_hub(hub: &Path) -> ModelStatus {
+    let snapshot = model_snapshot_path(hub);
+    let state = match snapshot.try_exists() {
+        Ok(true) if snapshot.is_dir() => ModelStatusState::Ready,
+        Ok(_) => ModelStatusState::NotInstalled,
+        Err(_) => ModelStatusState::Error,
+    };
+    let message = if state == ModelStatusState::Error {
+        Some("Nie można sprawdzić lokalnego cache modelu.".into())
+    } else {
+        None
+    };
+    ModelStatus {
+        state,
+        model: MODEL_ID.into(),
+        revision: MODEL_REVISION.into(),
+        device: None,
+        message,
     }
 }
 
@@ -789,7 +855,12 @@ fn finish_success(
     result: TranscriptionResult,
 ) {
     let vocabulary = state.storage.list_vocabulary().unwrap_or_default();
-    let transcript = postprocess(&result.text, &vocabulary);
+    let settings = state
+        .settings
+        .read()
+        .map(|settings| settings.clone())
+        .unwrap_or_default();
+    let transcript = postprocess_with_settings(&result.text, &vocabulary, &settings);
     let audio_path = audio_path.to_string_lossy();
     let durable = complete_transcription_durably(
         &state.machine,
@@ -830,6 +901,14 @@ fn finish_success(
         }
     }
     emit_state(app, state);
+}
+
+fn postprocess_with_settings(
+    text: &str,
+    vocabulary: &[VocabularyEntry],
+    settings: &AppSettings,
+) -> String {
+    postprocess_for_mode(text, vocabulary, &settings.active_mode)
 }
 
 fn finish_failure(app: &AppHandle, state: &AppState, recording_id: &str, error: String) {
@@ -1177,6 +1256,26 @@ pub fn get_settings(state: State<'_, AppState>) -> Result<AppSettings, String> {
         .map_err(|_| "settings lock poisoned".into())
 }
 
+#[tauri::command]
+pub fn get_model_status() -> ModelStatus {
+    let explicit_hub = std::env::var("HUGGINGFACE_HUB_CACHE").ok();
+    let hf_home = std::env::var("HF_HOME").ok();
+    let user_home = std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(PathBuf::from);
+    let Some(user_home) = user_home else {
+        return ModelStatus {
+            state: ModelStatusState::Error,
+            model: MODEL_ID.into(),
+            revision: MODEL_REVISION.into(),
+            device: None,
+            message: Some("Nie znaleziono katalogu użytkownika.".into()),
+        };
+    };
+    let hub = model_cache_root(explicit_hub.as_deref(), hf_home.as_deref(), &user_home);
+    model_status_from_hub(&hub)
+}
+
 #[tauri::command(rename_all = "camelCase")]
 pub fn update_settings(
     settings: AppSettings,
@@ -1518,6 +1617,93 @@ mod tests {
     #[test]
     fn settings_default_to_launching_on_login() {
         assert!(AppSettings::default().launch_on_login);
+    }
+
+    #[test]
+    fn settings_from_older_versions_default_to_clean_mode() {
+        let settings: AppSettings = serde_json::from_value(serde_json::json!({
+            "inputDevice": null,
+            "shortcut": "Ctrl+Space",
+            "autoPaste": true,
+            "retentionDays": 30,
+            "launchOnLogin": true
+        }))
+        .unwrap();
+
+        assert_eq!(settings.active_mode, "clean");
+        assert_eq!(
+            serde_json::to_value(settings).unwrap()["activeMode"],
+            serde_json::json!("clean")
+        );
+    }
+
+    #[test]
+    fn model_status_detects_exact_revision_snapshot_only() {
+        let temp = tempfile::tempdir().unwrap();
+        let hub = temp.path().join("hub");
+        let snapshot = model_snapshot_path(&hub);
+        std::fs::create_dir_all(&snapshot).unwrap();
+
+        assert_eq!(
+            model_status_from_hub(&hub),
+            ModelStatus {
+                state: ModelStatusState::Ready,
+                model: MODEL_ID.into(),
+                revision: MODEL_REVISION.into(),
+                device: None,
+                message: None,
+            }
+        );
+
+        std::fs::remove_dir_all(&snapshot).unwrap();
+        std::fs::create_dir_all(
+            hub.join("models--nvidia--parakeet-tdt-0.6b-v3")
+                .join("snapshots")
+                .join("wrong-revision"),
+        )
+        .unwrap();
+        assert_eq!(
+            model_status_from_hub(&hub).state,
+            ModelStatusState::NotInstalled
+        );
+    }
+
+    #[test]
+    fn model_cache_root_prefers_explicit_hub_then_hf_home() {
+        let home = std::path::Path::new("C:/Users/test");
+        assert_eq!(
+            model_cache_root(Some("D:/hub"), Some("E:/hf"), home),
+            std::path::PathBuf::from("D:/hub")
+        );
+        assert_eq!(
+            model_cache_root(None, Some("E:/hf"), home),
+            std::path::PathBuf::from("E:/hf").join("hub")
+        );
+        assert_eq!(
+            model_cache_root(None, None, home),
+            home.join(".cache").join("huggingface").join("hub")
+        );
+    }
+
+    #[test]
+    fn selected_mode_setting_controls_transcript_pipeline() {
+        let vocabulary = vec![VocabularyEntry {
+            id: 1,
+            heard: "parakit".into(),
+            replacement: "Parakeet".into(),
+        }];
+        let input = "pierwsza\n    parakit ;";
+        let mut settings = AppSettings::default();
+
+        assert_eq!(
+            postprocess_with_settings(input, &vocabulary, &settings),
+            "pierwsza Parakeet;"
+        );
+        settings.active_mode = "code".into();
+        assert_eq!(
+            postprocess_with_settings(input, &vocabulary, &settings),
+            "pierwsza\n    Parakeet;"
+        );
     }
 
     struct FailingHistory;

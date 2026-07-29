@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { Check, RotateCcw, Square, X } from "../../components/Icons";
 import type { AppAdapter } from "../../lib/tauri";
 import type { AppSnapshot } from "../../lib/types";
+import { errorMessage } from "../../lib/useAsyncAction";
 
 function timeLabel(seconds: number) {
   return `${String(Math.floor(seconds / 60)).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
@@ -12,13 +13,25 @@ export function RecorderOverlay({ adapter }: { adapter: AppAdapter }) {
   const [snapshot, setSnapshot] = useState<AppSnapshot>();
   const [level, setLevel] = useState(0);
   const [seconds, setSeconds] = useState(0);
+  const [pending, setPending] = useState(false);
+  const [actionError, setActionError] = useState("");
 
   useEffect(() => {
+    let active = true;
     const unlisteners: Array<() => void> = [];
-    void adapter.getAppSnapshot().then(setSnapshot);
-    void adapter.onState(setSnapshot).then((fn) => unlisteners.push(fn));
-    void adapter.onLevel((next) => setLevel(Math.max(0, Math.min(1, next)))).then((fn) => unlisteners.push(fn));
-    return () => unlisteners.forEach((fn) => fn());
+    const keepOrDispose = (unlisten: () => void) => {
+      if (active) unlisteners.push(unlisten);
+      else unlisten();
+    };
+    void adapter.getAppSnapshot().then((next) => {
+      if (active) setSnapshot(next);
+    });
+    void adapter.onState(setSnapshot).then(keepOrDispose);
+    void adapter.onLevel((next) => setLevel(Math.max(0, Math.min(1, next)))).then(keepOrDispose);
+    return () => {
+      active = false;
+      unlisteners.forEach((fn) => fn());
+    };
   }, [adapter]);
 
   useEffect(() => {
@@ -32,11 +45,23 @@ export function RecorderOverlay({ adapter }: { adapter: AppAdapter }) {
   useEffect(() => {
     if (snapshot?.dictation.status !== "recording") return;
     const cancelOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") void adapter.cancelRecording();
+      if (event.key === "Escape") void action(() => adapter.cancelRecording());
     };
     window.addEventListener("keydown", cancelOnEscape);
     return () => window.removeEventListener("keydown", cancelOnEscape);
   }, [adapter, snapshot?.dictation.status]);
+
+  const action = async (command: () => Promise<AppSnapshot>) => {
+    setPending(true);
+    setActionError("");
+    try {
+      await command();
+    } catch (error) {
+      setActionError(errorMessage(error));
+    } finally {
+      setPending(false);
+    }
+  };
 
   const state = snapshot?.dictation ?? { status: "idle" as const };
   const bars = Array.from({ length: 14 }, (_, index) =>
@@ -55,10 +80,10 @@ export function RecorderOverlay({ adapter }: { adapter: AppAdapter }) {
           {bars.map((height, index) => <i key={index} style={{ height }} />)}
         </div>
         <time>{timeLabel(seconds)}</time>
-        <button className="overlay-action overlay-action--stop" aria-label="Zatrzymaj nagrywanie" onClick={() => void adapter.stopRecording()}>
+        <button disabled={pending} className="overlay-action overlay-action--stop" aria-label="Zatrzymaj nagrywanie" onClick={() => void action(() => adapter.stopRecording())}>
           <Square size={13} fill="currentColor" />
         </button>
-        <button className="overlay-cancel" aria-label="Anuluj nagrywanie" title="Anuluj (Esc)" onClick={() => void adapter.cancelRecording()}>
+        <button disabled={pending} className="overlay-cancel" aria-label="Anuluj nagrywanie" title="Anuluj (Esc)" onClick={() => void action(() => adapter.cancelRecording())}>
           <X size={14} /><span>Esc</span>
         </button>
       </>}
@@ -76,10 +101,11 @@ export function RecorderOverlay({ adapter }: { adapter: AppAdapter }) {
           <strong>Nie udało się</strong>
           <span>Audio jest bezpiecznie zapisane</span>
         </div>
-        <button className="text-button danger-text" aria-label="Ponów transkrypcję" onClick={() => void adapter.retryTranscription(state.recovery.recordingId)}>
+        <button disabled={pending} className="text-button danger-text" aria-label="Ponów transkrypcję" onClick={() => void action(() => adapter.retryTranscription(state.recovery.recordingId))}>
           <RotateCcw size={14} /> Ponów
         </button>
       </>}
+      {actionError && <span className="overlay-error" role="alert">{actionError}</span>}
     </main>
   );
 }

@@ -49,6 +49,7 @@ export const settings: AppSettings = {
   autoPaste: true,
   retentionDays: 30,
   launchOnLogin: true,
+  activeMode: "clean",
 };
 
 export const snapshot: AppSnapshot = {
@@ -104,6 +105,13 @@ export function adapterStub(overrides: Partial<AppAdapter> = {}): AppAdapter {
       return index >= 0;
     },
     getSettings: async () => settings,
+    getModelStatus: async () => ({
+      state: "ready",
+      model: "nvidia/parakeet-tdt-0.6b-v3",
+      revision: "7c35754d166cca382ad1e53e68b01e7c575f3a1d",
+      device: null,
+      message: null,
+    }),
     updateSettings: async (next) => ({ settings: next, warning: null }),
     updateSettingValue: async () => undefined,
     onState: async () => () => undefined,

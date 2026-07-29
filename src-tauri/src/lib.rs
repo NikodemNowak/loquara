@@ -170,6 +170,7 @@ pub fn run() {
             dictation::upsert_mode,
             dictation::delete_mode,
             dictation::get_settings,
+            dictation::get_model_status,
             dictation::update_settings,
             dictation::update_setting_value,
         ])

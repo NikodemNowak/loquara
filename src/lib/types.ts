@@ -25,6 +25,20 @@ export interface AppSettings {
   autoPaste: boolean;
   retentionDays: 1 | 7 | 30 | null;
   launchOnLogin: boolean;
+  activeMode: string;
+}
+
+export interface ModelStatus {
+  state: "ready" | "not_installed" | "error";
+  model: string;
+  revision: string;
+  device: string | null;
+  message: string | null;
+}
+
+export interface PlatformError {
+  code: string;
+  message?: string;
 }
 
 export interface AppSnapshot {
