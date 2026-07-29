@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use thiserror::Error;
 
+pub const INTERRUPTED_ERROR: &str = "Previous dictation was interrupted before completion.";
+
 #[derive(Debug, Error)]
 pub enum StorageError {
     #[error("database failed: {0}")]
@@ -135,6 +137,7 @@ impl Storage {
             recordings_dir,
         };
         storage.migrate()?;
+        storage.reconcile_interrupted()?;
         Ok(storage)
     }
 
@@ -453,10 +456,21 @@ impl Storage {
     }
 
     pub fn delete_mode(&self, id: &str) -> Result<bool, StorageError> {
+        if matches!(id, "clean" | "message" | "code") {
+            return Ok(false);
+        }
         Ok(self
             .connection()?
             .execute("DELETE FROM modes WHERE id=?1", [id])?
             > 0)
+    }
+
+    pub fn reconcile_interrupted(&self) -> Result<usize, StorageError> {
+        Ok(self.connection()?.execute(
+            "UPDATE history SET status='failed', error=?1
+             WHERE status IN ('recording','processing')",
+            [INTERRUPTED_ERROR],
+        )?)
     }
 
     pub fn cleanup_retention(
@@ -648,6 +662,61 @@ mod tests {
         assert_eq!(storage.get_mode("custom").unwrap(), Some(custom.clone()));
         assert!(storage.delete_mode("custom").unwrap());
         assert!(storage.get_mode("custom").unwrap().is_none());
+    }
+
+    #[test]
+    fn built_in_modes_cannot_be_deleted_and_custom_deletion_persists() {
+        let temp = tempfile::tempdir().unwrap();
+        let database = temp.path().join("mow.sqlite3");
+        let recordings = temp.path().join("recordings");
+        let storage = Storage::open(&database, &recordings).unwrap();
+        assert!(!storage.delete_mode("clean").unwrap());
+        assert!(storage.get_mode("clean").unwrap().is_some());
+        storage
+            .upsert_mode(&Mode {
+                id: "custom".into(),
+                name: "Własny".into(),
+                description: String::new(),
+                prompt: String::new(),
+                enabled: true,
+                is_default: false,
+                created_at: 99,
+            })
+            .unwrap();
+        drop(storage);
+
+        let reopened = Storage::open(&database, &recordings).unwrap();
+        assert!(reopened.get_mode("custom").unwrap().is_some());
+        assert!(reopened.delete_mode("custom").unwrap());
+        drop(reopened);
+
+        let reopened = Storage::open(&database, &recordings).unwrap();
+        assert!(reopened.get_mode("custom").unwrap().is_none());
+        assert!(reopened.get_mode("clean").unwrap().is_some());
+    }
+
+    #[test]
+    fn reopening_reconciles_interrupted_rows_to_retryable_failed() {
+        let temp = tempfile::tempdir().unwrap();
+        let database = temp.path().join("mow.sqlite3");
+        let recordings = temp.path().join("recordings");
+        let storage = Storage::open(&database, &recordings).unwrap();
+        storage
+            .insert_recording(&recording("recording", RecordingStatus::Recording, None))
+            .unwrap();
+        storage
+            .insert_recording(&recording("processing", RecordingStatus::Processing, None))
+            .unwrap();
+        drop(storage);
+
+        let reopened = Storage::open(&database, &recordings).unwrap();
+
+        for id in ["recording", "processing"] {
+            let row = reopened.get_recording(id).unwrap().unwrap();
+            assert_eq!(row.status, RecordingStatus::Failed);
+            assert_eq!(row.error.as_deref(), Some(INTERRUPTED_ERROR));
+            assert!(row.audio_path.is_some());
+        }
     }
 
     #[test]

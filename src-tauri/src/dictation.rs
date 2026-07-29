@@ -198,6 +198,13 @@ pub struct AppSnapshot {
     pub settings: AppSettings,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingsUpdateResult {
+    pub settings: AppSettings,
+    pub warning: Option<String>,
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub machine: Arc<Mutex<CoordinatorMachine>>,
@@ -206,6 +213,7 @@ pub struct AppState {
     pub worker: Arc<Mutex<Option<WorkerClient>>>,
     pub target_window: Arc<Mutex<Option<WindowTarget>>>,
     pub settings: Arc<RwLock<AppSettings>>,
+    settings_update: Arc<Mutex<()>>,
     python: String,
     worker_path: PathBuf,
 }
@@ -229,6 +237,157 @@ impl TerminalStatusWriter for Storage {
         self.update_status(recording_id, status, None, None, None, error)
             .map(|_| ())
             .map_err(|error| error.to_string())
+    }
+}
+
+pub trait CompletionWriter {
+    fn write_completed(
+        &self,
+        recording_id: &str,
+        text: &str,
+        model: &str,
+        duration_ms: u64,
+    ) -> Result<(), String>;
+    fn write_failed(&self, recording_id: &str, error: &str) -> Result<(), String>;
+}
+
+impl CompletionWriter for Storage {
+    fn write_completed(
+        &self,
+        recording_id: &str,
+        text: &str,
+        model: &str,
+        duration_ms: u64,
+    ) -> Result<(), String> {
+        match self.update_status(
+            recording_id,
+            RecordingStatus::Completed,
+            Some(text),
+            Some(model),
+            Some(duration_ms),
+            None,
+        ) {
+            Ok(true) => Ok(()),
+            Ok(false) => Err("recording disappeared before completion".into()),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
+    fn write_failed(&self, recording_id: &str, error: &str) -> Result<(), String> {
+        self.update_status(
+            recording_id,
+            RecordingStatus::Failed,
+            None,
+            None,
+            None,
+            Some(error),
+        )
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+    }
+}
+
+pub struct DurableTranscript<'a> {
+    pub recording_id: &'a str,
+    pub audio_path: &'a str,
+    pub transcript: &'a str,
+    pub model: &'a str,
+    pub duration_ms: u64,
+}
+
+pub fn complete_transcription_durably(
+    machine: &Mutex<CoordinatorMachine>,
+    history: &impl CompletionWriter,
+    completed: DurableTranscript<'_>,
+    after_commit: impl FnOnce(),
+) -> Result<(), String> {
+    if let Err(error) = history.write_completed(
+        completed.recording_id,
+        completed.transcript,
+        completed.model,
+        completed.duration_ms,
+    ) {
+        let _ = history.write_failed(completed.recording_id, &error);
+        let mut machine = machine
+            .lock()
+            .map_err(|_| "coordinator lock poisoned".to_owned())?;
+        machine.state = DictationState::Failed {
+            recovery: crate::domain::RecoveryRecording {
+                recording_id: completed.recording_id.to_owned(),
+                audio_path: completed.audio_path.to_owned(),
+            },
+            error: error.clone(),
+        };
+        return Err(error);
+    }
+    {
+        let mut machine = machine
+            .lock()
+            .map_err(|_| "coordinator lock poisoned".to_owned())?;
+        machine
+            .transcription_succeeded(completed.transcript)
+            .map_err(|error| error.to_string())?;
+    }
+    after_commit();
+    machine
+        .lock()
+        .map_err(|_| "coordinator lock poisoned".to_owned())?
+        .paste_completed()
+        .map_err(|error| error.to_string())
+}
+
+pub trait ShortcutSettingsEffect {
+    fn validate(&self, shortcut: &str) -> Result<(), String>;
+    fn replace(&mut self, old: &str, new: &str) -> Result<(), String>;
+}
+
+pub trait AutostartSettingsEffect {
+    fn apply(&mut self, enabled: bool) -> Result<(), String>;
+}
+
+pub trait SettingsStoreEffect {
+    fn save(&mut self, settings: &AppSettings) -> Result<(), String>;
+    fn cleanup_retention(&mut self) -> Result<(), String>;
+}
+
+pub fn apply_settings_change(
+    shortcuts: &mut impl ShortcutSettingsEffect,
+    autostart: &mut impl AutostartSettingsEffect,
+    storage: &mut impl SettingsStoreEffect,
+    live: &mut AppSettings,
+    new: AppSettings,
+) -> Result<SettingsUpdateResult, String> {
+    shortcuts.validate(&new.shortcut)?;
+    let old = live.clone();
+    shortcuts.replace(&old.shortcut, &new.shortcut)?;
+    if let Err(error) = autostart.apply(new.launch_on_login) {
+        let autostart_rollback = autostart.apply(old.launch_on_login);
+        let shortcut_rollback = shortcuts.replace(&new.shortcut, &old.shortcut);
+        return Err(with_rollback_error(
+            with_rollback_error(error, autostart_rollback),
+            shortcut_rollback,
+        ));
+    }
+    if let Err(error) = storage.save(&new) {
+        let autostart_rollback = autostart.apply(old.launch_on_login);
+        let shortcut_rollback = shortcuts.replace(&new.shortcut, &old.shortcut);
+        return Err(with_rollback_error(
+            with_rollback_error(error, autostart_rollback),
+            shortcut_rollback,
+        ));
+    }
+    *live = new.clone();
+    let warning = storage.cleanup_retention().err();
+    Ok(SettingsUpdateResult {
+        settings: new,
+        warning,
+    })
+}
+
+fn with_rollback_error(error: String, rollback: Result<(), String>) -> String {
+    match rollback {
+        Ok(()) => error,
+        Err(rollback) => format!("{error}; rollback failed: {rollback}"),
     }
 }
 
@@ -285,6 +444,7 @@ impl AppState {
             worker: Arc::new(Mutex::new(None)),
             target_window: Arc::new(Mutex::new(None)),
             settings: Arc::new(RwLock::new(settings)),
+            settings_update: Arc::new(Mutex::new(())),
             python: python.into(),
             worker_path: worker_path.into(),
         }
@@ -303,6 +463,52 @@ impl AppState {
                 .map_err(|_| "settings lock poisoned")?
                 .clone(),
         })
+    }
+}
+
+struct TauriShortcutSettings<'a> {
+    app: &'a AppHandle,
+}
+
+impl ShortcutSettingsEffect for TauriShortcutSettings<'_> {
+    fn validate(&self, shortcut: &str) -> Result<(), String> {
+        crate::platform::Shortcut::parse(shortcut)
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+
+    fn replace(&mut self, old: &str, new: &str) -> Result<(), String> {
+        platform::replace_toggle_shortcut(self.app, old, new).map_err(|error| error.to_string())
+    }
+}
+
+struct TauriAutostartSettings<'a> {
+    app: &'a AppHandle,
+}
+
+impl AutostartSettingsEffect for TauriAutostartSettings<'_> {
+    fn apply(&mut self, enabled: bool) -> Result<(), String> {
+        platform::sync_autostart(self.app, enabled).map_err(|error| error.to_string())
+    }
+}
+
+struct PersistentSettings<'a> {
+    storage: &'a Storage,
+    retention: Retention,
+}
+
+impl SettingsStoreEffect for PersistentSettings<'_> {
+    fn save(&mut self, settings: &AppSettings) -> Result<(), String> {
+        self.storage
+            .set_setting("app", settings)
+            .map_err(|error| error.to_string())
+    }
+
+    fn cleanup_retention(&mut self) -> Result<(), String> {
+        self.storage
+            .cleanup_retention(self.retention, epoch_ms())
+            .map(|_| ())
+            .map_err(|error| error.to_string())
     }
 }
 
@@ -509,7 +715,7 @@ async fn transcribe_recording(
     })
     .await;
     match outcome {
-        Ok(Ok(result)) => finish_success(&app, &state, &recording_id, result),
+        Ok(Ok(result)) => finish_success(&app, &state, &recording_id, &audio_path, result),
         Ok(Err(error)) => finish_failure(&app, &state, &recording_id, error.to_string()),
         Err(error) => finish_failure(&app, &state, &recording_id, error.to_string()),
     }
@@ -519,55 +725,55 @@ fn finish_success(
     app: &AppHandle,
     state: &AppState,
     recording_id: &str,
+    audio_path: &Path,
     result: TranscriptionResult,
 ) {
     let vocabulary = state.storage.list_vocabulary().unwrap_or_default();
     let transcript = postprocess(&result.text, &vocabulary);
-    let _ = state.storage.update_status(
-        recording_id,
-        RecordingStatus::Completed,
-        Some(&transcript),
-        Some(&result.model),
-        Some(result.duration_ms),
-        None,
+    let audio_path = audio_path.to_string_lossy();
+    let durable = complete_transcription_durably(
+        &state.machine,
+        state.storage.as_ref(),
+        DurableTranscript {
+            recording_id,
+            audio_path: &audio_path,
+            transcript: &transcript,
+            model: &result.model,
+            duration_ms: result.duration_ms,
+        },
+        || {
+            emit_state(app, state);
+            let auto_paste = state
+                .settings
+                .read()
+                .map(|settings| settings.auto_paste)
+                .unwrap_or(false);
+            if auto_paste {
+                let target = state.target_window.lock().ok().and_then(|target| *target);
+                let mut windows = SystemWindows;
+                if let Err(error) = platform::copy_and_paste(&mut windows, target, &transcript) {
+                    let _ = app.emit("dictation://paste_error", error);
+                }
+            } else {
+                let mut windows = SystemWindows;
+                if let Err(error) = windows.write_clipboard(&transcript) {
+                    let _ = app.emit("dictation://paste_error", error);
+                }
+            }
+        },
     );
-    if let Ok(mut machine) = state.machine.lock() {
-        let _ = machine.transcription_succeeded(transcript.clone());
-    }
-    emit_state(app, state);
-    let auto_paste = state
-        .settings
-        .read()
-        .map(|settings| settings.auto_paste)
-        .unwrap_or(false);
-    if auto_paste {
-        let target = state.target_window.lock().ok().and_then(|target| *target);
-        let mut windows = SystemWindows;
-        if let Err(error) = platform::copy_and_paste(&mut windows, target, &transcript) {
-            let _ = app.emit("dictation://paste_error", error);
-        }
+    if durable.is_ok() {
+        platform::hide_overlay(app);
     } else {
-        let mut windows = SystemWindows;
-        if let Err(error) = windows.write_clipboard(&transcript) {
-            let _ = app.emit("dictation://paste_error", error);
+        if let Err(error) = durable {
+            let _ = app.emit("dictation://persistence_error", error);
         }
     }
-    if let Ok(mut machine) = state.machine.lock() {
-        let _ = machine.paste_completed();
-    }
-    platform::hide_overlay(app);
     emit_state(app, state);
 }
 
 fn finish_failure(app: &AppHandle, state: &AppState, recording_id: &str, error: String) {
-    let _ = state.storage.update_status(
-        recording_id,
-        RecordingStatus::Failed,
-        None,
-        None,
-        None,
-        Some(&error),
-    );
+    let _ = state.storage.write_failed(recording_id, &error);
     if let Ok(mut machine) = state.machine.lock() {
         let _ = machine.transcription_failed(error);
     }
@@ -841,20 +1047,35 @@ pub fn update_settings(
     settings: AppSettings,
     app: AppHandle,
     state: State<'_, AppState>,
-) -> Result<AppSettings, String> {
-    retention_policy(settings.retention_days)?;
-    platform::register_shortcuts(&app, &settings.shortcut).map_err(|error| error.to_string())?;
-    platform::sync_autostart(&app, settings.launch_on_login).map_err(|error| error.to_string())?;
-    state
-        .storage
-        .set_setting("app", &settings)
-        .map_err(|error| error.to_string())?;
+) -> Result<SettingsUpdateResult, String> {
+    let retention = retention_policy(settings.retention_days)?;
+    let _update_guard = state
+        .settings_update
+        .lock()
+        .map_err(|_| "settings update lock poisoned")?;
+    let mut live = state
+        .settings
+        .read()
+        .map_err(|_| "settings lock poisoned")?
+        .clone();
+    let mut shortcut_effect = TauriShortcutSettings { app: &app };
+    let mut autostart_effect = TauriAutostartSettings { app: &app };
+    let mut storage_effect = PersistentSettings {
+        storage: state.storage.as_ref(),
+        retention,
+    };
+    let result = apply_settings_change(
+        &mut shortcut_effect,
+        &mut autostart_effect,
+        &mut storage_effect,
+        &mut live,
+        settings,
+    )?;
     *state
         .settings
         .write()
-        .map_err(|_| "settings lock poisoned")? = settings.clone();
-    cleanup_retention(&state)?;
-    Ok(settings)
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = live;
+    Ok(result)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -984,5 +1205,281 @@ mod tests {
 
         assert_eq!(result.unwrap_err(), "database unavailable");
         assert_eq!(machine.lock().unwrap().snapshot(), DictationState::Idle);
+    }
+
+    #[derive(Default)]
+    struct OneShotCompletion {
+        completed_attempts: std::cell::Cell<usize>,
+        failed_attempts: std::cell::Cell<usize>,
+    }
+
+    impl CompletionWriter for OneShotCompletion {
+        fn write_completed(
+            &self,
+            _recording_id: &str,
+            _text: &str,
+            _model: &str,
+            _duration_ms: u64,
+        ) -> Result<(), String> {
+            let attempts = self.completed_attempts.get();
+            self.completed_attempts.set(attempts + 1);
+            if attempts == 0 {
+                Err("completed write failed".into())
+            } else {
+                Ok(())
+            }
+        }
+
+        fn write_failed(&self, _recording_id: &str, _error: &str) -> Result<(), String> {
+            self.failed_attempts.set(self.failed_attempts.get() + 1);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn terminal_write_failure_never_pastes_and_moves_to_failed() {
+        let machine = Mutex::new(CoordinatorMachine {
+            state: DictationState::Processing {
+                recording_id: "one".into(),
+                audio_path: "one.wav".into(),
+            },
+        });
+        let storage = OneShotCompletion::default();
+        let paste_calls = std::cell::Cell::new(0);
+
+        let first = complete_transcription_durably(
+            &machine,
+            &storage,
+            DurableTranscript {
+                recording_id: "one",
+                audio_path: "one.wav",
+                transcript: "tekst",
+                model: "model",
+                duration_ms: 10,
+            },
+            || paste_calls.set(paste_calls.get() + 1),
+        );
+
+        assert_eq!(first.unwrap_err(), "completed write failed");
+        assert_eq!(paste_calls.get(), 0);
+        assert_eq!(storage.failed_attempts.get(), 1);
+        assert!(matches!(
+            machine.lock().unwrap().snapshot(),
+            DictationState::Failed { .. }
+        ));
+    }
+
+    #[test]
+    fn paste_runs_only_after_completed_is_durable() {
+        let machine = Mutex::new(CoordinatorMachine {
+            state: DictationState::Processing {
+                recording_id: "one".into(),
+                audio_path: "one.wav".into(),
+            },
+        });
+        let storage = OneShotCompletion::default();
+        storage.completed_attempts.set(1);
+        let paste_calls = std::cell::Cell::new(0);
+
+        complete_transcription_durably(
+            &machine,
+            &storage,
+            DurableTranscript {
+                recording_id: "one",
+                audio_path: "one.wav",
+                transcript: "tekst",
+                model: "model",
+                duration_ms: 10,
+            },
+            || paste_calls.set(paste_calls.get() + 1),
+        )
+        .unwrap();
+
+        assert_eq!(paste_calls.get(), 1);
+        assert_eq!(machine.lock().unwrap().snapshot(), DictationState::Idle);
+    }
+
+    struct FakeRegistrar {
+        active: String,
+        fail_target: Option<String>,
+    }
+
+    impl ShortcutSettingsEffect for FakeRegistrar {
+        fn validate(&self, shortcut: &str) -> Result<(), String> {
+            crate::platform::Shortcut::parse(shortcut)
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        }
+
+        fn replace(&mut self, _old: &str, new: &str) -> Result<(), String> {
+            if self.fail_target.as_deref() == Some(new) {
+                return Err("shortcut conflict".into());
+            }
+            self.active = new.into();
+            Ok(())
+        }
+    }
+
+    struct FakeAutostart {
+        enabled: bool,
+        fail_value: Option<bool>,
+    }
+
+    impl AutostartSettingsEffect for FakeAutostart {
+        fn apply(&mut self, enabled: bool) -> Result<(), String> {
+            self.enabled = enabled;
+            if self.fail_value == Some(enabled) {
+                return Err("autostart failed".into());
+            }
+            Ok(())
+        }
+    }
+
+    struct FakeSettingsStore {
+        saved: AppSettings,
+        fail_save: bool,
+        cleanup_error: Option<String>,
+    }
+
+    impl SettingsStoreEffect for FakeSettingsStore {
+        fn save(&mut self, settings: &AppSettings) -> Result<(), String> {
+            if self.fail_save {
+                return Err("database failed".into());
+            }
+            self.saved = settings.clone();
+            Ok(())
+        }
+
+        fn cleanup_retention(&mut self) -> Result<(), String> {
+            self.cleanup_error.clone().map_or(Ok(()), Err)
+        }
+    }
+
+    fn changed_settings() -> (AppSettings, AppSettings) {
+        let old = AppSettings::default();
+        let new = AppSettings {
+            shortcut: "Alt+Space".into(),
+            launch_on_login: false,
+            retention_days: Some(7),
+            ..old.clone()
+        };
+        (old, new)
+    }
+
+    #[test]
+    fn shortcut_conflict_keeps_all_old_settings_active() {
+        let (mut live, new) = changed_settings();
+        let old = live.clone();
+        let mut registrar = FakeRegistrar {
+            active: old.shortcut.clone(),
+            fail_target: Some(new.shortcut.clone()),
+        };
+        let mut autostart = FakeAutostart {
+            enabled: old.launch_on_login,
+            fail_value: None,
+        };
+        let mut store = FakeSettingsStore {
+            saved: old.clone(),
+            fail_save: false,
+            cleanup_error: None,
+        };
+
+        assert!(
+            apply_settings_change(&mut registrar, &mut autostart, &mut store, &mut live, new)
+                .is_err()
+        );
+        assert_eq!(registrar.active, old.shortcut);
+        assert_eq!(autostart.enabled, old.launch_on_login);
+        assert_eq!(store.saved, old);
+        assert_eq!(live, store.saved);
+    }
+
+    #[test]
+    fn autostart_failure_rolls_back_shortcut_and_live_settings() {
+        let (mut live, new) = changed_settings();
+        let old = live.clone();
+        let mut registrar = FakeRegistrar {
+            active: old.shortcut.clone(),
+            fail_target: None,
+        };
+        let mut autostart = FakeAutostart {
+            enabled: old.launch_on_login,
+            fail_value: Some(new.launch_on_login),
+        };
+        let mut store = FakeSettingsStore {
+            saved: old.clone(),
+            fail_save: false,
+            cleanup_error: None,
+        };
+
+        assert!(
+            apply_settings_change(&mut registrar, &mut autostart, &mut store, &mut live, new)
+                .is_err()
+        );
+        assert_eq!(registrar.active, old.shortcut);
+        assert_eq!(autostart.enabled, old.launch_on_login);
+        assert_eq!(live, old);
+    }
+
+    #[test]
+    fn database_failure_rolls_back_shortcut_autostart_and_live_settings() {
+        let (mut live, new) = changed_settings();
+        let old = live.clone();
+        let mut registrar = FakeRegistrar {
+            active: old.shortcut.clone(),
+            fail_target: None,
+        };
+        let mut autostart = FakeAutostart {
+            enabled: old.launch_on_login,
+            fail_value: None,
+        };
+        let mut store = FakeSettingsStore {
+            saved: old.clone(),
+            fail_save: true,
+            cleanup_error: None,
+        };
+
+        assert!(
+            apply_settings_change(&mut registrar, &mut autostart, &mut store, &mut live, new)
+                .is_err()
+        );
+        assert_eq!(registrar.active, old.shortcut);
+        assert_eq!(autostart.enabled, old.launch_on_login);
+        assert_eq!(live, old);
+    }
+
+    #[test]
+    fn successful_settings_commit_returns_cleanup_warning_without_rollback() {
+        let (mut live, new) = changed_settings();
+        let old = live.clone();
+        let mut registrar = FakeRegistrar {
+            active: old.shortcut.clone(),
+            fail_target: None,
+        };
+        let mut autostart = FakeAutostart {
+            enabled: old.launch_on_login,
+            fail_value: None,
+        };
+        let mut store = FakeSettingsStore {
+            saved: old,
+            fail_save: false,
+            cleanup_error: Some("cleanup locked".into()),
+        };
+
+        let result = apply_settings_change(
+            &mut registrar,
+            &mut autostart,
+            &mut store,
+            &mut live,
+            new.clone(),
+        )
+        .unwrap();
+
+        assert_eq!(result.settings, new);
+        assert_eq!(result.warning.as_deref(), Some("cleanup locked"));
+        assert_eq!(registrar.active, new.shortcut);
+        assert_eq!(autostart.enabled, new.launch_on_login);
+        assert_eq!(store.saved, new);
+        assert_eq!(live, new);
     }
 }

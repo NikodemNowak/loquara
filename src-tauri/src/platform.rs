@@ -266,6 +266,27 @@ pub fn register_shortcuts<R: Runtime>(
         .map_err(|error| PlatformError::ShortcutRegistration(error.to_string()))
 }
 
+pub fn replace_toggle_shortcut<R: Runtime>(
+    app: &AppHandle<R>,
+    old: &str,
+    new: &str,
+) -> Result<(), PlatformError> {
+    let old = Shortcut::parse(old)?.to_string();
+    let new = Shortcut::parse(new)?.to_string();
+    if old == new {
+        return Ok(());
+    }
+    let manager = app.global_shortcut();
+    manager
+        .register(new.as_str())
+        .map_err(|error| PlatformError::ShortcutRegistration(error.to_string()))?;
+    if let Err(error) = manager.unregister(old.as_str()) {
+        let _ = manager.unregister(new.as_str());
+        return Err(PlatformError::ShortcutRegistration(error.to_string()));
+    }
+    Ok(())
+}
+
 pub fn show_main<R: Runtime>(app: &AppHandle<R>) -> Result<(), PlatformError> {
     let window = app
         .get_webview_window("main")
