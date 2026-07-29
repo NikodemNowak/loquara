@@ -1,0 +1,14 @@
+node_modules/
+dist/
+target/
+.worktrees/
+.env
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.wav
+models/
+recordings/
+*.log
+
