@@ -494,7 +494,7 @@ impl Storage {
 
         let mut retryable_ids = Vec::new();
         let mut interrupted_before_finalize_ids = Vec::new();
-        for (id, status, audio_path) in interrupted {
+        for (id, _status, audio_path) in interrupted {
             let final_path = audio_path.as_deref().map(Path::new);
             let has_managed_final = final_path.is_some_and(|path| {
                 path.canonicalize().is_ok_and(|canonical| {
@@ -507,7 +507,7 @@ impl Storage {
                             .is_some_and(|extension| extension == "wav")
                 })
             });
-            if status == RecordingStatus::Processing && has_managed_final {
+            if has_managed_final {
                 retryable_ids.push(id);
                 continue;
             }
@@ -845,6 +845,32 @@ mod tests {
         );
         assert!(malicious_row.audio_path.is_none());
         assert!(malicious_partial.is_file());
+    }
+
+    #[test]
+    fn reopening_preserves_finalized_audio_from_recording_stop_crash_window() {
+        let temp = tempfile::tempdir().unwrap();
+        let database = temp.path().join("mow.sqlite3");
+        let recordings = temp.path().join("recordings");
+        fs::create_dir_all(&recordings).unwrap();
+        let final_audio = recordings.join("recording-final.wav");
+        fs::write(&final_audio, b"wav").unwrap();
+        let storage = Storage::open(&database, &recordings).unwrap();
+        let mut row = recording("recording-final", RecordingStatus::Recording, None);
+        row.audio_path = Some(final_audio.to_string_lossy().into_owned());
+        storage.insert_recording(&row).unwrap();
+        drop(storage);
+
+        let reopened = Storage::open(&database, &recordings).unwrap();
+
+        let recovered = reopened.get_recording("recording-final").unwrap().unwrap();
+        assert_eq!(recovered.status, RecordingStatus::Failed);
+        assert_eq!(recovered.error.as_deref(), Some(INTERRUPTED_ERROR));
+        assert_eq!(
+            recovered.audio_path.as_deref(),
+            Some(final_audio.to_string_lossy().as_ref())
+        );
+        assert!(final_audio.is_file());
     }
 
     #[test]
