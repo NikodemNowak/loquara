@@ -8,7 +8,8 @@ use crate::storage::{
 use crate::transcription::{ClientError, TranscriptionResult, WorkerClient};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::path::{Path, PathBuf};
+use std::collections::BTreeSet;
+use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, State};
@@ -242,6 +243,67 @@ fn model_snapshot_path(hub: &Path) -> PathBuf {
         .join(MODEL_REVISION)
 }
 
+fn nonempty_file(path: &Path) -> Result<bool, std::io::Error> {
+    match std::fs::metadata(path) {
+        Ok(metadata) => Ok(metadata.is_file() && metadata.len() > 0),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+fn model_weight_artifacts(snapshot: &Path) -> Result<Vec<String>, String> {
+    for name in ["model.safetensors", "pytorch_model.bin"] {
+        if nonempty_file(&snapshot.join(name)).map_err(|error| error.to_string())? {
+            return Ok(Vec::new());
+        }
+    }
+
+    for index_name in [
+        "model.safetensors.index.json",
+        "pytorch_model.bin.index.json",
+    ] {
+        let index_path = snapshot.join(index_name);
+        if !nonempty_file(&index_path).map_err(|error| error.to_string())? {
+            continue;
+        }
+        let bytes = std::fs::read(&index_path).map_err(|error| error.to_string())?;
+        let index: Value = serde_json::from_slice(&bytes)
+            .map_err(|error| format!("Nieprawidłowy {index_name}: {error}"))?;
+        let weight_map = index
+            .get("weight_map")
+            .and_then(Value::as_object)
+            .filter(|map| !map.is_empty())
+            .ok_or_else(|| format!("{index_name} nie zawiera niepustego weight_map"))?;
+        let mut shards = BTreeSet::new();
+        for value in weight_map.values() {
+            let shard = value
+                .as_str()
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| format!("{index_name} zawiera nieprawidłową nazwę sharda"))?;
+            let shard_path = Path::new(shard);
+            if shard_path.is_absolute()
+                || !shard_path
+                    .components()
+                    .all(|component| matches!(component, Component::Normal(_)))
+            {
+                return Err(format!(
+                    "{index_name} zawiera niedozwoloną ścieżkę sharda: {shard}"
+                ));
+            }
+            shards.insert(shard.to_owned());
+        }
+        let mut missing = Vec::new();
+        for shard in shards {
+            if !nonempty_file(&snapshot.join(&shard)).map_err(|error| error.to_string())? {
+                missing.push(shard);
+            }
+        }
+        return Ok(missing);
+    }
+
+    Ok(vec!["model.safetensors lub pytorch_model.bin".into()])
+}
+
 fn model_status_from_hub(hub: &Path) -> ModelStatus {
     let snapshot = model_snapshot_path(hub);
     let artifact = |names: &[&str]| -> Result<bool, std::io::Error> {
@@ -263,21 +325,7 @@ fn model_status_from_hub(hub: &Path) -> ModelStatus {
             "processor_config.json / preprocessor_config.json",
         ),
         (
-            &[
-                "model.safetensors",
-                "model.safetensors.index.json",
-                "pytorch_model.bin",
-                "pytorch_model.bin.index.json",
-            ][..],
-            "model.safetensors lub pytorch_model.bin",
-        ),
-        (
-            &[
-                "tokenizer.json",
-                "tokenizer_config.json",
-                "tokenizer.model",
-                "vocab.json",
-            ][..],
+            &["tokenizer.json", "tokenizer.model", "vocab.json"][..],
             "artefakt tokenizera",
         ),
     ];
@@ -296,11 +344,17 @@ fn model_status_from_hub(hub: &Path) -> ModelStatus {
             for (names, label) in required {
                 match artifact(names) {
                     Ok(true) => {}
-                    Ok(false) => missing.push(label),
+                    Ok(false) => missing.push(label.to_owned()),
                     Err(io_error) => {
-                        error = Some(io_error);
+                        error = Some(io_error.to_string());
                         break;
                     }
+                }
+            }
+            if error.is_none() {
+                match model_weight_artifacts(&snapshot) {
+                    Ok(weight_missing) => missing.extend(weight_missing),
+                    Err(weight_error) => error = Some(weight_error),
                 }
             }
             if let Some(error) = error {
@@ -1838,6 +1892,111 @@ mod tests {
             model_status_from_hub(&hub).state,
             ModelStatusState::NotInstalled
         );
+    }
+
+    #[test]
+    fn model_status_rejects_tokenizer_config_without_tokenizer_data() {
+        let temp = tempfile::tempdir().unwrap();
+        let hub = temp.path().join("hub");
+        let snapshot = model_snapshot_path(&hub);
+        std::fs::create_dir_all(&snapshot).unwrap();
+        write_artifact(&snapshot, "config.json");
+        write_artifact(&snapshot, "processor_config.json");
+        write_artifact(&snapshot, "model.safetensors");
+        write_artifact(&snapshot, "tokenizer_config.json");
+
+        let status = model_status_from_hub(&hub);
+        assert_eq!(status.state, ModelStatusState::NotInstalled);
+        assert!(status.message.unwrap().contains("tokenizera"));
+    }
+
+    fn write_model_index(snapshot: &Path, weight_map: serde_json::Value) {
+        std::fs::write(
+            snapshot.join("model.safetensors.index.json"),
+            serde_json::to_vec(&serde_json::json!({ "weight_map": weight_map })).unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn write_non_weight_model_artifacts(snapshot: &Path) {
+        write_artifact(snapshot, "config.json");
+        write_artifact(snapshot, "processor_config.json");
+        write_artifact(snapshot, "tokenizer.json");
+    }
+
+    #[test]
+    fn model_status_rejects_weight_index_with_missing_shard() {
+        let temp = tempfile::tempdir().unwrap();
+        let hub = temp.path().join("hub");
+        let snapshot = model_snapshot_path(&hub);
+        std::fs::create_dir_all(&snapshot).unwrap();
+        write_non_weight_model_artifacts(&snapshot);
+        write_model_index(
+            &snapshot,
+            serde_json::json!({
+                "encoder": "model-00001-of-00002.safetensors",
+                "decoder": "model-00002-of-00002.safetensors"
+            }),
+        );
+        write_artifact(&snapshot, "model-00001-of-00002.safetensors");
+
+        let status = model_status_from_hub(&hub);
+        assert_eq!(status.state, ModelStatusState::NotInstalled);
+        assert!(
+            status
+                .message
+                .unwrap()
+                .contains("model-00002-of-00002.safetensors")
+        );
+    }
+
+    #[test]
+    fn model_status_accepts_weight_index_when_every_unique_shard_is_nonempty() {
+        let temp = tempfile::tempdir().unwrap();
+        let hub = temp.path().join("hub");
+        let snapshot = model_snapshot_path(&hub);
+        std::fs::create_dir_all(&snapshot).unwrap();
+        write_non_weight_model_artifacts(&snapshot);
+        write_model_index(
+            &snapshot,
+            serde_json::json!({
+                "encoder.layer.0": "model-00001-of-00002.safetensors",
+                "encoder.layer.1": "model-00001-of-00002.safetensors",
+                "decoder": "model-00002-of-00002.safetensors"
+            }),
+        );
+        write_artifact(&snapshot, "model-00001-of-00002.safetensors");
+        write_artifact(&snapshot, "model-00002-of-00002.safetensors");
+
+        assert_eq!(model_status_from_hub(&hub).state, ModelStatusState::Ready);
+    }
+
+    #[test]
+    fn model_status_rejects_weight_index_path_traversal() {
+        let temp = tempfile::tempdir().unwrap();
+        let hub = temp.path().join("hub");
+        let snapshot = model_snapshot_path(&hub);
+        std::fs::create_dir_all(&snapshot).unwrap();
+        write_non_weight_model_artifacts(&snapshot);
+        write_model_index(
+            &snapshot,
+            serde_json::json!({ "encoder": "../outside.safetensors" }),
+        );
+        write_artifact(snapshot.parent().unwrap(), "outside.safetensors");
+
+        assert_ne!(model_status_from_hub(&hub).state, ModelStatusState::Ready);
+    }
+
+    #[test]
+    fn model_status_rejects_invalid_weight_index_json() {
+        let temp = tempfile::tempdir().unwrap();
+        let hub = temp.path().join("hub");
+        let snapshot = model_snapshot_path(&hub);
+        std::fs::create_dir_all(&snapshot).unwrap();
+        write_non_weight_model_artifacts(&snapshot);
+        std::fs::write(snapshot.join("model.safetensors.index.json"), b"{").unwrap();
+
+        assert_eq!(model_status_from_hub(&hub).state, ModelStatusState::Error);
     }
 
     #[test]

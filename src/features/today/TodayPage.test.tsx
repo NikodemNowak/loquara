@@ -21,6 +21,40 @@ function renderState(state: DictationState, overrides = {}) {
 }
 
 describe("CTA strony Dzisiaj", () => {
+  test("aktualizuje oba zestawy klawiszy po zmianie skonfigurowanego skrótu", () => {
+    const props = {
+      adapter: adapterStub(),
+      recordings: [],
+      onSnapshot: () => undefined,
+      onHistory: () => undefined,
+      onToast: () => undefined,
+    };
+    const { rerender } = render(<TodayPage
+      {...props}
+      snapshot={{ dictation: { status: "idle" }, settings }}
+    />);
+    expect(screen.getAllByLabelText("Skrót klawiszowy: Ctrl + Space")).toHaveLength(2);
+
+    rerender(<TodayPage
+      {...props}
+      snapshot={{
+        dictation: { status: "idle" },
+        settings: { ...settings, shortcut: "Ctrl+Shift+M" },
+      }}
+    />);
+
+    const shortcuts = screen.getAllByLabelText("Skrót klawiszowy: Ctrl + Shift + M");
+    expect(shortcuts).toHaveLength(2);
+    for (const shortcut of shortcuts) {
+      expect(Array.from(shortcut.querySelectorAll("kbd"), (key) => key.textContent)).toEqual([
+        "Ctrl",
+        "Shift",
+        "M",
+      ]);
+    }
+    expect(screen.queryByText("Spacja")).not.toBeInTheDocument();
+  });
+
   test.each([
     [{ status: "processing", recordingId: "a", audioPath: "a.wav" }, "Przepisuję…"],
     [{ status: "pasting", recordingId: "a", audioPath: "a.wav", transcript: "tekst" }, "Wklejam…"],

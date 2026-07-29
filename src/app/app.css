@@ -36,6 +36,7 @@ button:disabled { cursor: not-allowed; opacity: .48; }
 .record-cta > span:nth-child(2) { display: grid; gap: 5px; }.record-cta strong { font-size: 22px; letter-spacing: -.025em; }.record-cta small { color: var(--muted); }
 .record-cta--active { border-color: var(--danger); }.record-cta--active .record-cta__icon { animation: record-pulse 1.6s ease-in-out infinite; }
 .shortcut { display: flex; align-items: center; gap: 7px; margin-left: auto; color: var(--muted); }.shortcut kbd { min-width: 38px; padding: 7px 10px; border: 1px solid var(--border-strong); border-bottom-width: 2px; border-radius: 6px; background: var(--surface-subtle); text-align: center; font-size: 12px; }.shortcut b { font-weight: 400; }
+.shortcut--inline { display: inline-flex; margin-left: 6px; vertical-align: middle; }.shortcut--inline kbd { min-width: 0; padding: 3px 7px; }
 .stats-strip { display: grid; grid-template-columns: repeat(3, 1fr); margin: 18px 0 32px; border: 1px solid var(--border); border-radius: 9px; background: var(--surface); }
 .stats-strip div { display: grid; gap: 3px; padding: 14px 18px; }.stats-strip div + div { border-left: 1px solid var(--border); }.stats-strip strong { font-size: 18px; }.stats-strip span { color: var(--muted); font-size: 11px; }
 .section-heading { display: flex; align-items: end; justify-content: space-between; margin: 0 0 12px; }.section-heading h2 { margin: 0 0 3px; font-size: 16px; }.section-heading p { margin: 0; color: var(--muted); font-size: 12px; }

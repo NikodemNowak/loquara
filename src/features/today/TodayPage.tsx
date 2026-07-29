@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { Fragment, useState } from "react";
 
 import { Clock3, Mic } from "../../components/Icons";
 import type { ToastKind } from "../../components/Toast";
@@ -9,6 +9,24 @@ import { normalizeError } from "../../lib/errors";
 
 function formatTime(timestamp: number) {
   return new Intl.DateTimeFormat("pl-PL", { hour: "2-digit", minute: "2-digit" }).format(timestamp);
+}
+
+function ShortcutKeys({ shortcut, inline = false }: { shortcut: string; inline?: boolean }) {
+  const keys = shortcut.split("+").map((key) => key.trim()).filter(Boolean);
+  const accessibleShortcut = keys.join(" + ");
+  return (
+    <span
+      className={`shortcut ${inline ? "shortcut--inline" : ""}`}
+      aria-label={`Skrót klawiszowy: ${accessibleShortcut}`}
+    >
+      {keys.map((key, index) => (
+        <Fragment key={`${key}-${index}`}>
+          {index > 0 && <b aria-hidden="true">+</b>}
+          <kbd>{key}</kbd>
+        </Fragment>
+      ))}
+    </span>
+  );
 }
 
 export function TodayPage({
@@ -70,7 +88,7 @@ export function TodayPage({
       <button disabled={cta.disabled || busy} className={`record-cta record-cta--${state.status} ${isRecording ? "record-cta--active" : ""}`} onClick={() => void toggle()}>
         <span className="record-cta__icon"><Mic size={25} /></span>
         <span><strong>{busy ? "Chwileczkę…" : cta.label}</strong><small>{cta.detail}</small></span>
-        <span className="shortcut"><kbd>Ctrl</kbd><b>+</b><kbd>Spacja</kbd></span>
+        <ShortcutKeys shortcut={snapshot.settings.shortcut} />
       </button>
 
       <div className="stats-strip" aria-label="Dzisiejsze statystyki">
@@ -97,7 +115,7 @@ export function TodayPage({
       ) : (
         <div className="onboarding">
           <span className="step-number">1</span>
-          <div><strong>Naciśnij Ctrl + Spacja</strong><p>Powiedz pierwsze zdanie — Mów zapisze audio i wklei gotowy tekst.</p></div>
+          <div><strong>Naciśnij <ShortcutKeys shortcut={snapshot.settings.shortcut} inline /></strong><p>Powiedz pierwsze zdanie — Mów zapisze audio i wklei gotowy tekst.</p></div>
         </div>
       )}
     </section>
