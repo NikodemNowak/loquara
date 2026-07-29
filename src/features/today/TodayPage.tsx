@@ -5,6 +5,7 @@ import type { ToastKind } from "../../components/Toast";
 import { Waveform } from "../../components/Waveform";
 import type { AppAdapter } from "../../lib/tauri";
 import type { AppSnapshot, Recording } from "../../lib/types";
+import { normalizeError } from "../../lib/errors";
 
 function formatTime(timestamp: number) {
   return new Intl.DateTimeFormat("pl-PL", { hour: "2-digit", minute: "2-digit" }).format(timestamp);
@@ -50,7 +51,7 @@ export function TodayPage({
           : await adapter.startRecording();
       onSnapshot(next);
     } catch (error) {
-      onToast(`Nie udało się wykonać akcji: ${error instanceof Error ? error.message : String(error)}`, "error");
+      onToast(`Nie udało się wykonać akcji: ${normalizeError(error)}`, "error");
     } finally {
       setBusy(false);
     }

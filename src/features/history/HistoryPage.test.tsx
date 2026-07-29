@@ -49,4 +49,24 @@ describe("historia", () => {
     expect(within(inspector).getByText("Przygotuj proszę podsumowanie spotkania.")).toBeVisible();
     expect(within(inspector).getByRole("button", { name: "Wklej" })).toBeEnabled();
   });
+
+  test("chroni kopiowanie, pokazuje stan pracy i normalizuje odrzucenie schowka", async () => {
+    let rejectCopy!: (reason: unknown) => void;
+    const writeText = vi.fn(() => new Promise<void>((_, reject) => { rejectCopy = reject; }));
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    const onToast = vi.fn();
+    render(<HistoryPage adapter={adapterStub()} recordings={recordings} onRefresh={async () => undefined} onToast={onToast} />);
+
+    await userEvent.click(screen.getByRole("button", { name: /Przygotuj proszę/ }));
+    await userEvent.click(screen.getByRole("button", { name: "Kopiuj" }));
+    expect(screen.getByRole("button", { name: "Kopiuję…" })).toBeDisabled();
+    rejectCopy({ error: { message: "Brak dostępu do schowka" } });
+
+    expect(await screen.findByRole("button", { name: "Kopiuj" })).toBeEnabled();
+    expect(onToast).toHaveBeenCalledWith(expect.stringContaining("Brak dostępu do schowka"), "error");
+    expect(writeText).toHaveBeenCalledWith("Przygotuj proszę podsumowanie spotkania.");
+  });
 });

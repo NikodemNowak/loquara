@@ -1,12 +1,9 @@
 import { useCallback, useState } from "react";
 
 import type { ToastKind } from "../components/Toast";
+import { normalizeError } from "./errors";
 
 type Toast = (message: string, kind: ToastKind) => void;
-
-export function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
 
 export function useAsyncAction(onToast: Toast) {
   const [pendingKey, setPendingKey] = useState("");
@@ -20,7 +17,7 @@ export function useAsyncAction(onToast: Toast) {
     try {
       return await action();
     } catch (error) {
-      onToast(`${failureLabel}: ${errorMessage(error)}`, "error");
+      onToast(`${failureLabel}: ${normalizeError(error)}`, "error");
       return undefined;
     } finally {
       setPendingKey("");

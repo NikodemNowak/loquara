@@ -51,6 +51,12 @@ export function HistoryPage({
       await fn();
       await onRefresh();
     });
+  const copy = (text: string) => run("copy", async () => {
+    if (!navigator.clipboard?.writeText) {
+      throw new Error("Schowek nie jest dostępny.");
+    }
+    await navigator.clipboard.writeText(text);
+  }, "Nie udało się skopiować tekstu");
 
   return (
     <section className="page history-page">
@@ -94,7 +100,7 @@ export function HistoryPage({
             {selected.text && <blockquote>{selected.text}</blockquote>}
             {selected.error && <p className="error-note">{selected.error}</p>}
             <div className="inspector-actions">
-              <button disabled={!selected.text} onClick={() => void navigator.clipboard?.writeText(selected.text ?? "")}><Copy size={15} />Kopiuj</button>
+              <button disabled={!selected.text || busy} onClick={() => void copy(selected.text ?? "")}><Copy size={15} />{pendingKey === "copy" ? "Kopiuję…" : "Kopiuj"}</button>
               <button disabled={!selected.text || busy} onClick={() => void action("paste", () => adapter.pasteTranscript(selected.id))}>{pendingKey === "paste" ? "Wklejam…" : "Wklej"}</button>
               <button disabled={selected.status !== "failed" || !selected.audioPath || busy} onClick={() => void action("retry", () => adapter.retryTranscription(selected.id))}><RotateCcw size={15} />{pendingKey === "retry" ? "Ponawiam…" : "Ponów"}</button>
               <button className="danger-button" disabled={["recording", "processing"].includes(selected.status) || busy} onClick={() => void action("delete", () => adapter.deleteHistory(selected.id))}><Trash2 size={15} />{pendingKey === "delete" ? "Usuwam…" : "Usuń"}</button>

@@ -8,11 +8,11 @@ import type {
   InputDeviceInfo,
   Mode,
   ModelStatus,
-  PlatformError,
   Recording,
   SettingsUpdateResult,
   VocabularyEntry,
 } from "./types";
+import { normalizeError } from "./errors";
 
 type Listener<T> = (payload: T) => void;
 
@@ -42,12 +42,7 @@ export interface AppAdapter {
 }
 
 export function platformErrorMessage(payload: unknown): string {
-  if (typeof payload === "string") return payload;
-  if (payload && typeof payload === "object") {
-    const error = payload as PlatformError;
-    if (typeof error.message === "string" && error.message.trim()) return error.message;
-  }
-  return "Nieznany błąd platformy.";
+  return normalizeError(payload, "Nieznany błąd platformy.");
 }
 
 const realAdapter: AppAdapter = {

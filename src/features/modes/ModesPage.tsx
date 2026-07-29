@@ -5,6 +5,7 @@ import { Plus, Trash2 } from "../../components/Icons";
 import type { ToastKind } from "../../components/Toast";
 import type { AppAdapter } from "../../lib/tauri";
 import type { AppSettings, Mode } from "../../lib/types";
+import { normalizeError } from "../../lib/errors";
 
 const BUILTIN_IDS = new Set(["clean", "message", "code"]);
 
@@ -43,7 +44,7 @@ export function ModesPage({
       setModes(items);
       setDraft((current) => items.find(({ id }) => id === current?.id) ?? items[0]);
     } catch (error) {
-      setLoadError(`Nie udało się wczytać trybów: ${error instanceof Error ? error.message : String(error)}`);
+      setLoadError(`Nie udało się wczytać trybów: ${normalizeError(error)}`);
     } finally {
       setLoading(false);
     }
@@ -56,7 +57,7 @@ export function ModesPage({
     try {
       await action();
     } catch (error) {
-      onToast(`Nie udało się wykonać akcji: ${error instanceof Error ? error.message : String(error)}`, "error");
+      onToast(`Nie udało się wykonać akcji: ${normalizeError(error)}`, "error");
     } finally {
       setBusy("");
     }
@@ -83,7 +84,7 @@ export function ModesPage({
   };
 
   const useMode = async () => {
-    if (!draft || draft.id === settings.activeMode) return;
+    if (!draft?.enabled || draft.id === settings.activeMode) return;
     await run("use", async () => {
       const next = { ...settings, activeMode: draft.id };
       const result = await adapter.updateSettings(next);
@@ -118,12 +119,12 @@ export function ModesPage({
               </div>
               <label><span>Nazwa</span><input value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} /></label>
               <label><span>Opis</span><input value={draft.description} onChange={(event) => setDraft({ ...draft, description: event.target.value })} /></label>
-              <label><span>Instrukcja</span><textarea rows={7} value={draft.prompt} onChange={(event) => setDraft({ ...draft, prompt: event.target.value })} placeholder="Opisz, jak ma wyglądać wynik…" /></label>
-              <p className="field-hint">Instrukcja własna jest przechowywana lokalnie; nierozpoznane tryby używają bezpiecznego trybu Czysty.</p>
+              <label><span>Instrukcja</span><textarea rows={7} value={draft.prompt} onChange={(event) => setDraft({ ...draft, prompt: event.target.value })} placeholder={"case: lower\nlayout: bullets\nprefix: Notatka"} /></label>
+              <p className="field-hint">Własne tryby używają lokalnych dyrektyw: <code>case: lower|upper|sentence</code>, <code>layout: bullets|plain</code>, <code>prefix: …</code>, <code>suffix: …</code>. Pozostały tekst jest ignorowany, a wynik używa porządkowania Czysty.</p>
               <div className="editor-actions">
-                <button type="button" className="danger-button" disabled={BUILTIN_IDS.has(draft.id) || Boolean(busy)} onClick={() => void remove()}><Trash2 size={15} />{busy === "delete" ? "Usuwam…" : "Usuń tryb"}</button>
+                <button type="button" className="danger-button" disabled={BUILTIN_IDS.has(draft.id) || settings.activeMode === draft.id || Boolean(busy)} onClick={() => void remove()}><Trash2 size={15} />{busy === "delete" ? "Usuwam…" : "Usuń tryb"}</button>
                 <span className="editor-actions__right">
-                  <button type="button" disabled={settings.activeMode === draft.id || Boolean(busy)} onClick={() => void useMode()}>{busy === "use" ? "Włączam…" : settings.activeMode === draft.id ? "Używany" : "Użyj"}</button>
+                  <button type="button" disabled={!draft.enabled || settings.activeMode === draft.id || Boolean(busy)} onClick={() => void useMode()}>{busy === "use" ? "Włączam…" : settings.activeMode === draft.id ? "Używany" : "Użyj"}</button>
                   <button className="primary-button" disabled={!draft.name.trim() || Boolean(busy)} type="submit">{busy === "save" ? "Zapisuję…" : "Zapisz tryb"}</button>
                 </span>
               </div>

@@ -735,13 +735,96 @@ pub fn postprocess(text: &str, vocabulary: &[VocabularyEntry]) -> String {
     punctuation.replace_all(&processed, "$1").into_owned()
 }
 
-pub fn postprocess_for_mode(text: &str, vocabulary: &[VocabularyEntry], mode_id: &str) -> String {
-    if mode_id != "code" {
-        return postprocess(text, vocabulary);
+fn clean_paragraphs(text: &str, vocabulary: &[VocabularyEntry]) -> String {
+    let paragraph_break =
+        Regex::new(r"(?:\r?\n)[ \t]*(?:\r?\n)+").expect("static paragraph regex is valid");
+    paragraph_break
+        .split(text.trim())
+        .filter_map(|paragraph| {
+            let cleaned = postprocess(paragraph, vocabulary);
+            (!cleaned.is_empty()).then_some(cleaned)
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+pub fn postprocess_for_mode(text: &str, vocabulary: &[VocabularyEntry], mode: &Mode) -> String {
+    if !mode.enabled {
+        return clean_paragraphs(text, vocabulary);
     }
-    let punctuation = Regex::new(r"[ \t]+([,.;:!?])").expect("static punctuation regex is valid");
-    let processed = apply_vocabulary(text.trim().to_owned(), vocabulary);
-    punctuation.replace_all(&processed, "$1").into_owned()
+    match mode.id.as_str() {
+        "clean" => clean_paragraphs(text, vocabulary),
+        "message" => postprocess(text, vocabulary),
+        "code" => {
+            let punctuation =
+                Regex::new(r"[ \t]+([,.;:!?])").expect("static punctuation regex is valid");
+            let processed = apply_vocabulary(text.trim().to_owned(), vocabulary);
+            punctuation.replace_all(&processed, "$1").into_owned()
+        }
+        _ => apply_custom_directives(clean_paragraphs(text, vocabulary), &mode.prompt),
+    }
+}
+
+fn apply_custom_directives(mut text: String, prompt: &str) -> String {
+    let mut case = None;
+    let mut layout = None;
+    let mut prefix = None;
+    let mut suffix = None;
+    for line in prompt.lines() {
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
+        let value = value.trim();
+        match key.trim().to_ascii_lowercase().as_str() {
+            "case" if matches!(value, "lower" | "upper" | "sentence") => case = Some(value),
+            "layout" if matches!(value, "bullets" | "plain") => layout = Some(value),
+            "prefix" => prefix = Some(value),
+            "suffix" => suffix = Some(value),
+            _ => {}
+        }
+    }
+    text = match case {
+        Some("lower") => text.to_lowercase(),
+        Some("upper") => text.to_uppercase(),
+        Some("sentence") => sentence_case(&text),
+        _ => text,
+    };
+    if layout == Some("bullets") {
+        text = text
+            .split("\n\n")
+            .filter(|item| !item.trim().is_empty())
+            .map(|item| format!("• {}", item.trim()))
+            .collect::<Vec<_>>()
+            .join("\n");
+    }
+    let mut parts = Vec::new();
+    if let Some(prefix) = prefix.filter(|value| !value.is_empty()) {
+        parts.push(prefix.to_owned());
+    }
+    if !text.is_empty() {
+        parts.push(text);
+    }
+    if let Some(suffix) = suffix.filter(|value| !value.is_empty()) {
+        parts.push(suffix.to_owned());
+    }
+    parts.join("\n")
+}
+
+fn sentence_case(text: &str) -> String {
+    let mut sentence_start = true;
+    let mut result = String::new();
+    for character in text.to_lowercase().chars() {
+        if sentence_start && character.is_alphabetic() {
+            result.extend(character.to_uppercase());
+            sentence_start = false;
+        } else {
+            result.push(character);
+        }
+        if matches!(character, '.' | '!' | '?') {
+            sentence_start = true;
+        }
+    }
+    result
 }
 
 fn apply_vocabulary(mut processed: String, vocabulary: &[VocabularyEntry]) -> String {
@@ -1051,22 +1134,65 @@ mod tests {
         assert_eq!(postprocess("przyzolwowy", &vocabulary), "przyzolwowy");
     }
 
+    fn mode(id: &str, prompt: &str) -> Mode {
+        Mode {
+            id: id.into(),
+            name: id.into(),
+            description: String::new(),
+            prompt: prompt.into(),
+            enabled: true,
+            is_default: false,
+            created_at: 1,
+        }
+    }
+
     #[test]
-    fn code_mode_preserves_lines_while_clean_mode_normalizes_them() {
+    fn built_in_modes_have_distinct_layout_contracts() {
         let vocabulary = vec![VocabularyEntry {
             id: 1,
             heard: "parakit".into(),
             replacement: "Parakeet".into(),
         }];
-        let input = "fn main() {\n    parakit () ;\n}";
+        let input = "pierwszy   parakit ;\nciąg\n\nDrugi akapit !";
 
         assert_eq!(
-            postprocess_for_mode(input, &vocabulary, "clean"),
-            "fn main() { Parakeet (); }"
+            postprocess_for_mode(input, &vocabulary, &mode("clean", "")),
+            "pierwszy Parakeet; ciąg\n\nDrugi akapit!"
         );
         assert_eq!(
-            postprocess_for_mode(input, &vocabulary, "code"),
+            postprocess_for_mode(input, &vocabulary, &mode("message", "")),
+            "pierwszy Parakeet; ciąg Drugi akapit!"
+        );
+        assert_eq!(
+            postprocess_for_mode(
+                "fn main() {\n    parakit () ;\n}",
+                &vocabulary,
+                &mode("code", "")
+            ),
             "fn main() {\n    Parakeet ();\n}"
+        );
+    }
+
+    #[test]
+    fn custom_mode_applies_documented_local_directives() {
+        let custom = mode(
+            "custom-notes",
+            "case: upper\nlayout: bullets\nprefix: NOTATKA\nsuffix: KONIEC",
+        );
+
+        assert_eq!(
+            postprocess_for_mode("Pierwszy punkt.\n\nDrugi punkt.", &[], &custom),
+            "NOTATKA\n• PIERWSZY PUNKT.\n• DRUGI PUNKT.\nKONIEC"
+        );
+    }
+
+    #[test]
+    fn custom_mode_without_recognized_directive_falls_back_to_clean() {
+        let custom = mode("custom-freeform", "Napisz to pięknie jak poeta");
+
+        assert_eq!(
+            postprocess_for_mode("Pierwszy\n\nDrugi", &[], &custom),
+            "Pierwszy\n\nDrugi"
         );
     }
 

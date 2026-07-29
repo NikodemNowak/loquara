@@ -5,6 +5,7 @@ import { applyTheme, initialTheme } from "../../app/theme";
 import type { ToastKind } from "../../components/Toast";
 import type { AppAdapter } from "../../lib/tauri";
 import type { AppSettings, InputDeviceInfo, ModelStatus, ThemeChoice } from "../../lib/types";
+import { normalizeError } from "../../lib/errors";
 
 const shortcutPattern = /^(?:(?:Ctrl|Alt|Shift|Meta)\+)+(?:[A-Z0-9]|Space|Enter|F(?:[1-9]|1[0-2]))$/i;
 
@@ -33,7 +34,7 @@ export function SettingsPage({
     try {
       setDevices(await adapter.listInputDevices());
     } catch (error) {
-      setDeviceError(`Nie udało się wczytać mikrofonów: ${error instanceof Error ? error.message : String(error)}`);
+      setDeviceError(`Nie udało się wczytać mikrofonów: ${normalizeError(error)}`);
     }
   };
   useEffect(() => {
@@ -41,7 +42,7 @@ export function SettingsPage({
     void adapter.listInputDevices()
       .then((loaded) => { if (active) setDevices(loaded); })
       .catch((error) => {
-        if (active) setDeviceError(`Nie udało się wczytać mikrofonów: ${error instanceof Error ? error.message : String(error)}`);
+        if (active) setDeviceError(`Nie udało się wczytać mikrofonów: ${normalizeError(error)}`);
       });
     void adapter.getModelStatus()
       .then((status) => { if (active) setModelStatus(status); })
@@ -51,7 +52,7 @@ export function SettingsPage({
           model: "nvidia/parakeet-tdt-0.6b-v3",
           revision: "",
           device: null,
-          message: error instanceof Error ? error.message : String(error),
+          message: normalizeError(error),
         });
       });
     return () => { active = false; };
@@ -77,7 +78,7 @@ export function SettingsPage({
       if (result.warning) onToast(result.warning, "info");
     } catch (error) {
       setSettings(previous);
-      onToast(`Nie zapisano zmiany: ${error instanceof Error ? error.message : String(error)}`, "error");
+      onToast(`Nie zapisano zmiany: ${normalizeError(error)}`, "error");
     } finally {
       setSaving(false);
     }
@@ -114,7 +115,7 @@ export function SettingsPage({
           </section>
           <section className="model-card" aria-busy={!modelStatus}>
             <div className="model-card__top"><div><span className="model-kicker">Model lokalny</span><h2>NVIDIA Parakeet 0.6B v3</h2></div><span className={`ready-badge ready-badge--${modelStatus?.state ?? "checking"}`}>{modelStatus?.state === "ready" && <Check size={13} />}{!modelStatus ? "Sprawdzam…" : modelStatus.state === "ready" ? "Gotowy" : modelStatus.state === "not_installed" ? "Do pobrania" : "Błąd"}</span></div>
-            <p>{modelStatus?.state === "error" ? modelStatus.message : "Szybka transkrypcja po polsku bez wysyłania dźwięku do chmury."}</p>
+            <p>{modelStatus?.state !== "ready" && modelStatus?.message ? modelStatus.message : "Szybka transkrypcja po polsku bez wysyłania dźwięku do chmury."}</p>
             <div className="model-meta"><span>Urządzenie <strong>{modelStatus?.device ?? "ustalane przy starcie"}</strong></span><span>Dane <strong>tylko lokalnie</strong></span></div>
           </section>
           <aside className="privacy-note"><strong>Twoje słowa zostają u Ciebie</strong><p>Audio, transkrypcje i słownik są przechowywane wyłącznie na tym komputerze.</p></aside>

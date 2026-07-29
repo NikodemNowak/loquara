@@ -20,7 +20,8 @@ describe("adapter demonstracyjny", () => {
     expect(platformErrorMessage({ code: "focus_failed", message: "Nie udało się przywrócić okna." }))
       .toBe("Nie udało się przywrócić okna.");
     expect(platformErrorMessage("Starszy błąd")).toBe("Starszy błąd");
-    expect(platformErrorMessage({ code: "unknown" })).toBe("Nieznany błąd platformy.");
+    expect(platformErrorMessage({ error: { message: "Błąd schowka" } })).toBe("Błąd schowka");
+    expect(platformErrorMessage({ code: "unknown" })).toBe("{\"code\":\"unknown\"}");
   });
 
   test("demo raportuje prawdziwy kontrakt gotowego modelu", async () => {

@@ -5,7 +5,8 @@ import { EmptyState } from "../../components/EmptyState";
 import type { ToastKind } from "../../components/Toast";
 import type { AppAdapter } from "../../lib/tauri";
 import type { VocabularyEntry } from "../../lib/types";
-import { errorMessage, useAsyncAction } from "../../lib/useAsyncAction";
+import { normalizeError } from "../../lib/errors";
+import { useAsyncAction } from "../../lib/useAsyncAction";
 
 export function VocabularyPage({
   adapter,
@@ -27,7 +28,7 @@ export function VocabularyPage({
     try {
       setItems([...(await adapter.listVocabulary())]);
     } catch (error) {
-      setLoadError(errorMessage(error));
+      setLoadError(normalizeError(error));
     } finally {
       setLoading(false);
     }

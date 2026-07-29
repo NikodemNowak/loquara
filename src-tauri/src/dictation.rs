@@ -244,15 +244,88 @@ fn model_snapshot_path(hub: &Path) -> PathBuf {
 
 fn model_status_from_hub(hub: &Path) -> ModelStatus {
     let snapshot = model_snapshot_path(hub);
-    let state = match snapshot.try_exists() {
-        Ok(true) if snapshot.is_dir() => ModelStatusState::Ready,
-        Ok(_) => ModelStatusState::NotInstalled,
-        Err(_) => ModelStatusState::Error,
+    let artifact = |names: &[&str]| -> Result<bool, std::io::Error> {
+        for name in names {
+            let path = snapshot.join(name);
+            match std::fs::metadata(&path) {
+                Ok(metadata) if metadata.is_file() && metadata.len() > 0 => return Ok(true),
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(false)
     };
-    let message = if state == ModelStatusState::Error {
-        Some("Nie można sprawdzić lokalnego cache modelu.".into())
-    } else {
-        None
+    let required = [
+        (&["config.json"][..], "config.json"),
+        (
+            &["processor_config.json", "preprocessor_config.json"][..],
+            "processor_config.json / preprocessor_config.json",
+        ),
+        (
+            &[
+                "model.safetensors",
+                "model.safetensors.index.json",
+                "pytorch_model.bin",
+                "pytorch_model.bin.index.json",
+            ][..],
+            "model.safetensors lub pytorch_model.bin",
+        ),
+        (
+            &[
+                "tokenizer.json",
+                "tokenizer_config.json",
+                "tokenizer.model",
+                "vocab.json",
+            ][..],
+            "artefakt tokenizera",
+        ),
+    ];
+    let (state, message) = match snapshot.try_exists() {
+        Ok(false) => (
+            ModelStatusState::NotInstalled,
+            Some("Nie znaleziono wymaganej rewizji modelu.".into()),
+        ),
+        Ok(true) if !snapshot.is_dir() => (
+            ModelStatusState::NotInstalled,
+            Some("Ścieżka rewizji modelu nie jest katalogiem.".into()),
+        ),
+        Ok(true) => {
+            let mut missing = Vec::new();
+            let mut error = None;
+            for (names, label) in required {
+                match artifact(names) {
+                    Ok(true) => {}
+                    Ok(false) => missing.push(label),
+                    Err(io_error) => {
+                        error = Some(io_error);
+                        break;
+                    }
+                }
+            }
+            if let Some(error) = error {
+                (
+                    ModelStatusState::Error,
+                    Some(format!("Nie można sprawdzić artefaktów modelu: {error}")),
+                )
+            } else if missing.is_empty() {
+                (ModelStatusState::Ready, None)
+            } else {
+                (
+                    ModelStatusState::NotInstalled,
+                    Some(format!(
+                        "Brakujące lub puste pliki: {}.",
+                        missing.join(", ")
+                    )),
+                )
+            }
+        }
+        Err(error) => (
+            ModelStatusState::Error,
+            Some(format!(
+                "Nie można sprawdzić lokalnego cache modelu: {error}"
+            )),
+        ),
     };
     ModelStatus {
         state,
@@ -860,7 +933,13 @@ fn finish_success(
         .read()
         .map(|settings| settings.clone())
         .unwrap_or_default();
-    let transcript = postprocess_with_settings(&result.text, &vocabulary, &settings);
+    let mode = state
+        .storage
+        .get_mode(&settings.active_mode)
+        .ok()
+        .flatten()
+        .filter(|mode| mode.enabled);
+    let transcript = postprocess_with_mode(&result.text, &vocabulary, mode.as_ref());
     let audio_path = audio_path.to_string_lossy();
     let durable = complete_transcription_durably(
         &state.machine,
@@ -903,12 +982,26 @@ fn finish_success(
     emit_state(app, state);
 }
 
-fn postprocess_with_settings(
+fn postprocess_with_mode(
     text: &str,
     vocabulary: &[VocabularyEntry],
-    settings: &AppSettings,
+    mode: Option<&Mode>,
 ) -> String {
-    postprocess_for_mode(text, vocabulary, &settings.active_mode)
+    mode.map_or_else(
+        || {
+            let fallback = Mode {
+                id: "clean".into(),
+                name: "Czysty".into(),
+                description: String::new(),
+                prompt: String::new(),
+                enabled: true,
+                is_default: true,
+                created_at: 0,
+            };
+            postprocess_for_mode(text, vocabulary, &fallback)
+        },
+        |selected| postprocess_for_mode(text, vocabulary, selected),
+    )
 }
 
 fn finish_failure(app: &AppHandle, state: &AppState, recording_id: &str, error: String) {
@@ -1231,8 +1324,43 @@ pub fn list_modes(state: State<'_, AppState>) -> Result<Vec<Mode>, String> {
         .map_err(|error| error.to_string())
 }
 
+fn validate_active_mode(storage: &Storage, id: &str) -> Result<Mode, String> {
+    match storage.get_mode(id).map_err(|error| error.to_string())? {
+        None => Err(format!("Tryb „{id}” nie istnieje.")),
+        Some(mode) if !mode.enabled => Err(format!("Tryb „{}” jest wyłączony.", mode.name)),
+        Some(mode) => Ok(mode),
+    }
+}
+
+fn validate_mode_upsert(active_mode: &str, mode: &Mode) -> Result<(), String> {
+    if mode.id == active_mode && !mode.enabled {
+        Err("Nie można wyłączyć aktualnie używanego trybu.".into())
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_mode_delete(active_mode: &str, id: &str) -> Result<(), String> {
+    if id == active_mode {
+        Err("Nie można usunąć aktualnie używanego trybu.".into())
+    } else {
+        Ok(())
+    }
+}
+
 #[tauri::command(rename_all = "camelCase")]
 pub fn upsert_mode(mode: Mode, state: State<'_, AppState>) -> Result<(), String> {
+    let _update_guard = state
+        .settings_update
+        .lock()
+        .map_err(|_| "settings update lock poisoned")?;
+    let active_mode = state
+        .settings
+        .read()
+        .map_err(|_| "settings lock poisoned")?
+        .active_mode
+        .clone();
+    validate_mode_upsert(&active_mode, &mode)?;
     state
         .storage
         .upsert_mode(&mode)
@@ -1241,6 +1369,17 @@ pub fn upsert_mode(mode: Mode, state: State<'_, AppState>) -> Result<(), String>
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn delete_mode(id: String, state: State<'_, AppState>) -> Result<bool, String> {
+    let _update_guard = state
+        .settings_update
+        .lock()
+        .map_err(|_| "settings update lock poisoned")?;
+    let active_mode = state
+        .settings
+        .read()
+        .map_err(|_| "settings lock poisoned")?
+        .active_mode
+        .clone();
+    validate_mode_delete(&active_mode, &id)?;
     state
         .storage
         .delete_mode(&id)
@@ -1287,6 +1426,7 @@ pub fn update_settings(
         .settings_update
         .lock()
         .map_err(|_| "settings update lock poisoned")?;
+    validate_active_mode(&state.storage, &settings.active_mode)?;
     let mut live = state
         .settings
         .read()
@@ -1637,13 +1777,29 @@ mod tests {
         );
     }
 
+    fn write_artifact(path: &Path, name: &str) {
+        std::fs::write(path.join(name), b"x").unwrap();
+    }
+
     #[test]
-    fn model_status_detects_exact_revision_snapshot_only() {
+    fn model_status_requires_complete_nonempty_artifacts() {
         let temp = tempfile::tempdir().unwrap();
         let hub = temp.path().join("hub");
         let snapshot = model_snapshot_path(&hub);
         std::fs::create_dir_all(&snapshot).unwrap();
 
+        let empty = model_status_from_hub(&hub);
+        assert_eq!(empty.state, ModelStatusState::NotInstalled);
+        assert!(empty.message.unwrap().contains("config.json"));
+
+        write_artifact(&snapshot, "config.json");
+        write_artifact(&snapshot, "processor_config.json");
+        let partial = model_status_from_hub(&hub);
+        assert_eq!(partial.state, ModelStatusState::NotInstalled);
+        assert!(partial.message.unwrap().contains("model.safetensors"));
+
+        write_artifact(&snapshot, "model.safetensors");
+        write_artifact(&snapshot, "tokenizer.json");
         assert_eq!(
             model_status_from_hub(&hub),
             ModelStatus {
@@ -1654,6 +1810,22 @@ mod tests {
                 message: None,
             }
         );
+    }
+
+    #[test]
+    fn model_status_rejects_wrong_revision_and_zero_length_artifact() {
+        let temp = tempfile::tempdir().unwrap();
+        let hub = temp.path().join("hub");
+        let snapshot = model_snapshot_path(&hub);
+        std::fs::create_dir_all(&snapshot).unwrap();
+        std::fs::write(snapshot.join("config.json"), []).unwrap();
+        write_artifact(&snapshot, "preprocessor_config.json");
+        write_artifact(&snapshot, "pytorch_model.bin");
+        write_artifact(&snapshot, "tokenizer_config.json");
+
+        let zero_length = model_status_from_hub(&hub);
+        assert_eq!(zero_length.state, ModelStatusState::NotInstalled);
+        assert!(zero_length.message.unwrap().contains("config.json"));
 
         std::fs::remove_dir_all(&snapshot).unwrap();
         std::fs::create_dir_all(
@@ -1695,15 +1867,72 @@ mod tests {
         let input = "pierwsza\n    parakit ;";
         let mut settings = AppSettings::default();
 
+        let clean = Mode {
+            id: "clean".into(),
+            name: "Czysty".into(),
+            description: String::new(),
+            prompt: String::new(),
+            enabled: true,
+            is_default: true,
+            created_at: 0,
+        };
         assert_eq!(
-            postprocess_with_settings(input, &vocabulary, &settings),
+            postprocess_with_mode(input, &vocabulary, Some(&clean)),
             "pierwsza Parakeet;"
         );
         settings.active_mode = "code".into();
+        let code = Mode {
+            id: "code".into(),
+            name: "Kod".into(),
+            ..clean
+        };
         assert_eq!(
-            postprocess_with_settings(input, &vocabulary, &settings),
+            postprocess_with_mode(input, &vocabulary, Some(&code)),
             "pierwsza\n    Parakeet;"
         );
+    }
+
+    #[test]
+    fn active_mode_must_exist_and_be_enabled() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = Storage::open_in_memory(temp.path().join("recordings")).unwrap();
+        let mut disabled = storage.get_mode("message").unwrap().unwrap();
+        disabled.enabled = false;
+        storage.upsert_mode(&disabled).unwrap();
+
+        assert!(
+            validate_active_mode(&storage, "missing")
+                .unwrap_err()
+                .contains("nie istnieje")
+        );
+        assert!(
+            validate_active_mode(&storage, "message")
+                .unwrap_err()
+                .contains("wyłączony")
+        );
+        assert_eq!(validate_active_mode(&storage, "clean").unwrap().id, "clean");
+    }
+
+    #[test]
+    fn active_custom_mode_cannot_be_disabled_or_deleted() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = Storage::open_in_memory(temp.path().join("recordings")).unwrap();
+        let custom = Mode {
+            id: "custom".into(),
+            name: "Własny".into(),
+            description: String::new(),
+            prompt: "prefix: TEST".into(),
+            enabled: true,
+            is_default: false,
+            created_at: 10,
+        };
+        storage.upsert_mode(&custom).unwrap();
+
+        let mut disabled = custom.clone();
+        disabled.enabled = false;
+        assert!(validate_mode_upsert("custom", &disabled).is_err());
+        assert!(validate_mode_delete("custom", "custom").is_err());
+        assert!(validate_mode_delete("clean", "custom").is_ok());
     }
 
     struct FailingHistory;

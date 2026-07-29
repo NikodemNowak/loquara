@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { AppAdapter } from "../lib/tauri";
 import type { AppSettings, AppSnapshot, Recording } from "../lib/types";
+import { normalizeError } from "../lib/errors";
 
 const fallbackSettings: AppSettings = {
   inputDevice: null,
@@ -25,7 +26,7 @@ export function useAppModel(adapter: AppAdapter, onError: (message: string) => v
     try {
       setHistory(await adapter.listHistory({}));
     } catch (error) {
-      onError(`Nie udało się wczytać historii: ${String(error)}`);
+      onError(`Nie udało się wczytać historii: ${normalizeError(error)}`);
     }
   }, [adapter, onError]);
 
@@ -42,7 +43,7 @@ export function useAppModel(adapter: AppAdapter, onError: (message: string) => v
         setSnapshot(nextSnapshot);
         setHistory(nextHistory);
       })
-      .catch((error) => onError(`Nie udało się uruchomić widoku: ${String(error)}`))
+      .catch((error) => onError(`Nie udało się uruchomić widoku: ${normalizeError(error)}`))
       .finally(() => active && setLoading(false));
     adapter.onState((next) => {
       if (!active) return;

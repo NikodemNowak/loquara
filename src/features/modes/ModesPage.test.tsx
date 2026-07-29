@@ -65,4 +65,36 @@ describe("tryby", () => {
     await userEvent.click(screen.getByRole("button", { name: "Spróbuj ponownie" }));
     expect(listModes).toHaveBeenCalledTimes(2);
   });
+
+  test("nie pozwala użyć wyłączonego ani usunąć aktualnie używanego trybu", async () => {
+    const active = {
+      id: "active-custom", name: "Aktywny", description: "Aktywny", prompt: "prefix: A",
+      enabled: true, isDefault: false, createdAt: 1,
+    };
+    const disabled = {
+      id: "disabled-custom", name: "Wyłączony", description: "Wyłączony", prompt: "case: lower",
+      enabled: false, isDefault: false, createdAt: 2,
+    };
+    render(
+      <ModesPage
+        adapter={adapterStub({ listModes: async () => [active, disabled] })}
+        settings={{ ...settings, activeMode: active.id }}
+        onSettingsChange={() => undefined}
+        onToast={() => undefined}
+      />,
+    );
+
+    await userEvent.click(await screen.findByRole("button", { name: /Aktywny/ }));
+    expect(screen.getByRole("button", { name: "Usuń tryb" })).toBeDisabled();
+    await userEvent.click(screen.getByRole("button", { name: /Wyłączony/ }));
+    expect(screen.getByRole("button", { name: "Użyj" })).toBeDisabled();
+  });
+
+  test("opisuje wyłącznie obsługiwany lokalny DSL", async () => {
+    render(<ModesPage adapter={adapterStub()} settings={settings} onSettingsChange={() => undefined} onToast={() => undefined} />);
+
+    await screen.findByLabelText("Instrukcja");
+    expect(screen.getByText(/case: lower\|upper\|sentence/i)).toBeVisible();
+    expect(screen.getByLabelText("Instrukcja")).toHaveAttribute("placeholder", expect.stringContaining("layout: bullets"));
+  });
 });

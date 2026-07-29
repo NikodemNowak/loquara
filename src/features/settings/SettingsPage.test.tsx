@@ -79,7 +79,7 @@ describe("ustawienia", () => {
           model: "nvidia/parakeet-tdt-0.6b-v3",
           revision: "revision",
           device: null,
-          message: state === "error" ? "Cache niedostępny" : null,
+          message: state === "error" ? "Cache niedostępny" : state === "not_installed" ? "Brakujące lub puste pliki: config.json." : null,
         }),
       })}
       initialSettings={settings}
@@ -88,6 +88,9 @@ describe("ustawienia", () => {
     />);
     expect(screen.getByText("Sprawdzam…")).toBeVisible();
     expect(await screen.findByText(label)).toBeVisible();
+    if (state === "not_installed") {
+      expect(screen.getByText("Brakujące lub puste pliki: config.json.")).toBeVisible();
+    }
   });
 
   test("pokazuje błąd listy mikrofonów i pozwala ponowić", async () => {

@@ -97,4 +97,39 @@ describe("nakładka dyktowania", () => {
       expect(unlistenLevel).toHaveBeenCalledOnce();
     });
   });
+
+  test.each(["snapshot", "state", "level"] as const)(
+    "pokazuje uczciwy błąd, gdy inicjalizacja %s zostaje odrzucona",
+    async (failure) => {
+      const adapter = adapterStub({
+        getAppSnapshot: failure === "snapshot"
+          ? async () => { throw { error: { message: "Start niedostępny" } }; }
+          : adapterStub().getAppSnapshot,
+        onState: failure === "state"
+          ? async () => { throw { message: "Listener stanu niedostępny" }; }
+          : async () => () => undefined,
+        onLevel: failure === "level"
+          ? async () => { throw new Error("Listener poziomu niedostępny"); }
+          : async () => () => undefined,
+      });
+      render(<RecorderOverlay adapter={adapter} />);
+
+      expect(screen.queryByText("Gotowy")).not.toBeInTheDocument();
+      expect(await screen.findByText("Nie udało się uruchomić")).toBeVisible();
+      expect(screen.getByRole("alert")).not.toHaveTextContent("[object Object]");
+      expect(screen.getByRole("button", { name: "Ponów inicjalizację" })).toBeEnabled();
+    },
+  );
+
+  test("ponawia inicjalizację po błędzie", async () => {
+    const getAppSnapshot = vi.fn()
+      .mockRejectedValueOnce(new Error("Chwilowy błąd"))
+      .mockResolvedValueOnce({ dictation: { status: "idle" }, settings: { inputDevice: null, shortcut: "Ctrl+Space", autoPaste: true, retentionDays: 30, launchOnLogin: true, activeMode: "clean" } });
+    render(<RecorderOverlay adapter={adapterStub({ getAppSnapshot })} />);
+
+    await userEvent.click(await screen.findByRole("button", { name: "Ponów inicjalizację" }));
+
+    expect(await screen.findByText("Gotowy")).toBeVisible();
+    expect(getAppSnapshot).toHaveBeenCalledTimes(2);
+  });
 });
