@@ -2,7 +2,8 @@ use crate::domain::DictationState;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use tauri::{AppHandle, Manager, PhysicalPosition, Runtime};
-use tauri_plugin_global_shortcut::GlobalShortcutExt;
+use tauri_plugin_autostart::ManagerExt as AutostartManagerExt;
+use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut as RegisteredShortcut};
 use thiserror::Error;
 
 #[derive(Debug, Error, Clone, PartialEq, Eq, Serialize)]
@@ -14,8 +15,10 @@ pub enum PlatformError {
     ShortcutRegistration(String),
     #[error("clipboard write failed: {0}")]
     ClipboardWrite(String),
+    #[error("could not restore target focus: {0}")]
+    FocusFailed(String),
     #[error("paste injection failed: {0}")]
-    PasteInjection(String),
+    PasteFailed(String),
     #[error("platform operation failed: {0}")]
     Other(String),
 }
@@ -132,9 +135,90 @@ pub fn copy_and_paste(
 ) -> Result<(), PlatformError> {
     windows.write_clipboard(text)?;
     if let Some(target) = target {
-        let _ = windows.restore_foreground(target);
+        windows.restore_foreground(target)?;
     }
     windows.send_ctrl_v()
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShortcutRole {
+    Toggle,
+    Cancel,
+    Ignore,
+}
+
+pub fn shortcut_role(event: &str, configured_toggle: &str) -> Result<ShortcutRole, PlatformError> {
+    let event = event
+        .parse::<RegisteredShortcut>()
+        .map_err(|error| PlatformError::InvalidShortcut(error.to_string()))?;
+    shortcut_role_for(&event, configured_toggle)
+}
+
+pub fn shortcut_role_for(
+    event: &RegisteredShortcut,
+    configured_toggle: &str,
+) -> Result<ShortcutRole, PlatformError> {
+    let configured = configured_toggle
+        .parse::<RegisteredShortcut>()
+        .map_err(|error| PlatformError::InvalidShortcut(error.to_string()))?;
+    let cancel = "Escape"
+        .parse::<RegisteredShortcut>()
+        .map_err(|error| PlatformError::InvalidShortcut(error.to_string()))?;
+    Ok(if *event == configured {
+        ShortcutRole::Toggle
+    } else if *event == cancel {
+        ShortcutRole::Cancel
+    } else {
+        ShortcutRole::Ignore
+    })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AutostartAction {
+    Enable,
+    Disable,
+}
+
+pub fn autostart_policy(launch_on_login: bool) -> AutostartAction {
+    if launch_on_login {
+        AutostartAction::Enable
+    } else {
+        AutostartAction::Disable
+    }
+}
+
+pub fn sync_autostart<R: Runtime>(
+    app: &AppHandle<R>,
+    launch_on_login: bool,
+) -> Result<(), PlatformError> {
+    let result = match autostart_policy(launch_on_login) {
+        AutostartAction::Enable => app.autolaunch().enable(),
+        AutostartAction::Disable => app.autolaunch().disable(),
+    };
+    result.map_err(|error| PlatformError::Other(error.to_string()))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PhysicalRect {
+    pub left: i32,
+    pub top: i32,
+    pub right: i32,
+    pub bottom: i32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PhysicalWindowSize {
+    pub width: u32,
+    pub height: u32,
+}
+
+pub fn bottom_center_position(work_area: PhysicalRect, window: PhysicalWindowSize) -> (i32, i32) {
+    let width = i32::try_from(window.width).unwrap_or(i32::MAX);
+    let height = i32::try_from(window.height).unwrap_or(i32::MAX);
+    (
+        work_area.left + ((work_area.right - work_area.left - width) / 2),
+        work_area.bottom - height - 16,
+    )
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -205,7 +289,16 @@ pub fn show_overlay_without_focus<R: Runtime>(app: &AppHandle<R>) -> Result<(), 
     #[cfg(windows)]
     {
         use windows_sys::Win32::UI::WindowsAndMessaging::{SW_SHOWNOACTIVATE, ShowWindow};
-        let (x, y) = windows_work_area_position(312, 56)?;
+        let size = window
+            .outer_size()
+            .map_err(|error| PlatformError::Other(error.to_string()))?;
+        let (x, y) = bottom_center_position(
+            windows_work_area()?,
+            PhysicalWindowSize {
+                width: size.width,
+                height: size.height,
+            },
+        );
         window
             .set_position(PhysicalPosition::new(x, y))
             .map_err(|error| PlatformError::Other(error.to_string()))?;
@@ -224,7 +317,7 @@ pub fn show_overlay_without_focus<R: Runtime>(app: &AppHandle<R>) -> Result<(), 
 }
 
 #[cfg(windows)]
-fn windows_work_area_position(width: i32, height: i32) -> Result<(i32, i32), PlatformError> {
+fn windows_work_area() -> Result<PhysicalRect, PlatformError> {
     use windows_sys::Win32::Foundation::RECT;
     use windows_sys::Win32::UI::WindowsAndMessaging::{SPI_GETWORKAREA, SystemParametersInfoW};
     let mut area = RECT::default();
@@ -239,10 +332,12 @@ fn windows_work_area_position(width: i32, height: i32) -> Result<(i32, i32), Pla
     if succeeded == 0 {
         return Err(PlatformError::Other("SPI_GETWORKAREA failed".into()));
     }
-    Ok((
-        area.left + ((area.right - area.left - width) / 2),
-        area.bottom - height - 16,
-    ))
+    Ok(PhysicalRect {
+        left: area.left,
+        top: area.top,
+        right: area.right,
+        bottom: area.bottom,
+    })
 }
 
 #[cfg(windows)]
@@ -263,7 +358,7 @@ impl WindowsApi for SystemWindows {
         unsafe {
             ShowWindow(hwnd, SW_RESTORE);
             if SetForegroundWindow(hwnd) == 0 {
-                return Err(PlatformError::Other(
+                return Err(PlatformError::FocusFailed(
                     "Windows refused to restore the target foreground window".into(),
                 ));
             }
@@ -345,7 +440,7 @@ impl WindowsApi for SystemWindows {
             )
         };
         if sent != inputs.len() as u32 {
-            return Err(PlatformError::PasteInjection(format!(
+            return Err(PlatformError::PasteFailed(format!(
                 "SendInput accepted {sent}/{} events",
                 inputs.len()
             )));
@@ -383,6 +478,7 @@ mod tests {
         restored: Vec<WindowTarget>,
         paste_attempts: usize,
         fail_clipboard: bool,
+        fail_focus: bool,
         fail_paste: bool,
     }
 
@@ -393,6 +489,9 @@ mod tests {
 
         fn restore_foreground(&mut self, target: WindowTarget) -> Result<(), PlatformError> {
             self.restored.push(target);
+            if self.fail_focus {
+                return Err(PlatformError::FocusFailed("denied".into()));
+            }
             Ok(())
         }
 
@@ -407,7 +506,7 @@ mod tests {
         fn send_ctrl_v(&mut self) -> Result<(), PlatformError> {
             self.paste_attempts += 1;
             if self.fail_paste {
-                return Err(PlatformError::PasteInjection("SendInput".into()));
+                return Err(PlatformError::PasteFailed("SendInput".into()));
             }
             Ok(())
         }
@@ -425,7 +524,83 @@ mod tests {
         assert_eq!(windows.clipboard, vec!["Zażółć"]);
         assert_eq!(windows.restored, vec![WindowTarget(9)]);
         assert_eq!(windows.paste_attempts, 1);
-        assert!(matches!(result, Err(PlatformError::PasteInjection(_))));
+        assert!(matches!(result, Err(PlatformError::PasteFailed(_))));
+    }
+
+    #[test]
+    fn failed_focus_restore_never_injects_paste() {
+        let mut windows = FakeWindows {
+            fail_focus: true,
+            ..Default::default()
+        };
+
+        let result = copy_and_paste(&mut windows, Some(WindowTarget(9)), "tekst");
+
+        assert!(matches!(result, Err(PlatformError::FocusFailed(_))));
+        assert_eq!(windows.clipboard, vec!["tekst"]);
+        assert_eq!(windows.paste_attempts, 0);
+    }
+
+    #[test]
+    fn routes_registered_shortcuts_by_full_identity() {
+        assert_eq!(
+            shortcut_role("Ctrl+Escape", "Ctrl+Escape").unwrap(),
+            ShortcutRole::Toggle
+        );
+        assert_eq!(
+            shortcut_role("Escape", "Ctrl+Escape").unwrap(),
+            ShortcutRole::Cancel
+        );
+        assert_eq!(
+            shortcut_role("Alt+Escape", "Ctrl+Escape").unwrap(),
+            ShortcutRole::Ignore
+        );
+    }
+
+    #[test]
+    fn autostart_policy_matches_launch_on_login_setting() {
+        assert_eq!(autostart_policy(true), AutostartAction::Enable);
+        assert_eq!(autostart_policy(false), AutostartAction::Disable);
+    }
+
+    #[test]
+    fn positions_physical_overlay_for_common_dpi_scales() {
+        let work = PhysicalRect {
+            left: 0,
+            top: 0,
+            right: 1920,
+            bottom: 1040,
+        };
+        assert_eq!(
+            bottom_center_position(
+                work,
+                PhysicalWindowSize {
+                    width: 312,
+                    height: 56
+                }
+            ),
+            (804, 968)
+        );
+        assert_eq!(
+            bottom_center_position(
+                work,
+                PhysicalWindowSize {
+                    width: 468,
+                    height: 84
+                }
+            ),
+            (726, 940)
+        );
+        assert_eq!(
+            bottom_center_position(
+                work,
+                PhysicalWindowSize {
+                    width: 624,
+                    height: 112
+                }
+            ),
+            (648, 912)
+        );
     }
 
     #[test]

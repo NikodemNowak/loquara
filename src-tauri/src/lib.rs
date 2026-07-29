@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use tauri::menu::MenuBuilder;
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{Emitter, Manager, WindowEvent};
-use tauri_plugin_global_shortcut::{Code, ShortcutState};
+use tauri_plugin_global_shortcut::ShortcutState;
 
 fn worker_path() -> PathBuf {
     let current = std::env::current_dir().unwrap_or_default();
@@ -41,12 +41,21 @@ pub fn run() {
                     }
                     let app = app.clone();
                     let state = app.state::<AppState>().inner().clone();
-                    if shortcut.key == Code::Escape {
-                        let _ = dictation::cancel_recording_inner(&app, &state);
-                    } else {
-                        tauri::async_runtime::spawn(async move {
-                            let _ = dictation::toggle_recording(app, state).await;
-                        });
+                    let configured = state
+                        .settings
+                        .read()
+                        .map(|settings| settings.shortcut.clone())
+                        .unwrap_or_default();
+                    match platform::shortcut_role_for(shortcut, &configured) {
+                        Ok(platform::ShortcutRole::Cancel) => {
+                            let _ = dictation::cancel_recording_inner(&app, &state);
+                        }
+                        Ok(platform::ShortcutRole::Toggle) => {
+                            tauri::async_runtime::spawn(async move {
+                                let _ = dictation::toggle_recording(app, state).await;
+                            });
+                        }
+                        Ok(platform::ShortcutRole::Ignore) | Err(_) => {}
                     }
                 })
                 .build(),
@@ -77,6 +86,14 @@ pub fn run() {
                 .map_err(|_| "settings lock poisoned")?
                 .shortcut
                 .clone();
+            let launch_on_login = state
+                .settings
+                .read()
+                .map_err(|_| "settings lock poisoned")?
+                .launch_on_login;
+            platform::sync_autostart(app.handle(), launch_on_login)
+                .map_err(|error| error.to_string())?;
+            dictation::cleanup_retention(&state)?;
             app.manage(state);
             platform::register_shortcuts(app.handle(), &shortcut)
                 .map_err(|error| error.to_string())?;
@@ -149,6 +166,9 @@ pub fn run() {
             dictation::list_vocabulary,
             dictation::add_vocabulary,
             dictation::delete_vocabulary,
+            dictation::list_modes,
+            dictation::upsert_mode,
+            dictation::delete_mode,
             dictation::get_settings,
             dictation::update_settings,
             dictation::update_setting_value,

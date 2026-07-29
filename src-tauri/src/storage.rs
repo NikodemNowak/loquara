@@ -7,8 +7,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use thiserror::Error;
 
-const SCHEMA_VERSION: i64 = 1;
-
 #[derive(Debug, Error)]
 pub enum StorageError {
     #[error("database failed: {0}")]
@@ -85,6 +83,18 @@ pub struct VocabularyEntry {
     pub replacement: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Mode {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub prompt: String,
+    pub enabled: bool,
+    pub is_default: bool,
+    pub created_at: i64,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Retention {
@@ -94,7 +104,7 @@ pub enum Retention {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub struct CleanupReport {
-    pub deleted: usize,
+    pub deleted_audio: usize,
 }
 
 pub struct Storage {
@@ -167,9 +177,27 @@ impl Storage {
                config_json TEXT NOT NULL
              );",
         )?;
-        self.connection()?.execute(
-            "UPDATE schema_version SET version = ?1 WHERE version < ?1",
-            [SCHEMA_VERSION],
+        let version: i64 =
+            self.connection()?
+                .query_row("SELECT version FROM schema_version", [], |row| row.get(0))?;
+        if version < 2 {
+            self.connection()?.execute_batch(
+                "ALTER TABLE modes ADD COLUMN name TEXT NOT NULL DEFAULT '';
+                 ALTER TABLE modes ADD COLUMN description TEXT NOT NULL DEFAULT '';
+                 ALTER TABLE modes ADD COLUMN prompt TEXT NOT NULL DEFAULT '';
+                 ALTER TABLE modes ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1;
+                 ALTER TABLE modes ADD COLUMN is_default INTEGER NOT NULL DEFAULT 0;
+                 ALTER TABLE modes ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0;",
+            )?;
+        }
+        self.connection()?.execute_batch(
+            "INSERT OR IGNORE INTO modes
+               (id,config_json,name,description,prompt,enabled,is_default,created_at)
+             VALUES
+               ('clean','{}','Czysty','Lekka normalizacja tekstu','',1,1,0),
+               ('message','{}','Wiadomość','Naturalny styl wiadomości','',1,0,1),
+               ('code','{}','Kod','Dyktowanie terminów technicznych','',1,0,2);
+             UPDATE schema_version SET version = 2 WHERE version < 2;",
         )?;
         Ok(())
     }
@@ -373,13 +401,71 @@ impl Storage {
             > 0)
     }
 
+    pub fn list_modes(&self) -> Result<Vec<Mode>, StorageError> {
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT id,name,description,prompt,enabled,is_default,created_at
+             FROM modes ORDER BY created_at,id",
+        )?;
+        Ok(statement
+            .query_map([], mode_from_row)?
+            .collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn get_mode(&self, id: &str) -> Result<Option<Mode>, StorageError> {
+        self.connection()?
+            .query_row(
+                "SELECT id,name,description,prompt,enabled,is_default,created_at
+                 FROM modes WHERE id=?1",
+                [id],
+                mode_from_row,
+            )
+            .optional()
+            .map_err(StorageError::from)
+    }
+
+    pub fn upsert_mode(&self, mode: &Mode) -> Result<(), StorageError> {
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction()?;
+        if mode.is_default {
+            transaction.execute("UPDATE modes SET is_default=0", [])?;
+        }
+        transaction.execute(
+            "INSERT INTO modes
+               (id,config_json,name,description,prompt,enabled,is_default,created_at)
+             VALUES (?1,'{}',?2,?3,?4,?5,?6,?7)
+             ON CONFLICT(id) DO UPDATE SET
+               name=excluded.name,description=excluded.description,prompt=excluded.prompt,
+               enabled=excluded.enabled,is_default=excluded.is_default,
+               created_at=excluded.created_at",
+            params![
+                mode.id,
+                mode.name,
+                mode.description,
+                mode.prompt,
+                mode.enabled,
+                mode.is_default,
+                mode.created_at,
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn delete_mode(&self, id: &str) -> Result<bool, StorageError> {
+        Ok(self
+            .connection()?
+            .execute("DELETE FROM modes WHERE id=?1", [id])?
+            > 0)
+    }
+
     pub fn cleanup_retention(
         &self,
         retention: Retention,
         now_ms: i64,
     ) -> Result<CleanupReport, StorageError> {
         let Retention::Days(days @ (1 | 7 | 30)) = retention else {
-            return Ok(CleanupReport { deleted: 0 });
+            return Ok(CleanupReport { deleted_audio: 0 });
         };
         let cutoff = now_ms.saturating_sub(i64::from(days) * 86_400_000);
         fs::create_dir_all(&self.recordings_dir)?;
@@ -395,7 +481,7 @@ impl Storage {
                 .query_map([cutoff], |row| Ok((row.get(0)?, row.get(1)?)))?
                 .collect::<Result<Vec<_>, _>>()?
         };
-        let mut deleted_ids = Vec::new();
+        let mut cleared_ids = Vec::new();
         for (id, raw_path) in candidates {
             let path = PathBuf::from(raw_path);
             let Ok(canonical) = path.canonicalize() else {
@@ -409,19 +495,31 @@ impl Storage {
                     .is_some_and(|extension| extension == "wav")
             {
                 fs::remove_file(&canonical)?;
-                deleted_ids.push(id);
+                cleared_ids.push(id);
             }
         }
         let mut connection = self.connection()?;
         let transaction = connection.transaction()?;
-        for id in &deleted_ids {
-            transaction.execute("DELETE FROM history WHERE id=?1", [id])?;
+        for id in &cleared_ids {
+            transaction.execute("UPDATE history SET audio_path=NULL WHERE id=?1", [id])?;
         }
         transaction.commit()?;
         Ok(CleanupReport {
-            deleted: deleted_ids.len(),
+            deleted_audio: cleared_ids.len(),
         })
     }
+}
+
+fn mode_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Mode> {
+    Ok(Mode {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        description: row.get(2)?,
+        prompt: row.get(3)?,
+        enabled: row.get(4)?,
+        is_default: row.get(5)?,
+        created_at: row.get(6)?,
+    })
 }
 
 struct RawRecording {
@@ -517,11 +615,39 @@ mod tests {
     fn migrates_all_tables_and_records_schema_version() {
         let (_temp, storage) = storage();
 
-        assert_eq!(storage.schema_version().unwrap(), 1);
+        assert_eq!(storage.schema_version().unwrap(), 2);
         assert_eq!(
             storage.table_names().unwrap(),
             vec!["history", "modes", "settings", "vocabulary"]
         );
+    }
+
+    #[test]
+    fn seeds_and_cruds_default_modes() {
+        let (_temp, storage) = storage();
+        let defaults = storage.list_modes().unwrap();
+        assert_eq!(
+            defaults
+                .iter()
+                .map(|mode| mode.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Czysty", "Wiadomość", "Kod"]
+        );
+        assert_eq!(defaults.iter().filter(|mode| mode.is_default).count(), 1);
+
+        let custom = Mode {
+            id: "custom".into(),
+            name: "Własny".into(),
+            description: "Firmowy styl".into(),
+            prompt: "Zachowaj terminologię".into(),
+            enabled: true,
+            is_default: false,
+            created_at: 123,
+        };
+        storage.upsert_mode(&custom).unwrap();
+        assert_eq!(storage.get_mode("custom").unwrap(), Some(custom.clone()));
+        assert!(storage.delete_mode("custom").unwrap());
+        assert!(storage.get_mode("custom").unwrap().is_none());
     }
 
     #[test]
@@ -645,10 +771,20 @@ mod tests {
             .cleanup_retention(Retention::Days(1), 172_800_000)
             .unwrap();
 
-        assert_eq!(report.deleted, 1);
+        assert_eq!(report.deleted_audio, 1);
         assert!(!managed.exists());
         assert!(outside.exists());
-        assert!(storage.get_recording("safe").unwrap().is_none());
-        assert!(storage.get_recording("traversal").unwrap().is_some());
+        let safe = storage.get_recording("safe").unwrap().unwrap();
+        assert_eq!(safe.status, RecordingStatus::Completed);
+        assert_eq!(safe.text.as_deref(), Some("old"));
+        assert!(safe.audio_path.is_none());
+        assert!(
+            storage
+                .get_recording("traversal")
+                .unwrap()
+                .unwrap()
+                .audio_path
+                .is_some()
+        );
     }
 }

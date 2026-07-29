@@ -27,25 +27,61 @@ pub struct AudioFormat {
 
 #[derive(Clone, Debug)]
 pub enum AudioSamples {
+    I8(Vec<i8>),
     F32(Vec<f32>),
     I16(Vec<i16>),
+    I24(Vec<cpal::I24>),
+    I32(Vec<i32>),
+    I64(Vec<i64>),
+    U8(Vec<u8>),
     U16(Vec<u16>),
+    U32(Vec<u32>),
+    U64(Vec<u64>),
+    F64(Vec<f64>),
     Error(String),
 }
 
 impl AudioSamples {
     fn as_f32(&self) -> Vec<f32> {
+        self.pcm16()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|sample| f32::from(sample) / 32768.0)
+            .collect()
+    }
+
+    fn pcm16(&self) -> Result<Vec<i16>, AudioError> {
         match self {
-            Self::F32(samples) => samples.clone(),
-            Self::I16(samples) => samples
+            Self::I8(samples) => Ok(samples
                 .iter()
-                .map(|sample| f32::from(*sample) / 32768.0)
-                .collect(),
-            Self::U16(samples) => samples
+                .map(|sample| i16::from(*sample) << 8)
+                .collect()),
+            Self::I16(samples) => Ok(samples.clone()),
+            Self::I24(samples) => Ok(samples
                 .iter()
-                .map(|sample| (f32::from(*sample) - 32768.0) / 32768.0)
-                .collect(),
-            Self::Error(_) => Vec::new(),
+                .map(|sample| (sample.inner() >> 8) as i16)
+                .collect()),
+            Self::I32(samples) => Ok(samples_i32_to_i16(samples)),
+            Self::I64(samples) => Ok(samples
+                .iter()
+                .map(|sample| (*sample >> 48) as i16)
+                .collect()),
+            Self::U8(samples) => Ok(samples
+                .iter()
+                .map(|sample| (i16::from(*sample) - 128) << 8)
+                .collect()),
+            Self::U16(samples) => Ok(samples_u16_to_i16(samples)),
+            Self::U32(samples) => Ok(samples_u32_to_i16(samples)),
+            Self::U64(samples) => Ok(samples
+                .iter()
+                .map(|sample| {
+                    let centered = i128::from(*sample) - (1_i128 << 63);
+                    (centered >> 48).clamp(i128::from(i16::MIN), i128::from(i16::MAX)) as i16
+                })
+                .collect()),
+            Self::F32(samples) => Ok(samples_f32_to_i16(samples)),
+            Self::F64(samples) => Ok(samples_f64_to_i16(samples)),
+            Self::Error(message) => Err(AudioError::Io(message.clone())),
         }
     }
 
@@ -53,23 +89,8 @@ impl AudioSamples {
         self,
         writer: &mut hound::WavWriter<std::io::BufWriter<std::fs::File>>,
     ) -> Result<(), AudioError> {
-        match self {
-            Self::F32(samples) => {
-                for sample in samples_f32_to_i16(&samples) {
-                    writer.write_sample(sample).map_err(AudioError::from)?;
-                }
-            }
-            Self::I16(samples) => {
-                for sample in samples {
-                    writer.write_sample(sample).map_err(AudioError::from)?;
-                }
-            }
-            Self::U16(samples) => {
-                for sample in samples_u16_to_i16(&samples) {
-                    writer.write_sample(sample).map_err(AudioError::from)?;
-                }
-            }
-            Self::Error(message) => return Err(AudioError::Io(message)),
+        for sample in self.pcm16()? {
+            writer.write_sample(sample).map_err(AudioError::from)?;
         }
         Ok(())
     }
@@ -180,6 +201,14 @@ impl InputBackend for CpalInputBackend {
             let _ = errors.send(AudioSamples::Error(error.to_string()));
         };
         let stream = match supported.sample_format() {
+            cpal::SampleFormat::I8 => device.build_input_stream(
+                &config,
+                move |data: &[i8], _| {
+                    let _ = samples.send(AudioSamples::I8(data.to_vec()));
+                },
+                error_callback,
+                None,
+            ),
             cpal::SampleFormat::F32 => device.build_input_stream(
                 &config,
                 move |data: &[f32], _| {
@@ -196,10 +225,66 @@ impl InputBackend for CpalInputBackend {
                 error_callback,
                 None,
             ),
+            cpal::SampleFormat::I24 => device.build_input_stream(
+                &config,
+                move |data: &[cpal::I24], _| {
+                    let _ = samples.send(AudioSamples::I24(data.to_vec()));
+                },
+                error_callback,
+                None,
+            ),
+            cpal::SampleFormat::I32 => device.build_input_stream(
+                &config,
+                move |data: &[i32], _| {
+                    let _ = samples.send(AudioSamples::I32(data.to_vec()));
+                },
+                error_callback,
+                None,
+            ),
+            cpal::SampleFormat::I64 => device.build_input_stream(
+                &config,
+                move |data: &[i64], _| {
+                    let _ = samples.send(AudioSamples::I64(data.to_vec()));
+                },
+                error_callback,
+                None,
+            ),
+            cpal::SampleFormat::U8 => device.build_input_stream(
+                &config,
+                move |data: &[u8], _| {
+                    let _ = samples.send(AudioSamples::U8(data.to_vec()));
+                },
+                error_callback,
+                None,
+            ),
             cpal::SampleFormat::U16 => device.build_input_stream(
                 &config,
                 move |data: &[u16], _| {
                     let _ = samples.send(AudioSamples::U16(data.to_vec()));
+                },
+                error_callback,
+                None,
+            ),
+            cpal::SampleFormat::U32 => device.build_input_stream(
+                &config,
+                move |data: &[u32], _| {
+                    let _ = samples.send(AudioSamples::U32(data.to_vec()));
+                },
+                error_callback,
+                None,
+            ),
+            cpal::SampleFormat::U64 => device.build_input_stream(
+                &config,
+                move |data: &[u64], _| {
+                    let _ = samples.send(AudioSamples::U64(data.to_vec()));
+                },
+                error_callback,
+                None,
+            ),
+            cpal::SampleFormat::F64 => device.build_input_stream(
+                &config,
+                move |data: &[f64], _| {
+                    let _ = samples.send(AudioSamples::F64(data.to_vec()));
                 },
                 error_callback,
                 None,
@@ -403,25 +488,41 @@ impl AudioRecorder {
             .try_into()
             .unwrap_or(u64::MAX);
         drop(_input);
-        bridge
-            .join()
-            .map_err(|_| AudioError::Io("audio bridge thread panicked".into()))?;
-        sender
-            .send(WriterMessage::Finish)
-            .map_err(|error| AudioError::Io(error.to_string()))?;
-        writer
-            .join()
-            .map_err(|_| AudioError::Io("audio writer thread panicked".into()))??;
-        if cancel {
-            fs::remove_file(&part_path)?;
-        } else {
-            finalize_atomic(&part_path, &path)?;
+        let result = (|| {
+            bridge
+                .join()
+                .map_err(|_| AudioError::Io("audio bridge thread panicked".into()))?;
+            sender
+                .send(WriterMessage::Finish)
+                .map_err(|error| AudioError::Io(error.to_string()))?;
+            writer
+                .join()
+                .map_err(|_| AudioError::Io("audio writer thread panicked".into()))??;
+            if cancel {
+                fs::remove_file(&part_path)?;
+            } else {
+                finalize_atomic(&part_path, &path)?;
+            }
+            Ok::<(), AudioError>(())
+        })();
+        if let Err(error) = result {
+            let _ = fs::remove_file(&part_path);
+            return Err(error);
         }
         Ok(CompletedRecording {
             id,
             path,
             duration_ms,
         })
+    }
+}
+
+pub fn cleanup_partial(final_path: &Path) -> Result<(), AudioError> {
+    let part_path = part_path_for(final_path);
+    match fs::remove_file(part_path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(AudioError::Io(error.to_string())),
     }
 }
 
@@ -447,6 +548,39 @@ pub fn samples_u16_to_i16(samples: &[u16]) -> Vec<i16> {
         .map(|sample| {
             let shifted = i32::from(*sample) - 32768;
             shifted.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16
+        })
+        .collect()
+}
+
+pub fn samples_i32_to_i16(samples: &[i32]) -> Vec<i16> {
+    samples
+        .iter()
+        .map(|sample| (*sample >> 16).clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16)
+        .collect()
+}
+
+pub fn samples_u32_to_i16(samples: &[u32]) -> Vec<i16> {
+    samples
+        .iter()
+        .map(|sample| {
+            let centered = i64::from(*sample) - (1_i64 << 31);
+            (centered >> 16).clamp(i64::from(i16::MIN), i64::from(i16::MAX)) as i16
+        })
+        .collect()
+}
+
+pub fn samples_f64_to_i16(samples: &[f64]) -> Vec<i16> {
+    samples
+        .iter()
+        .map(|sample| {
+            let sample = if sample.is_finite() { *sample } else { 0.0 };
+            if sample <= -1.0 {
+                i16::MIN
+            } else if sample >= 1.0 {
+                i16::MAX
+            } else {
+                (sample * 32768.0).round() as i16
+            }
         })
         .collect()
 }
@@ -565,6 +699,18 @@ mod tests {
             samples_u16_to_i16(&[u16::MIN, 32768, u16::MAX]),
             vec![i16::MIN, 0, i16::MAX]
         );
+        assert_eq!(
+            samples_i32_to_i16(&[i32::MIN, 0, i32::MAX]),
+            vec![i16::MIN, 0, i16::MAX]
+        );
+        assert_eq!(
+            samples_u32_to_i16(&[u32::MIN, 1 << 31, u32::MAX]),
+            vec![i16::MIN, 0, i16::MAX]
+        );
+        assert_eq!(
+            samples_f64_to_i16(&[-2.0, -1.0, 0.0, 1.0, 2.0]),
+            vec![i16::MIN, i16::MIN, 0, i16::MAX, i16::MAX]
+        );
     }
 
     #[test]
@@ -655,10 +801,12 @@ mod tests {
             "device disconnected".into(),
         )]));
         let recorder = AudioRecorder::with_backend(temp.path(), backend);
-        recorder.start(None).unwrap();
+        let started = recorder.start(None).unwrap();
 
         let error = recorder.stop().unwrap_err();
 
         assert_eq!(error, AudioError::Io("device disconnected".into()));
+        assert!(!started.part_path.exists());
+        assert!(recorder.start(None).is_ok());
     }
 }

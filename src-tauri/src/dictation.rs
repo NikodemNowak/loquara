@@ -1,8 +1,9 @@
-use crate::audio::{AudioRecorder, InputDeviceInfo};
+use crate::audio::{AudioRecorder, InputDeviceInfo, cleanup_partial};
 use crate::domain::{DictationEvent, DictationState, transition};
 use crate::platform::{self, SystemWindows, WindowTarget, WindowsApi};
 use crate::storage::{
-    HistoryQuery, Recording, RecordingStatus, Storage, VocabularyEntry, postprocess,
+    HistoryQuery, Mode, Recording, RecordingStatus, Retention, Storage, VocabularyEntry,
+    postprocess,
 };
 use crate::transcription::{ClientError, TranscriptionResult, WorkerClient};
 use serde::{Deserialize, Serialize};
@@ -147,6 +148,12 @@ pub struct AppSettings {
     pub shortcut: String,
     pub auto_paste: bool,
     pub retention_days: Option<u32>,
+    #[serde(default = "default_launch_on_login")]
+    pub launch_on_login: bool,
+}
+
+const fn default_launch_on_login() -> bool {
+    true
 }
 
 impl Default for AppSettings {
@@ -156,8 +163,32 @@ impl Default for AppSettings {
             shortcut: "Ctrl+Space".into(),
             auto_paste: true,
             retention_days: Some(30),
+            launch_on_login: true,
         }
     }
+}
+
+fn retention_policy(days: Option<u32>) -> Result<Retention, String> {
+    match days {
+        None => Ok(Retention::Forever),
+        Some(days @ (1 | 7 | 30)) => Ok(Retention::Days(days)),
+        Some(days) => Err(format!("unsupported retention period: {days} days")),
+    }
+}
+
+pub fn cleanup_retention(state: &AppState) -> Result<usize, String> {
+    let retention = retention_policy(
+        state
+            .settings
+            .read()
+            .map_err(|_| "settings lock poisoned")?
+            .retention_days,
+    )?;
+    state
+        .storage
+        .cleanup_retention(retention, epoch_ms())
+        .map(|report| report.deleted_audio)
+        .map_err(|error| error.to_string())
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -177,6 +208,62 @@ pub struct AppState {
     pub settings: Arc<RwLock<AppSettings>>,
     python: String,
     worker_path: PathBuf,
+}
+
+pub trait TerminalStatusWriter {
+    fn write_terminal_status(
+        &self,
+        recording_id: &str,
+        status: RecordingStatus,
+        error: Option<&str>,
+    ) -> Result<(), String>;
+}
+
+impl TerminalStatusWriter for Storage {
+    fn write_terminal_status(
+        &self,
+        recording_id: &str,
+        status: RecordingStatus,
+        error: Option<&str>,
+    ) -> Result<(), String> {
+        self.update_status(recording_id, status, None, None, None, error)
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum TerminalOutcome {
+    Failed(String),
+    Cancelled,
+}
+
+pub fn recover_terminal_state(
+    machine: &Mutex<CoordinatorMachine>,
+    history: &impl TerminalStatusWriter,
+    recording_id: &str,
+    audio_path: &str,
+    outcome: TerminalOutcome,
+) -> Result<(), String> {
+    let (status, error) = match &outcome {
+        TerminalOutcome::Failed(error) => (RecordingStatus::Failed, Some(error.as_str())),
+        TerminalOutcome::Cancelled => (RecordingStatus::Cancelled, None),
+    };
+    let storage_result = history.write_terminal_status(recording_id, status, error);
+    let mut machine = machine
+        .lock()
+        .map_err(|_| "coordinator lock poisoned".to_owned())?;
+    machine.state = match outcome {
+        TerminalOutcome::Failed(error) => DictationState::Failed {
+            recovery: crate::domain::RecoveryRecording {
+                recording_id: recording_id.to_owned(),
+                audio_path: audio_path.to_owned(),
+            },
+            error,
+        },
+        TerminalOutcome::Cancelled => DictationState::Idle,
+    };
+    storage_result
 }
 
 impl AppState {
@@ -300,28 +387,71 @@ pub fn start_recording(app: AppHandle, state: State<'_, AppState>) -> Result<App
 }
 
 pub async fn stop_recording_inner(app: AppHandle, state: AppState) -> Result<AppSnapshot, String> {
+    let (recording_id, audio_path_string) = match state.snapshot()?.dictation {
+        DictationState::Recording {
+            recording_id,
+            audio_path,
+        } => (recording_id, audio_path),
+        _ => return Err(CoordinatorError::InvalidState.to_string()),
+    };
     let audio = state.audio.clone();
-    let completed = tauri::async_runtime::spawn_blocking(move || audio.stop())
+    let completed = match tauri::async_runtime::spawn_blocking(move || audio.stop())
         .await
         .map_err(|error| error.to_string())?
-        .map_err(|error| error.to_string())?;
-    state
-        .storage
-        .update_status(
-            &completed.id,
-            RecordingStatus::Processing,
-            None,
-            None,
-            Some(completed.duration_ms),
-            None,
-        )
-        .map_err(|error| error.to_string())?;
-    state
-        .machine
-        .lock()
-        .map_err(|_| "coordinator lock poisoned")?
-        .stopped()
-        .map_err(|error| error.to_string())?;
+    {
+        Ok(completed) => completed,
+        Err(error) => {
+            let message = error.to_string();
+            let _ = cleanup_partial(Path::new(&audio_path_string));
+            let _ = recover_terminal_state(
+                &state.machine,
+                state.storage.as_ref(),
+                &recording_id,
+                &audio_path_string,
+                TerminalOutcome::Failed(message.clone()),
+            );
+            emit_state(&app, &state);
+            return Err(message);
+        }
+    };
+    if let Err(error) = state.storage.update_status(
+        &completed.id,
+        RecordingStatus::Processing,
+        None,
+        None,
+        Some(completed.duration_ms),
+        None,
+    ) {
+        let message = error.to_string();
+        let _ = recover_terminal_state(
+            &state.machine,
+            state.storage.as_ref(),
+            &recording_id,
+            &audio_path_string,
+            TerminalOutcome::Failed(message.clone()),
+        );
+        emit_state(&app, &state);
+        return Err(message);
+    }
+    let transition_result = {
+        state
+            .machine
+            .lock()
+            .map_err(|_| "coordinator lock poisoned")?
+            .stopped()
+    };
+    if let Err(error) = transition_result {
+        let message = error.to_string();
+        let _ = recover_terminal_state(
+            &state.machine,
+            state.storage.as_ref(),
+            &recording_id,
+            &audio_path_string,
+            TerminalOutcome::Failed(message.clone()),
+        );
+        emit_state(&app, &state);
+        return Err(message);
+    }
     emit_state(&app, &state);
     let snapshot = state.snapshot()?;
     let background_app = app.clone();
@@ -450,18 +580,50 @@ pub fn cancel_recording(app: AppHandle, state: State<'_, AppState>) -> Result<Ap
 }
 
 pub fn cancel_recording_inner(app: &AppHandle, state: &AppState) -> Result<AppSnapshot, String> {
-    let cancelled = state.audio.cancel().map_err(|error| error.to_string())?;
-    state
-        .storage
-        .update_status(
-            &cancelled.id,
-            RecordingStatus::Cancelled,
-            None,
-            None,
-            Some(cancelled.duration_ms),
-            None,
-        )
-        .map_err(|error| error.to_string())?;
+    let (recording_id, audio_path) = match state.snapshot()?.dictation {
+        DictationState::Recording {
+            recording_id,
+            audio_path,
+        } => (recording_id, audio_path),
+        _ => return Err(CoordinatorError::InvalidState.to_string()),
+    };
+    let cancelled = match state.audio.cancel() {
+        Ok(cancelled) => cancelled,
+        Err(error) => {
+            let message = error.to_string();
+            let _ = cleanup_partial(Path::new(&audio_path));
+            let _ = recover_terminal_state(
+                &state.machine,
+                state.storage.as_ref(),
+                &recording_id,
+                &audio_path,
+                TerminalOutcome::Cancelled,
+            );
+            platform::hide_overlay(app);
+            emit_state(app, state);
+            return Err(message);
+        }
+    };
+    if let Err(error) = state.storage.update_status(
+        &cancelled.id,
+        RecordingStatus::Cancelled,
+        None,
+        None,
+        Some(cancelled.duration_ms),
+        None,
+    ) {
+        let message = error.to_string();
+        let _ = recover_terminal_state(
+            &state.machine,
+            state.storage.as_ref(),
+            &recording_id,
+            &audio_path,
+            TerminalOutcome::Cancelled,
+        );
+        platform::hide_overlay(app);
+        emit_state(app, state);
+        return Err(message);
+    }
     state
         .machine
         .lock()
@@ -642,6 +804,30 @@ pub fn delete_vocabulary(id: i64, state: State<'_, AppState>) -> Result<bool, St
 }
 
 #[tauri::command]
+pub fn list_modes(state: State<'_, AppState>) -> Result<Vec<Mode>, String> {
+    state
+        .storage
+        .list_modes()
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn upsert_mode(mode: Mode, state: State<'_, AppState>) -> Result<(), String> {
+    state
+        .storage
+        .upsert_mode(&mode)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn delete_mode(id: String, state: State<'_, AppState>) -> Result<bool, String> {
+    state
+        .storage
+        .delete_mode(&id)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 pub fn get_settings(state: State<'_, AppState>) -> Result<AppSettings, String> {
     state
         .settings
@@ -656,7 +842,9 @@ pub fn update_settings(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<AppSettings, String> {
+    retention_policy(settings.retention_days)?;
     platform::register_shortcuts(&app, &settings.shortcut).map_err(|error| error.to_string())?;
+    platform::sync_autostart(&app, settings.launch_on_login).map_err(|error| error.to_string())?;
     state
         .storage
         .set_setting("app", &settings)
@@ -665,6 +853,7 @@ pub fn update_settings(
         .settings
         .write()
         .map_err(|_| "settings lock poisoned")? = settings.clone();
+    cleanup_retention(&state)?;
     Ok(settings)
 }
 
@@ -738,5 +927,62 @@ mod tests {
                 audio_path: "history-one.wav".into(),
             }
         );
+    }
+
+    #[test]
+    fn settings_default_to_launching_on_login() {
+        assert!(AppSettings::default().launch_on_login);
+    }
+
+    struct FailingHistory;
+
+    impl TerminalStatusWriter for FailingHistory {
+        fn write_terminal_status(
+            &self,
+            _recording_id: &str,
+            _status: RecordingStatus,
+            _error: Option<&str>,
+        ) -> Result<(), String> {
+            Err("database unavailable".into())
+        }
+    }
+
+    #[test]
+    fn storage_failure_still_releases_recording_state_for_next_start() {
+        let machine = Mutex::new(CoordinatorMachine::default());
+        machine.lock().unwrap().started("one", "one.wav").unwrap();
+
+        let result = recover_terminal_state(
+            &machine,
+            &FailingHistory,
+            "one",
+            "one.wav",
+            TerminalOutcome::Failed("disk full".into()),
+        );
+
+        assert_eq!(result.unwrap_err(), "database unavailable");
+        {
+            let mut machine = machine.lock().unwrap();
+            assert!(matches!(machine.snapshot(), DictationState::Failed { .. }));
+            machine.cancel().unwrap();
+            assert!(machine.started("two", "two.wav").is_ok());
+        }
+    }
+
+    #[test]
+    fn cancellation_recovery_goes_idle_even_when_storage_fails() {
+        let machine = Mutex::new(CoordinatorMachine::default());
+        machine.lock().unwrap().started("one", "one.wav").unwrap();
+
+        let result = recover_terminal_state(
+            &machine,
+            &FailingHistory,
+            "one",
+            "one.wav",
+            TerminalOutcome::Cancelled,
+        );
+
+        assert_eq!(result.unwrap_err(), "database unavailable");
+        assert_eq!(machine.lock().unwrap().snapshot(), DictationState::Idle);
     }
 }
