@@ -117,6 +117,12 @@ pub struct Storage {
     recordings_dir: PathBuf,
 }
 
+struct RetentionReservation {
+    id: String,
+    original_path: String,
+    canonical_path: PathBuf,
+}
+
 impl Storage {
     pub fn open(
         path: impl AsRef<Path>,
@@ -546,20 +552,47 @@ impl Storage {
         retention: Retention,
         now_ms: i64,
     ) -> Result<CleanupReport, StorageError> {
-        let reserved = self.reserve_retention_audio(retention, now_ms)?;
+        self.cleanup_retention_with(retention, now_ms, |path| fs::remove_file(path))
+    }
+
+    fn cleanup_retention_with(
+        &self,
+        retention: Retention,
+        now_ms: i64,
+        mut remove: impl FnMut(&Path) -> std::io::Result<()>,
+    ) -> Result<CleanupReport, StorageError> {
+        let reserved = self.reserve_retention_records(retention, now_ms)?;
         let mut deleted_audio = 0;
-        for path in reserved {
-            fs::remove_file(path)?;
+        for (index, reservation) in reserved.iter().enumerate() {
+            if let Err(error) = remove(&reservation.canonical_path) {
+                self.restore_retention_reservations(&reserved[index..])?;
+                return Err(error.into());
+            }
             deleted_audio += 1;
         }
         Ok(CleanupReport { deleted_audio })
     }
 
+    #[cfg(test)]
     pub(crate) fn reserve_retention_audio(
         &self,
         retention: Retention,
         now_ms: i64,
     ) -> Result<Vec<PathBuf>, StorageError> {
+        self.reserve_retention_records(retention, now_ms)
+            .map(|reservations| {
+                reservations
+                    .into_iter()
+                    .map(|reservation| reservation.canonical_path)
+                    .collect()
+            })
+    }
+
+    fn reserve_retention_records(
+        &self,
+        retention: Retention,
+        now_ms: i64,
+    ) -> Result<Vec<RetentionReservation>, StorageError> {
         let Retention::Days(days @ (1 | 7 | 30)) = retention else {
             return Ok(Vec::new());
         };
@@ -572,7 +605,8 @@ impl Storage {
             let mut statement = transaction.prepare(
                 "SELECT id,audio_path FROM history
                  WHERE created_at < ?1 AND audio_path IS NOT NULL
-                   AND status IN ('completed','failed','cancelled')",
+                   AND status IN ('completed','failed','cancelled')
+                 ORDER BY created_at ASC,id ASC",
             )?;
             statement
                 .query_map([cutoff], |row| Ok((row.get(0)?, row.get(1)?)))?
@@ -598,12 +632,34 @@ impl Storage {
                     params![id, path.to_string_lossy().as_ref()],
                 )?;
                 if changed > 0 {
-                    reserved.push(canonical);
+                    reserved.push(RetentionReservation {
+                        id,
+                        original_path: path.to_string_lossy().into_owned(),
+                        canonical_path: canonical,
+                    });
                 }
             }
         }
         transaction.commit()?;
         Ok(reserved)
+    }
+
+    fn restore_retention_reservations(
+        &self,
+        reservations: &[RetentionReservation],
+    ) -> Result<(), StorageError> {
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        for reservation in reservations {
+            transaction.execute(
+                "UPDATE history SET audio_path=?2
+                 WHERE id=?1 AND audio_path IS NULL
+                   AND status IN ('completed','failed','cancelled')",
+                params![reservation.id, reservation.original_path],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
     }
 }
 
@@ -1068,5 +1124,68 @@ mod tests {
         );
         assert!(processing_path.is_file());
         drop(temp);
+    }
+
+    #[test]
+    fn retention_delete_failure_restores_failing_and_unprocessed_reservations() {
+        let (_temp, storage) = storage();
+        let recordings = storage.recordings_dir().to_path_buf();
+        fs::create_dir_all(&recordings).unwrap();
+        let mut paths = Vec::new();
+        for (index, id) in ["first", "second", "third"].into_iter().enumerate() {
+            let path = recordings.join(format!("{id}.wav"));
+            fs::write(&path, b"wav").unwrap();
+            let mut row = recording(id, RecordingStatus::Completed, None);
+            row.created_at = index as i64;
+            row.audio_path = Some(path.to_string_lossy().into_owned());
+            storage.insert_recording(&row).unwrap();
+            paths.push(path);
+        }
+        let attempts = std::cell::Cell::new(0);
+
+        let error = storage
+            .cleanup_retention_with(Retention::Days(1), 172_800_000, |path| {
+                let attempt = attempts.get() + 1;
+                attempts.set(attempt);
+                if attempt == 2 {
+                    return Err(std::io::Error::other("forced second delete failure"));
+                }
+                fs::remove_file(path)
+            })
+            .unwrap_err();
+
+        assert!(matches!(error, StorageError::Io(_)));
+        assert!(!paths[0].exists());
+        assert!(paths[1].is_file());
+        assert!(paths[2].is_file());
+        assert!(
+            storage
+                .get_recording("first")
+                .unwrap()
+                .unwrap()
+                .audio_path
+                .is_none()
+        );
+        for (id, path) in [("second", &paths[1]), ("third", &paths[2])] {
+            assert_eq!(
+                storage
+                    .get_recording(id)
+                    .unwrap()
+                    .unwrap()
+                    .audio_path
+                    .as_deref(),
+                Some(path.to_string_lossy().as_ref())
+            );
+        }
+
+        assert_eq!(
+            storage
+                .cleanup_retention(Retention::Days(1), 172_800_000)
+                .unwrap()
+                .deleted_audio,
+            2
+        );
+        assert!(!paths[1].exists());
+        assert!(!paths[2].exists());
     }
 }
