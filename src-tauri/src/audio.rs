@@ -518,12 +518,14 @@ impl AudioRecorder {
             bridge
                 .join()
                 .map_err(|_| AudioError::Io("audio bridge thread panicked".into()))?;
-            sender
+            let finish_result = sender
                 .send(WriterMessage::Finish)
-                .map_err(|error| AudioError::Io(error.to_string()))?;
-            writer
+                .map_err(|error| AudioError::Io(error.to_string()));
+            let writer_result = writer
                 .join()
-                .map_err(|_| AudioError::Io("audio writer thread panicked".into()))??;
+                .map_err(|_| AudioError::Io("audio writer thread panicked".into()))?;
+            writer_result?;
+            finish_result?;
             if overflowed.load(Ordering::Acquire) {
                 return Err(AudioError::BufferOverflow);
             }
@@ -838,6 +840,32 @@ mod tests {
         assert_eq!(error, AudioError::Io("device disconnected".into()));
         assert!(!started.part_path.exists());
         assert!(recorder.start(None).is_ok());
+    }
+
+    #[test]
+    fn shutdown_preserves_device_error_after_writer_has_already_exited() {
+        let temp = tempfile::tempdir().unwrap();
+        let backend = Arc::new(FakeInputBackend::with_samples(vec![AudioSamples::Error(
+            "device disconnected".into(),
+        )]));
+        let recorder = AudioRecorder::with_backend(temp.path(), backend);
+        recorder.start(None).unwrap();
+        while !recorder
+            .active
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .writer
+            .is_finished()
+        {
+            std::thread::yield_now();
+        }
+
+        assert_eq!(
+            recorder.stop().unwrap_err(),
+            AudioError::Io("device disconnected".into())
+        );
     }
 
     #[test]
