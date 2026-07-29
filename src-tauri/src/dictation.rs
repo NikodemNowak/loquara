@@ -1,4 +1,4 @@
-use crate::audio::{AudioRecorder, InputDeviceInfo, cleanup_partial};
+use crate::audio::{AudioRecorder, CompletedRecording, InputDeviceInfo, cleanup_partial};
 use crate::domain::{DictationEvent, DictationState, transition};
 use crate::platform::{self, SystemWindows, WindowTarget, WindowsApi};
 use crate::storage::{
@@ -18,6 +18,12 @@ use thiserror::Error;
 pub enum CoordinatorError {
     #[error("the requested operation is invalid for the current state")]
     InvalidState,
+    #[error("another lifecycle operation is in progress")]
+    Busy,
+}
+
+fn lifecycle_guard(gate: &Mutex<()>) -> Result<std::sync::MutexGuard<'_, ()>, CoordinatorError> {
+    gate.try_lock().map_err(|_| CoordinatorError::Busy)
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq, Serialize)]
@@ -236,6 +242,7 @@ pub struct AppState {
     pub worker: Arc<Mutex<Option<WorkerClient>>>,
     pub target_window: Arc<Mutex<Option<WindowTarget>>>,
     pub settings: Arc<RwLock<AppSettings>>,
+    lifecycle: Arc<Mutex<()>>,
     settings_update: Arc<Mutex<()>>,
     python: String,
     worker_path: PathBuf,
@@ -467,6 +474,7 @@ impl AppState {
             worker: Arc::new(Mutex::new(None)),
             target_window: Arc::new(Mutex::new(None)),
             settings: Arc::new(RwLock::new(settings)),
+            lifecycle: Arc::new(Mutex::new(())),
             settings_update: Arc::new(Mutex::new(())),
             python: python.into(),
             worker_path: worker_path.into(),
@@ -564,6 +572,7 @@ pub fn list_input_devices(state: State<'_, AppState>) -> Result<Vec<InputDeviceI
 }
 
 pub fn start_recording_inner(app: &AppHandle, state: &AppState) -> Result<AppSnapshot, String> {
+    let _lifecycle = lifecycle_guard(&state.lifecycle).map_err(|error| error.to_string())?;
     if !matches!(state.snapshot()?.dictation, DictationState::Idle) {
         return Err(CoordinatorError::InvalidState.to_string());
     }
@@ -616,6 +625,38 @@ pub fn start_recording(app: AppHandle, state: State<'_, AppState>) -> Result<App
 }
 
 pub async fn stop_recording_inner(app: AppHandle, state: AppState) -> Result<AppSnapshot, String> {
+    let blocking_state = state.clone();
+    let completed_result = tauri::async_runtime::spawn_blocking(move || {
+        let _lifecycle =
+            lifecycle_guard(&blocking_state.lifecycle).map_err(|error| error.to_string())?;
+        stop_recording_committed(&blocking_state)
+    })
+    .await
+    .map_err(|error| error.to_string())?;
+    let completed = match completed_result {
+        Ok(completed) => completed,
+        Err(error) => {
+            emit_state(&app, &state);
+            return Err(error);
+        }
+    };
+    emit_state(&app, &state);
+    let snapshot = state.snapshot()?;
+    let background_app = app.clone();
+    let background_state = state.clone();
+    tauri::async_runtime::spawn(async move {
+        transcribe_recording(
+            background_app,
+            background_state,
+            completed.id,
+            completed.path,
+        )
+        .await;
+    });
+    Ok(snapshot)
+}
+
+fn stop_recording_committed(state: &AppState) -> Result<CompletedRecording, String> {
     let (recording_id, audio_path_string) = match state.snapshot()?.dictation {
         DictationState::Recording {
             recording_id,
@@ -623,11 +664,7 @@ pub async fn stop_recording_inner(app: AppHandle, state: AppState) -> Result<App
         } => (recording_id, audio_path),
         _ => return Err(CoordinatorError::InvalidState.to_string()),
     };
-    let audio = state.audio.clone();
-    let completed = match tauri::async_runtime::spawn_blocking(move || audio.stop())
-        .await
-        .map_err(|error| error.to_string())?
-    {
+    let completed = match state.audio.stop() {
         Ok(completed) => completed,
         Err(error) => {
             let message = error.to_string();
@@ -639,7 +676,6 @@ pub async fn stop_recording_inner(app: AppHandle, state: AppState) -> Result<App
                 &audio_path_string,
                 TerminalOutcome::Failed(message.clone()),
             );
-            emit_state(&app, &state);
             return Err(message);
         }
     };
@@ -654,7 +690,6 @@ pub async fn stop_recording_inner(app: AppHandle, state: AppState) -> Result<App
             &audio_path_string,
             TerminalOutcome::Failed(message.clone()),
         );
-        emit_state(&app, &state);
         return Err(message);
     }
     let transition_result = {
@@ -673,23 +708,9 @@ pub async fn stop_recording_inner(app: AppHandle, state: AppState) -> Result<App
             &audio_path_string,
             TerminalOutcome::Failed(message.clone()),
         );
-        emit_state(&app, &state);
         return Err(message);
     }
-    emit_state(&app, &state);
-    let snapshot = state.snapshot()?;
-    let background_app = app.clone();
-    let background_state = state.clone();
-    tauri::async_runtime::spawn(async move {
-        transcribe_recording(
-            background_app,
-            background_state,
-            completed.id,
-            completed.path,
-        )
-        .await;
-    });
-    Ok(snapshot)
+    Ok(completed)
 }
 
 fn mark_processing(
@@ -825,6 +846,7 @@ pub fn cancel_recording(app: AppHandle, state: State<'_, AppState>) -> Result<Ap
 }
 
 pub fn cancel_recording_inner(app: &AppHandle, state: &AppState) -> Result<AppSnapshot, String> {
+    let _lifecycle = lifecycle_guard(&state.lifecycle).map_err(|error| error.to_string())?;
     let (recording_id, audio_path) = match state.snapshot()?.dictation {
         DictationState::Recording {
             recording_id,
@@ -887,6 +909,7 @@ pub fn retry_transcription(
     state: State<'_, AppState>,
 ) -> Result<AppSnapshot, String> {
     let audio_path = {
+        let _lifecycle = lifecycle_guard(&state.lifecycle).map_err(|error| error.to_string())?;
         let mut machine = state
             .machine
             .lock()
@@ -1331,6 +1354,108 @@ mod tests {
         assert_eq!(retry_audio_path(&retryable).unwrap(), final_audio);
         assert!(matches!(
             retry_audio_path(&interrupted),
+            Err(AppError::NotRetryable { .. })
+        ));
+    }
+
+    #[test]
+    fn simultaneous_lifecycle_operations_have_one_winner_and_one_busy_loser() {
+        let gate = Arc::new(Mutex::new(()));
+        let entered = Arc::new(std::sync::Barrier::new(2));
+        let release = Arc::new(std::sync::Barrier::new(2));
+        let worker_gate = gate.clone();
+        let worker_entered = entered.clone();
+        let worker_release = release.clone();
+        let winner = std::thread::spawn(move || {
+            let _guard = lifecycle_guard(&worker_gate)?;
+            worker_entered.wait();
+            worker_release.wait();
+            Ok::<_, CoordinatorError>("stop")
+        });
+        entered.wait();
+
+        let loser = lifecycle_guard(&gate);
+        release.wait();
+
+        assert_eq!(winner.join().unwrap().unwrap(), "stop");
+        assert_eq!(loser.unwrap_err(), CoordinatorError::Busy);
+    }
+
+    #[test]
+    fn simultaneous_start_and_retry_cannot_overwrite_the_reserved_operation() {
+        let gate = Arc::new(Mutex::new(()));
+        let owner = Arc::new(Mutex::new(None));
+        let entered = Arc::new(std::sync::Barrier::new(2));
+        let release = Arc::new(std::sync::Barrier::new(2));
+        let worker_gate = gate.clone();
+        let worker_owner = owner.clone();
+        let worker_entered = entered.clone();
+        let worker_release = release.clone();
+        let start = std::thread::spawn(move || {
+            let _guard = lifecycle_guard(&worker_gate)?;
+            *worker_owner.lock().unwrap() = Some("start");
+            worker_entered.wait();
+            worker_release.wait();
+            Ok::<_, CoordinatorError>(())
+        });
+        entered.wait();
+
+        let retry = lifecycle_guard(&gate);
+        release.wait();
+
+        start.join().unwrap().unwrap();
+        assert_eq!(retry.unwrap_err(), CoordinatorError::Busy);
+        assert_eq!(*owner.lock().unwrap(), Some("start"));
+    }
+
+    #[test]
+    fn simultaneous_double_stop_has_one_commit_and_one_busy_result() {
+        let gate = Arc::new(Mutex::new(()));
+        let commits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let entered = Arc::new(std::sync::Barrier::new(2));
+        let release = Arc::new(std::sync::Barrier::new(2));
+        let worker_gate = gate.clone();
+        let worker_commits = commits.clone();
+        let worker_entered = entered.clone();
+        let worker_release = release.clone();
+        let first = std::thread::spawn(move || {
+            let _guard = lifecycle_guard(&worker_gate)?;
+            worker_entered.wait();
+            worker_commits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            worker_release.wait();
+            Ok::<_, CoordinatorError>(())
+        });
+        entered.wait();
+
+        let second = lifecycle_guard(&gate);
+        release.wait();
+
+        first.join().unwrap().unwrap();
+        assert_eq!(second.unwrap_err(), CoordinatorError::Busy);
+        assert_eq!(commits.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn retention_reservation_wins_before_retry_and_makes_audio_non_retryable() {
+        let temp = tempfile::tempdir().unwrap();
+        let recordings = temp.path().join("recordings");
+        fs::create_dir_all(&recordings).unwrap();
+        let audio_path = recordings.join("failed.wav");
+        fs::write(&audio_path, b"wav").unwrap();
+        let storage = Storage::open_in_memory(&recordings).unwrap();
+        let mut row = history_recording("failed", RecordingStatus::Failed, &audio_path);
+        row.created_at = 0;
+        storage.insert_recording(&row).unwrap();
+
+        let reserved = storage
+            .reserve_retention_audio(Retention::Days(1), 172_800_000)
+            .unwrap();
+        let reserved_row = storage.get_recording("failed").unwrap().unwrap();
+
+        assert_eq!(reserved, vec![audio_path.canonicalize().unwrap()]);
+        assert!(reserved_row.audio_path.is_none());
+        assert!(matches!(
+            retry_audio_path(&reserved_row),
             Err(AppError::NotRetryable { .. })
         ));
     }

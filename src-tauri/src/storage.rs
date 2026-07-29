@@ -1,6 +1,6 @@
 use crate::audio::part_path_for;
 use regex::Regex;
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -546,15 +546,30 @@ impl Storage {
         retention: Retention,
         now_ms: i64,
     ) -> Result<CleanupReport, StorageError> {
+        let reserved = self.reserve_retention_audio(retention, now_ms)?;
+        let mut deleted_audio = 0;
+        for path in reserved {
+            fs::remove_file(path)?;
+            deleted_audio += 1;
+        }
+        Ok(CleanupReport { deleted_audio })
+    }
+
+    pub(crate) fn reserve_retention_audio(
+        &self,
+        retention: Retention,
+        now_ms: i64,
+    ) -> Result<Vec<PathBuf>, StorageError> {
         let Retention::Days(days @ (1 | 7 | 30)) = retention else {
-            return Ok(CleanupReport { deleted_audio: 0 });
+            return Ok(Vec::new());
         };
         let cutoff = now_ms.saturating_sub(i64::from(days) * 86_400_000);
         fs::create_dir_all(&self.recordings_dir)?;
         let managed_root = self.recordings_dir.canonicalize()?;
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let candidates: Vec<(String, String)> = {
-            let connection = self.connection()?;
-            let mut statement = connection.prepare(
+            let mut statement = transaction.prepare(
                 "SELECT id,audio_path FROM history
                  WHERE created_at < ?1 AND audio_path IS NOT NULL
                    AND status IN ('completed','failed','cancelled')",
@@ -563,7 +578,7 @@ impl Storage {
                 .query_map([cutoff], |row| Ok((row.get(0)?, row.get(1)?)))?
                 .collect::<Result<Vec<_>, _>>()?
         };
-        let mut cleared_ids = Vec::new();
+        let mut reserved = Vec::new();
         for (id, raw_path) in candidates {
             let path = PathBuf::from(raw_path);
             let Ok(canonical) = path.canonicalize() else {
@@ -576,19 +591,19 @@ impl Storage {
                     .extension()
                     .is_some_and(|extension| extension == "wav")
             {
-                fs::remove_file(&canonical)?;
-                cleared_ids.push(id);
+                let changed = transaction.execute(
+                    "UPDATE history SET audio_path=NULL
+                     WHERE id=?1 AND audio_path=?2
+                       AND status IN ('completed','failed','cancelled')",
+                    params![id, path.to_string_lossy().as_ref()],
+                )?;
+                if changed > 0 {
+                    reserved.push(canonical);
+                }
             }
         }
-        let mut connection = self.connection()?;
-        let transaction = connection.transaction()?;
-        for id in &cleared_ids {
-            transaction.execute("UPDATE history SET audio_path=NULL WHERE id=?1", [id])?;
-        }
         transaction.commit()?;
-        Ok(CleanupReport {
-            deleted_audio: cleared_ids.len(),
-        })
+        Ok(reserved)
     }
 }
 
@@ -1009,5 +1024,49 @@ mod tests {
                 .audio_path
                 .is_some()
         );
+    }
+
+    #[test]
+    fn retention_reservation_is_conditional_on_terminal_status_and_audio_path() {
+        let (temp, storage) = storage();
+        let recordings = storage.recordings_dir().to_path_buf();
+        fs::create_dir_all(&recordings).unwrap();
+        let completed_path = recordings.join("completed.wav");
+        let processing_path = recordings.join("processing.wav");
+        fs::write(&completed_path, b"wav").unwrap();
+        fs::write(&processing_path, b"wav").unwrap();
+        let mut completed = recording("completed-reserved", RecordingStatus::Completed, None);
+        completed.created_at = 0;
+        completed.audio_path = Some(completed_path.to_string_lossy().into_owned());
+        storage.insert_recording(&completed).unwrap();
+        let mut processing = recording("processing-survives", RecordingStatus::Processing, None);
+        processing.created_at = 0;
+        processing.audio_path = Some(processing_path.to_string_lossy().into_owned());
+        storage.insert_recording(&processing).unwrap();
+
+        let reserved = storage
+            .reserve_retention_audio(Retention::Days(1), 172_800_000)
+            .unwrap();
+
+        assert_eq!(reserved, vec![completed_path.canonicalize().unwrap()]);
+        assert!(
+            storage
+                .get_recording("completed-reserved")
+                .unwrap()
+                .unwrap()
+                .audio_path
+                .is_none()
+        );
+        assert_eq!(
+            storage
+                .get_recording("processing-survives")
+                .unwrap()
+                .unwrap()
+                .audio_path
+                .as_deref(),
+            Some(processing_path.to_string_lossy().as_ref())
+        );
+        assert!(processing_path.is_file());
+        drop(temp);
     }
 }

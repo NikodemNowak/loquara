@@ -2,8 +2,8 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{self, Sender, SyncSender};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::{self, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -105,6 +105,8 @@ pub enum AudioError {
     NotRecording,
     #[error("no input device is available")]
     NoInputDevice,
+    #[error("audio input buffer overflowed")]
+    BufferOverflow,
     #[error("audio I/O failed: {0}")]
     Io(String),
 }
@@ -130,8 +132,19 @@ pub trait InputBackend: Send + Sync {
     fn start(
         &self,
         device_id: Option<&str>,
-        samples: Sender<AudioSamples>,
+        samples: SyncSender<AudioSamples>,
+        overflowed: Arc<AtomicBool>,
     ) -> Result<Box<dyn ActiveInput>, AudioError>;
+}
+
+fn try_send_samples(
+    sender: &SyncSender<AudioSamples>,
+    overflowed: &AtomicBool,
+    samples: AudioSamples,
+) {
+    if matches!(sender.try_send(samples), Err(TrySendError::Full(_))) {
+        overflowed.store(true, Ordering::Release);
+    }
 }
 
 pub struct CpalInputBackend;
@@ -189,7 +202,8 @@ impl InputBackend for CpalInputBackend {
     fn start(
         &self,
         device_id: Option<&str>,
-        samples: Sender<AudioSamples>,
+        samples: SyncSender<AudioSamples>,
+        overflowed: Arc<AtomicBool>,
     ) -> Result<Box<dyn ActiveInput>, AudioError> {
         let device = self.device(device_id)?;
         let supported = device
@@ -197,14 +211,19 @@ impl InputBackend for CpalInputBackend {
             .map_err(|error| AudioError::Io(error.to_string()))?;
         let config = supported.config();
         let errors = samples.clone();
+        let error_overflowed = overflowed.clone();
         let error_callback = move |error: cpal::StreamError| {
-            let _ = errors.send(AudioSamples::Error(error.to_string()));
+            try_send_samples(
+                &errors,
+                &error_overflowed,
+                AudioSamples::Error(error.to_string()),
+            );
         };
         let stream = match supported.sample_format() {
             cpal::SampleFormat::I8 => device.build_input_stream(
                 &config,
                 move |data: &[i8], _| {
-                    let _ = samples.send(AudioSamples::I8(data.to_vec()));
+                    try_send_samples(&samples, &overflowed, AudioSamples::I8(data.to_vec()));
                 },
                 error_callback,
                 None,
@@ -212,7 +231,7 @@ impl InputBackend for CpalInputBackend {
             cpal::SampleFormat::F32 => device.build_input_stream(
                 &config,
                 move |data: &[f32], _| {
-                    let _ = samples.send(AudioSamples::F32(data.to_vec()));
+                    try_send_samples(&samples, &overflowed, AudioSamples::F32(data.to_vec()));
                 },
                 error_callback,
                 None,
@@ -220,7 +239,7 @@ impl InputBackend for CpalInputBackend {
             cpal::SampleFormat::I16 => device.build_input_stream(
                 &config,
                 move |data: &[i16], _| {
-                    let _ = samples.send(AudioSamples::I16(data.to_vec()));
+                    try_send_samples(&samples, &overflowed, AudioSamples::I16(data.to_vec()));
                 },
                 error_callback,
                 None,
@@ -228,7 +247,7 @@ impl InputBackend for CpalInputBackend {
             cpal::SampleFormat::I24 => device.build_input_stream(
                 &config,
                 move |data: &[cpal::I24], _| {
-                    let _ = samples.send(AudioSamples::I24(data.to_vec()));
+                    try_send_samples(&samples, &overflowed, AudioSamples::I24(data.to_vec()));
                 },
                 error_callback,
                 None,
@@ -236,7 +255,7 @@ impl InputBackend for CpalInputBackend {
             cpal::SampleFormat::I32 => device.build_input_stream(
                 &config,
                 move |data: &[i32], _| {
-                    let _ = samples.send(AudioSamples::I32(data.to_vec()));
+                    try_send_samples(&samples, &overflowed, AudioSamples::I32(data.to_vec()));
                 },
                 error_callback,
                 None,
@@ -244,7 +263,7 @@ impl InputBackend for CpalInputBackend {
             cpal::SampleFormat::I64 => device.build_input_stream(
                 &config,
                 move |data: &[i64], _| {
-                    let _ = samples.send(AudioSamples::I64(data.to_vec()));
+                    try_send_samples(&samples, &overflowed, AudioSamples::I64(data.to_vec()));
                 },
                 error_callback,
                 None,
@@ -252,7 +271,7 @@ impl InputBackend for CpalInputBackend {
             cpal::SampleFormat::U8 => device.build_input_stream(
                 &config,
                 move |data: &[u8], _| {
-                    let _ = samples.send(AudioSamples::U8(data.to_vec()));
+                    try_send_samples(&samples, &overflowed, AudioSamples::U8(data.to_vec()));
                 },
                 error_callback,
                 None,
@@ -260,7 +279,7 @@ impl InputBackend for CpalInputBackend {
             cpal::SampleFormat::U16 => device.build_input_stream(
                 &config,
                 move |data: &[u16], _| {
-                    let _ = samples.send(AudioSamples::U16(data.to_vec()));
+                    try_send_samples(&samples, &overflowed, AudioSamples::U16(data.to_vec()));
                 },
                 error_callback,
                 None,
@@ -268,7 +287,7 @@ impl InputBackend for CpalInputBackend {
             cpal::SampleFormat::U32 => device.build_input_stream(
                 &config,
                 move |data: &[u32], _| {
-                    let _ = samples.send(AudioSamples::U32(data.to_vec()));
+                    try_send_samples(&samples, &overflowed, AudioSamples::U32(data.to_vec()));
                 },
                 error_callback,
                 None,
@@ -276,7 +295,7 @@ impl InputBackend for CpalInputBackend {
             cpal::SampleFormat::U64 => device.build_input_stream(
                 &config,
                 move |data: &[u64], _| {
-                    let _ = samples.send(AudioSamples::U64(data.to_vec()));
+                    try_send_samples(&samples, &overflowed, AudioSamples::U64(data.to_vec()));
                 },
                 error_callback,
                 None,
@@ -284,7 +303,7 @@ impl InputBackend for CpalInputBackend {
             cpal::SampleFormat::F64 => device.build_input_stream(
                 &config,
                 move |data: &[f64], _| {
-                    let _ = samples.send(AudioSamples::F64(data.to_vec()));
+                    try_send_samples(&samples, &overflowed, AudioSamples::F64(data.to_vec()));
                 },
                 error_callback,
                 None,
@@ -316,6 +335,7 @@ struct ActiveRecording {
     sender: SyncSender<WriterMessage>,
     bridge: JoinHandle<()>,
     writer: JoinHandle<Result<(), AudioError>>,
+    overflowed: Arc<AtomicBool>,
     _input: Box<dyn ActiveInput>,
 }
 
@@ -396,15 +416,19 @@ impl AudioRecorder {
             sample_format: hound::SampleFormat::Int,
         };
         let writer = hound::WavWriter::create(&part_path, spec)?;
-        let (packet_sender, packet_receiver) = mpsc::channel();
+        let (packet_sender, packet_receiver) = mpsc::sync_channel(16);
         let (writer_sender, writer_receiver) = mpsc::sync_channel(16);
+        let overflowed = Arc::new(AtomicBool::new(false));
         let level_sender = self
             .level_sender
             .lock()
             .ok()
             .and_then(|sender| sender.clone());
         let bridge_sender = writer_sender.clone();
-        let input = match self.backend.start(device_id, packet_sender) {
+        let input = match self
+            .backend
+            .start(device_id, packet_sender, overflowed.clone())
+        {
             Ok(input) => input,
             Err(error) => {
                 drop(writer);
@@ -452,6 +476,7 @@ impl AudioRecorder {
             sender: writer_sender,
             bridge,
             writer: writer_handle,
+            overflowed,
             _input: input,
         });
         Ok(started)
@@ -480,6 +505,7 @@ impl AudioRecorder {
             sender,
             bridge,
             writer,
+            overflowed,
             _input,
         } = recording;
         let duration_ms = started_at
@@ -498,6 +524,9 @@ impl AudioRecorder {
             writer
                 .join()
                 .map_err(|_| AudioError::Io("audio writer thread panicked".into()))??;
+            if overflowed.load(Ordering::Acquire) {
+                return Err(AudioError::BufferOverflow);
+            }
             if cancel {
                 fs::remove_file(&part_path)?;
             } else {
@@ -674,10 +703,11 @@ impl InputBackend for FakeInputBackend {
     fn start(
         &self,
         _device_id: Option<&str>,
-        sender: Sender<AudioSamples>,
+        sender: SyncSender<AudioSamples>,
+        overflowed: Arc<AtomicBool>,
     ) -> Result<Box<dyn ActiveInput>, AudioError> {
         for samples in &self.samples {
-            let _ = sender.send(samples.clone());
+            try_send_samples(&sender, &overflowed, samples.clone());
         }
         Ok(Box::new(()))
     }
@@ -808,5 +838,23 @@ mod tests {
         assert_eq!(error, AudioError::Io("device disconnected".into()));
         assert!(!started.part_path.exists());
         assert!(recorder.start(None).is_ok());
+    }
+
+    #[test]
+    fn callback_burst_overflow_is_bounded_cleans_partial_and_allows_restart() {
+        let temp = tempfile::tempdir().unwrap();
+        let backend = Arc::new(FakeInputBackend::with_samples(
+            (0..10_000)
+                .map(|_| AudioSamples::I16(vec![1; 64]))
+                .collect(),
+        ));
+        let recorder = AudioRecorder::with_backend(temp.path(), backend);
+        let started = recorder.start(None).unwrap();
+
+        assert_eq!(recorder.stop().unwrap_err(), AudioError::BufferOverflow);
+        assert!(!started.part_path.exists());
+        assert!(!started.path.exists());
+        assert!(recorder.start(None).is_ok());
+        assert_eq!(recorder.cancel().unwrap_err(), AudioError::BufferOverflow);
     }
 }
