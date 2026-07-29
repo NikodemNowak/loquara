@@ -12,3 +12,5 @@ models/
 recordings/
 *.log
 
+*.tsbuildinfo
+src-tauri/gen/

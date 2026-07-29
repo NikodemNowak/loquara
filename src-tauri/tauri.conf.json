@@ -1,0 +1,24 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "productName": "Mów",
+  "version": "0.1.0",
+  "identifier": "pl.mow.app",
+  "build": {
+    "beforeDevCommand": "pnpm dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "pnpm build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Mów",
+        "width": 960,
+        "height": 680
+      }
+    ]
+  },
+  "bundle": {
+    "active": false
+  }
+}
