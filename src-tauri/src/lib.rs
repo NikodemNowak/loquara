@@ -6,24 +6,58 @@ pub mod storage;
 pub mod transcription;
 
 use crate::dictation::AppState;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tauri::menu::MenuBuilder;
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{Emitter, Manager, WindowEvent};
 use tauri_plugin_global_shortcut::ShortcutState;
 
-fn worker_path() -> PathBuf {
-    let current = std::env::current_dir().unwrap_or_default();
-    let direct = current.join("engine").join("parakeet_worker.py");
-    if direct.is_file() {
-        direct
-    } else {
+fn worker_path_candidates(current: &Path, resources: Option<&Path>) -> Vec<PathBuf> {
+    let mut candidates = vec![
+        current.join("engine").join("parakeet_worker.py"),
         current
             .parent()
-            .unwrap_or(&current)
+            .unwrap_or(current)
             .join("engine")
-            .join("parakeet_worker.py")
+            .join("parakeet_worker.py"),
+    ];
+    if let Some(resources) = resources {
+        candidates.push(resources.join("engine").join("parakeet_worker.py"));
+        candidates.push(
+            resources
+                .join("_up_")
+                .join("engine")
+                .join("parakeet_worker.py"),
+        );
     }
+    candidates
+}
+
+fn select_worker_path(
+    candidates: &[PathBuf],
+    mut is_file: impl FnMut(&Path) -> bool,
+) -> Option<PathBuf> {
+    candidates.iter().find(|path| is_file(path)).cloned()
+}
+
+fn resolve_worker_path(
+    current: &Path,
+    resources: Option<&Path>,
+) -> Result<PathBuf, std::io::Error> {
+    let candidates = worker_path_candidates(current, resources);
+    select_worker_path(&candidates, Path::is_file).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!(
+                "nie znaleziono workera Parakeet; sprawdzono: {}",
+                candidates
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        )
+    })
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -61,6 +95,10 @@ pub fn run() {
                 .build(),
         )
         .setup(|app| {
+            let current_dir = std::env::current_dir()?;
+            let resource_dir = app.path().resource_dir()?;
+            let worker_path = resolve_worker_path(&current_dir, Some(&resource_dir))?;
+            let python = transcription::resolve_python_executable()?;
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
             let recordings_dir = data_dir.join("recordings");
@@ -69,8 +107,8 @@ pub fn run() {
             let state = AppState::new(
                 audio::AudioRecorder::new(recordings_dir),
                 storage,
-                "python",
-                worker_path(),
+                python,
+                worker_path,
             );
             let (level_sender, level_receiver) = std::sync::mpsc::sync_channel(2);
             state.audio.set_level_sender(level_sender);
@@ -176,4 +214,44 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("nie udało się uruchomić aplikacji Mów");
+}
+
+#[cfg(test)]
+mod packaging_tests {
+    use super::*;
+
+    #[test]
+    fn worker_candidates_prefer_dev_repo_then_bundled_resource_layouts() {
+        let current = PathBuf::from(r"C:\kod\mów");
+        let resources = PathBuf::from(r"C:\Program Files\Mów");
+
+        assert_eq!(
+            worker_path_candidates(&current, Some(&resources)),
+            vec![
+                current.join("engine").join("parakeet_worker.py"),
+                current
+                    .parent()
+                    .unwrap()
+                    .join("engine")
+                    .join("parakeet_worker.py"),
+                resources.join("engine").join("parakeet_worker.py"),
+                resources
+                    .join("_up_")
+                    .join("engine")
+                    .join("parakeet_worker.py"),
+            ]
+        );
+    }
+
+    #[test]
+    fn worker_selection_handles_unicode_and_uses_first_existing_candidate() {
+        let candidates = vec![
+            PathBuf::from(r"C:\źródła\Mów\engine\parakeet_worker.py"),
+            PathBuf::from(r"C:\Program Files\Mów\_up_\engine\parakeet_worker.py"),
+        ];
+
+        let selected = select_worker_path(&candidates, |path| path == candidates[1].as_path());
+
+        assert_eq!(selected, Some(candidates[1].clone()));
+    }
 }

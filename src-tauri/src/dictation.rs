@@ -5,7 +5,7 @@ use crate::storage::{
     HistoryQuery, Mode, Recording, RecordingStatus, Retention, Storage, StorageError,
     VocabularyEntry, postprocess_for_mode,
 };
-use crate::transcription::{ClientError, TranscriptionResult, WorkerClient};
+use crate::transcription::{ClientError, PythonExecutable, TranscriptionResult, WorkerClient};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -437,7 +437,7 @@ pub struct AppState {
     pub settings: Arc<RwLock<AppSettings>>,
     lifecycle: Arc<Mutex<()>>,
     settings_update: Arc<Mutex<()>>,
-    python: String,
+    python: PythonExecutable,
     worker_path: PathBuf,
 }
 
@@ -652,7 +652,7 @@ impl AppState {
     pub fn new(
         audio: AudioRecorder,
         storage: Storage,
-        python: impl Into<String>,
+        python: impl Into<PythonExecutable>,
         worker_path: impl Into<PathBuf>,
     ) -> Self {
         let settings = storage

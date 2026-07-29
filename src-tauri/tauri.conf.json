@@ -2,7 +2,7 @@
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "Mów",
   "version": "0.1.0",
-  "identifier": "pl.mow.app",
+  "identifier": "pl.mow.desktop",
   "build": {
     "beforeDevCommand": "pnpm dev",
     "devUrl": "http://localhost:1420",
@@ -35,6 +35,18 @@
     ]
   },
   "bundle": {
-    "active": false
+    "active": true,
+    "targets": [
+      "nsis"
+    ],
+    "icon": [
+      "icons/icon.ico"
+    ],
+    "resources": [
+      "../engine/parakeet_worker.py",
+      "../engine/protocol.py",
+      "../engine/__init__.py",
+      "../engine/requirements.txt"
+    ]
   }
 }

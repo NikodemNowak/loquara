@@ -11,6 +11,7 @@ __pycache__/
 models/
 recordings/
 *.log
+.tmp-vite-review.log.err
 
 *.tsbuildinfo
 src-tauri/gen/

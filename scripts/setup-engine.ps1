@@ -30,7 +30,7 @@ if (-not $SkipInstall) {
     }
 }
 
-& $Python -c "import torch; print(f'PyTorch {torch.__version__}'); print(f'CUDA available: {torch.cuda.is_available()}'); print(f'CUDA version: {torch.version.cuda or ""none""}')"
+& $Python -c "import torch; assert torch.cuda.is_available(), 'CUDA GPU is required'; print(f'PyTorch {torch.__version__}'); print(f'CUDA available: {torch.cuda.is_available()}'); print(f'CUDA version: {torch.version.cuda or ""none""}'); print(f'GPU: {torch.cuda.get_device_name(0)}')"
 if ($LASTEXITCODE -ne 0) {
     throw "PyTorch is not installed. Install the correct CUDA build separately, then rerun this script."
 }

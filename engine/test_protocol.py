@@ -213,11 +213,12 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(
             packages,
             {
-                "numpy==2.5.1",
+                "numpy==2.4.4",
                 "transformers==5.14.1",
                 "safetensors==0.8.0",
                 "huggingface_hub==1.24.0",
                 "soxr==1.1.0",
+                "librosa==0.11.0",
             },
         )
         self.assertFalse(

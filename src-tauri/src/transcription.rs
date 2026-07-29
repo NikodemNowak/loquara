@@ -6,7 +6,7 @@
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -14,6 +14,80 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread;
 use std::time::Duration;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PythonExecutable {
+    pub program: OsString,
+    pub args: Vec<OsString>,
+}
+
+impl PythonExecutable {
+    pub fn new<P, I, A>(program: P, args: I) -> Self
+    where
+        P: AsRef<OsStr>,
+        I: IntoIterator<Item = A>,
+        A: AsRef<OsStr>,
+    {
+        Self {
+            program: program.as_ref().to_os_string(),
+            args: args
+                .into_iter()
+                .map(|argument| argument.as_ref().to_os_string())
+                .collect(),
+        }
+    }
+}
+
+impl From<String> for PythonExecutable {
+    fn from(program: String) -> Self {
+        Self::new(program, Vec::<&OsStr>::new())
+    }
+}
+
+impl From<&str> for PythonExecutable {
+    fn from(program: &str) -> Self {
+        Self::new(program, Vec::<&OsStr>::new())
+    }
+}
+
+pub fn python_candidates(configured: Option<&OsStr>) -> Vec<PythonExecutable> {
+    let mut candidates = Vec::new();
+    if let Some(program) = configured.filter(|value| !value.is_empty()) {
+        candidates.push(PythonExecutable::new(program, Vec::<&OsStr>::new()));
+    }
+    candidates.push(PythonExecutable::new("python", Vec::<&OsStr>::new()));
+    candidates.push(PythonExecutable::new("py", ["-3.13"]));
+    candidates
+}
+
+pub fn select_python_executable(
+    configured: Option<&OsStr>,
+    mut is_available: impl FnMut(&PythonExecutable) -> bool,
+) -> Option<PythonExecutable> {
+    python_candidates(configured)
+        .into_iter()
+        .find(|candidate| is_available(candidate))
+}
+
+pub fn resolve_python_executable() -> Result<PythonExecutable, std::io::Error> {
+    let configured = std::env::var_os("MOW_PYTHON");
+    select_python_executable(configured.as_deref(), |candidate| {
+        Command::new(&candidate.program)
+            .args(&candidate.args)
+            .arg("--version")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    })
+    .ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "nie znaleziono Pythona (MOW_PYTHON, python ani py -3.13)",
+        )
+    })
+}
 
 #[derive(Debug, Serialize)]
 pub struct WorkerRequest {
@@ -198,7 +272,7 @@ pub struct WorkerClient {
 
 impl WorkerClient {
     pub fn spawn(
-        python: impl AsRef<OsStr>,
+        python: impl Into<PythonExecutable>,
         worker_path: impl AsRef<Path>,
         timeout: Duration,
     ) -> Result<Self, ClientError> {
@@ -207,8 +281,10 @@ impl WorkerClient {
             return Err(ClientError::MissingWorker(worker_path.to_owned()));
         }
 
-        let mut command = Command::new(python);
+        let python = python.into();
+        let mut command = Command::new(&python.program);
         command
+            .args(&python.args)
             .arg("-X")
             .arg("utf8")
             .arg("-u")
@@ -375,6 +451,7 @@ impl Drop for WorkerClient {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::ffi::OsString;
     use std::fs;
     use std::path::PathBuf;
     use std::time::Duration;
@@ -397,6 +474,32 @@ mod tests {
             }
             _ => "python".to_owned(),
         }
+    }
+
+    #[test]
+    fn python_candidates_prefer_environment_without_splitting_spaces() {
+        let configured = OsStr::new(r"C:\Program Files\Python313\python.exe");
+
+        let candidates = python_candidates(Some(configured));
+
+        assert_eq!(
+            candidates,
+            vec![
+                PythonExecutable::new(configured, Vec::<&OsStr>::new()),
+                PythonExecutable::new("python", Vec::<&OsStr>::new()),
+                PythonExecutable::new("py", ["-3.13"]),
+            ]
+        );
+    }
+
+    #[test]
+    fn python_selection_keeps_launcher_arguments_separate() {
+        let selected =
+            select_python_executable(None, |candidate| candidate.program == OsStr::new("py"))
+                .unwrap();
+
+        assert_eq!(selected.program, OsStr::new("py"));
+        assert_eq!(selected.args, vec![OsString::from("-3.13")]);
     }
 
     #[test]
