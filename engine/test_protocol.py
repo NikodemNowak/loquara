@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 import struct
 import subprocess
 import sys
@@ -295,6 +296,40 @@ class WorkerProcessTests(unittest.TestCase):
         self.assertEqual(responses[1]["error"]["code"], "invalid_json")
         self.assertEqual(responses[2]["error"]["code"], "unknown_command")
         self.assertEqual(process.stderr, "")
+
+    def test_setup_ping_works_in_available_powershell_hosts(self):
+        repository = Path(__file__).resolve().parent.parent
+        script = repository / "scripts" / "setup-engine.ps1"
+        hosts = list(
+            dict.fromkeys(
+                host
+                for executable in ("pwsh", "powershell.exe")
+                if (host := shutil.which(executable)) is not None
+            )
+        )
+        self.assertTrue(hosts, "PowerShell is required to test engine setup")
+
+        for host in hosts:
+            with self.subTest(host=host):
+                process = subprocess.run(
+                    [
+                        host,
+                        "-NoProfile",
+                        "-ExecutionPolicy",
+                        "Bypass",
+                        "-File",
+                        str(script),
+                        "-SkipInstall",
+                    ],
+                    text=True,
+                    capture_output=True,
+                    cwd=repository,
+                    timeout=30,
+                    check=False,
+                )
+
+                self.assertEqual(process.returncode, 0, process.stderr)
+                self.assertIn("Parakeet worker ping: ready", process.stdout)
 
 
 if __name__ == "__main__":

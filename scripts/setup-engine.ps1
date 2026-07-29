@@ -25,10 +25,50 @@ if ($LASTEXITCODE -ne 0) {
     throw "PyTorch is not installed. Install the correct CUDA build separately, then rerun this script."
 }
 
-$ping = '{"request_id":"setup-ping","command":"ping"}' |
-    & $Python -u $worker
-if ($LASTEXITCODE -ne 0) {
-    throw "Parakeet worker ping failed."
+$utf8 = New-Object System.Text.UTF8Encoding($false)
+$startInfo = New-Object System.Diagnostics.ProcessStartInfo
+$startInfo.FileName = $Python
+$startInfo.Arguments = "-u `"$worker`""
+$startInfo.UseShellExecute = $false
+$startInfo.CreateNoWindow = $true
+$startInfo.RedirectStandardInput = $true
+$startInfo.RedirectStandardOutput = $true
+$startInfo.RedirectStandardError = $true
+$startInfo.StandardOutputEncoding = $utf8
+$startInfo.StandardErrorEncoding = $utf8
+if ($null -ne $startInfo.PSObject.Properties["StandardInputEncoding"]) {
+    $startInfo.StandardInputEncoding = $utf8
+}
+
+$process = New-Object System.Diagnostics.Process
+$process.StartInfo = $startInfo
+$originalInputEncoding = [Console]::InputEncoding
+try {
+    # Windows PowerShell 5.1 has no StandardInputEncoding property and uses
+    # Console.InputEncoding when it constructs Process.StandardInput.
+    [Console]::InputEncoding = $utf8
+    if (-not $process.Start()) {
+        throw "Could not start Parakeet worker."
+    }
+
+    $pingBytes = $utf8.GetBytes(
+        "{`"request_id`":`"setup-ping`",`"command`":`"ping`"}`n"
+    )
+    $process.StandardInput.BaseStream.Write($pingBytes, 0, $pingBytes.Length)
+    $process.StandardInput.BaseStream.Flush()
+    $process.StandardInput.Close()
+    $ping = $process.StandardOutput.ReadToEnd().Trim()
+    $workerError = $process.StandardError.ReadToEnd().Trim()
+    $process.WaitForExit()
+    $workerExitCode = $process.ExitCode
+}
+finally {
+    [Console]::InputEncoding = $originalInputEncoding
+    $process.Dispose()
+}
+
+if ($workerExitCode -ne 0) {
+    throw "Parakeet worker ping failed: $workerError"
 }
 
 $response = $ping | ConvertFrom-Json
