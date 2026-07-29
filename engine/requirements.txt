@@ -1,5 +1,5 @@
 # PyTorch is intentionally absent: preserve the user's CUDA-specific install.
-numpy>=2.0,<3
-transformers>=5.0,<6
-safetensors>=0.6,<1
-huggingface_hub>=1.0,<2
+numpy==2.5.1
+transformers==5.14.1
+safetensors==0.8.0
+huggingface_hub==1.24.0

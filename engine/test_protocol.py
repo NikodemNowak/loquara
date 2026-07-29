@@ -5,9 +5,12 @@ import struct
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 import wave
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 
@@ -84,7 +87,7 @@ class ProtocolTests(unittest.TestCase):
         )
         self.assertEqual(self.engine.load_calls, 1)
 
-    def test_transcribe_reads_wav_and_passes_optional_language(self):
+    def test_transcribe_rejects_unsupported_language_hint(self):
         with tempfile.TemporaryDirectory() as directory:
             wav_path = Path(directory) / "speech.wav"
             write_wav(
@@ -100,20 +103,20 @@ class ProtocolTests(unittest.TestCase):
                 self.engine,
             )
 
-        self.assertTrue(response["ok"])
+        self.assertFalse(response["ok"])
         self.assertEqual(
-            response["result"],
+            response["error"],
             {
-                "text": "Zażółć gęślą jaźń.",
-                "model": "fake/parakeet",
-                "language": "pl",
-                "duration_ms": 0,
+                "code": "unsupported_language_hint",
+                "message": (
+                    "language hints are not supported; "
+                    "Parakeet detects language automatically"
+                ),
+                "retryable": False,
             },
         )
-        audio, sample_rate, language = self.engine.transcribe_calls[0]
-        np.testing.assert_allclose(audio, [-1.0, -0.5, 0.0, 32767 / 32768])
-        self.assertEqual(sample_rate, 16_000)
-        self.assertEqual(language, "pl")
+        self.assertEqual(self.engine.load_calls, 0)
+        self.assertEqual(self.engine.transcribe_calls, [])
 
     def test_transcribe_omits_language_when_not_requested(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -167,6 +170,58 @@ class ProtocolTests(unittest.TestCase):
 
     def test_model_identity_constant_is_the_requested_nvidia_model(self):
         self.assertEqual(MODEL_ID, "nvidia/parakeet-tdt-0.6b-v3")
+
+    def test_default_loader_passes_exact_model_revision_without_downloading(self):
+        from engine.parakeet_worker import load_transformers_runtime
+
+        calls = []
+
+        def fake_pipeline(task, **options):
+            calls.append((task, options))
+            return lambda *_args, **_kwargs: {"text": ""}
+
+        fake_torch = SimpleNamespace(
+            cuda=SimpleNamespace(is_available=lambda: False),
+            float16=object(),
+            float32=object(),
+        )
+        fake_transformers = SimpleNamespace(pipeline=fake_pipeline)
+        with patch.dict(
+            sys.modules,
+            {"torch": fake_torch, "transformers": fake_transformers},
+        ):
+            runtime = load_transformers_runtime(MODEL_ID)
+
+        self.assertEqual(runtime.model, MODEL_ID)
+        self.assertEqual(
+            calls[0][1]["revision"],
+            "7c35754d166cca382ad1e53e68b01e7c575f3a1d",
+        )
+
+    def test_requirements_use_exact_reproducible_versions_without_torch(self):
+        requirements = (
+            Path(__file__).with_name("requirements.txt").read_text(
+                encoding="utf-8"
+            )
+        )
+        packages = {
+            line
+            for line in requirements.splitlines()
+            if line and not line.startswith("#")
+        }
+
+        self.assertEqual(
+            packages,
+            {
+                "numpy==2.5.1",
+                "transformers==5.14.1",
+                "safetensors==0.8.0",
+                "huggingface_hub==1.24.0",
+            },
+        )
+        self.assertFalse(
+            any(package.lower().startswith("torch") for package in packages)
+        )
 
 
 class WavConversionTests(unittest.TestCase):
@@ -251,6 +306,38 @@ class WavConversionTests(unittest.TestCase):
             atol=1e-6,
         )
 
+    def test_downsampling_strongly_suppresses_above_nyquist_tone(self):
+        sample_rate = 48_000
+        positions = np.arange(sample_rate, dtype=np.float64)
+        tone = 0.8 * np.sin(2 * np.pi * 12_000 * positions / sample_rate)
+        frames = np.round(tone * 32767).astype("<i2").tobytes()
+
+        audio = self.read_samples(
+            2,
+            frames,
+            sample_rate=sample_rate,
+        )
+
+        steady_state = audio[256:-256]
+        rms = float(np.sqrt(np.mean(np.square(steady_state))))
+        self.assertLess(rms, 0.02)
+
+    def test_downsampling_preserves_in_band_tone(self):
+        sample_rate = 48_000
+        positions = np.arange(sample_rate, dtype=np.float64)
+        tone = 0.8 * np.sin(2 * np.pi * 1_000 * positions / sample_rate)
+        frames = np.round(tone * 32767).astype("<i2").tobytes()
+
+        audio = self.read_samples(
+            2,
+            frames,
+            sample_rate=sample_rate,
+        )
+
+        steady_state = audio[256:-256]
+        rms = float(np.sqrt(np.mean(np.square(steady_state))))
+        self.assertGreater(rms, 0.5)
+
 
 class WorkerProcessTests(unittest.TestCase):
     def test_worker_ping_stays_alive_without_importing_model_dependencies(self):
@@ -297,6 +384,36 @@ class WorkerProcessTests(unittest.TestCase):
         self.assertEqual(responses[2]["error"]["code"], "unknown_command")
         self.assertEqual(process.stderr, "")
 
+    def test_worker_forces_utf8_for_polish_jsonl_and_path(self):
+        repository = Path(__file__).resolve().parent.parent
+        worker = repository / "engine" / "parakeet_worker.py"
+        with tempfile.TemporaryDirectory() as directory:
+            invalid_wav = Path(directory) / "dźwięk-ąęłóśźż.wav"
+            invalid_wav.write_bytes(b"not a wav")
+            payload = request(
+                "transcribe",
+                request_id="żądanie-ąęłóśźż",
+                audio_path=str(invalid_wav),
+            )
+            environment = os.environ.copy()
+            environment["PYTHONIOENCODING"] = "cp1250"
+
+            process = subprocess.run(
+                [sys.executable, "-u", str(worker)],
+                input=(payload + "\n").encode("utf-8"),
+                capture_output=True,
+                cwd=repository,
+                env=environment,
+                timeout=10,
+                check=False,
+            )
+
+        self.assertEqual(process.returncode, 0, process.stderr)
+        self.assertIn("żądanie-ąęłóśźż".encode(), process.stdout)
+        response = json.loads(process.stdout.decode("utf-8"))
+        self.assertEqual(response["request_id"], "żądanie-ąęłóśźż")
+        self.assertEqual(response["error"]["code"], "invalid_audio")
+
     def test_setup_ping_works_in_available_powershell_hosts(self):
         repository = Path(__file__).resolve().parent.parent
         script = repository / "scripts" / "setup-engine.ps1"
@@ -330,6 +447,65 @@ class WorkerProcessTests(unittest.TestCase):
 
                 self.assertEqual(process.returncode, 0, process.stderr)
                 self.assertIn("Parakeet worker ping: ready", process.stdout)
+
+    def test_setup_times_out_and_kills_hanging_worker_in_all_hosts(self):
+        repository = Path(__file__).resolve().parent.parent
+        script = repository / "scripts" / "setup-engine.ps1"
+        hosts = list(
+            dict.fromkeys(
+                host
+                for executable in ("pwsh", "powershell.exe")
+                if (host := shutil.which(executable)) is not None
+            )
+        )
+        self.assertTrue(hosts, "PowerShell is required to test engine setup")
+
+        with tempfile.TemporaryDirectory() as directory:
+            for index, host in enumerate(hosts):
+                worker = Path(directory) / f"hanging-worker-{index}.py"
+                pid_path = worker.with_suffix(".pid")
+                worker.write_text(
+                    "import os, pathlib, sys, time\n"
+                    "pathlib.Path(__file__).with_suffix('.pid').write_text("
+                    "str(os.getpid()), encoding='ascii')\n"
+                    "sys.stdin.buffer.read(1)\n"
+                    "time.sleep(60)\n",
+                    encoding="utf-8",
+                )
+                started = time.monotonic()
+
+                process = subprocess.run(
+                    [
+                        host,
+                        "-NoProfile",
+                        "-ExecutionPolicy",
+                        "Bypass",
+                        "-File",
+                        str(script),
+                        "-SkipInstall",
+                        "-WorkerPath",
+                        str(worker),
+                        "-PingTimeoutSeconds",
+                        "1",
+                    ],
+                    text=True,
+                    capture_output=True,
+                    cwd=repository,
+                    timeout=15,
+                    check=False,
+                )
+                elapsed = time.monotonic() - started
+
+                self.assertNotEqual(process.returncode, 0)
+                self.assertLess(elapsed, 8)
+                self.assertIn(
+                    "timed out",
+                    (process.stdout + process.stderr).lower(),
+                )
+                self.assertTrue(pid_path.is_file())
+                worker_pid = int(pid_path.read_text(encoding="ascii"))
+                with self.assertRaises(OSError):
+                    os.kill(worker_pid, 0)
 
 
 if __name__ == "__main__":

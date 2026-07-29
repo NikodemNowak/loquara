@@ -120,6 +120,7 @@ pub enum ClientError {
     Io(String),
     Timeout { request_id: String, timeout_ms: u64 },
     Crashed { exit_code: Option<i32> },
+    WorkerUnavailable,
     Protocol(String),
     MismatchedRequestId { expected: String, actual: String },
     Worker(WorkerError),
@@ -146,6 +147,7 @@ impl fmt::Display for ClientError {
             Self::Crashed { exit_code } => {
                 write!(formatter, "worker crashed with exit code {exit_code:?}")
             }
+            Self::WorkerUnavailable => write!(formatter, "worker is unavailable"),
             Self::Protocol(message) => write!(formatter, "invalid worker response: {message}"),
             Self::MismatchedRequestId { expected, actual } => write!(
                 formatter,
@@ -188,8 +190,8 @@ pub fn parse_response<T: DeserializeOwned>(
 
 pub struct WorkerClient {
     child: Child,
-    stdin: ChildStdin,
-    responses: Receiver<Result<String, String>>,
+    stdin: Option<ChildStdin>,
+    responses: Option<Receiver<Result<String, String>>>,
     timeout: Duration,
     next_request_id: u64,
 }
@@ -207,6 +209,8 @@ impl WorkerClient {
 
         let mut command = Command::new(python);
         command
+            .arg("-X")
+            .arg("utf8")
             .arg("-u")
             .arg(worker_path)
             .stdin(Stdio::piped())
@@ -246,8 +250,8 @@ impl WorkerClient {
 
         Ok(Self {
             child,
-            stdin,
-            responses,
+            stdin: Some(stdin),
+            responses: Some(responses),
             timeout,
             next_request_id: 1,
         })
@@ -280,35 +284,58 @@ impl WorkerClient {
     }
 
     fn send<T: DeserializeOwned>(&mut self, request: WorkerRequest) -> Result<T, ClientError> {
+        if self.stdin.is_none() || self.responses.is_none() {
+            return Err(ClientError::WorkerUnavailable);
+        }
+
         let request_id = request.request_id().to_owned();
         let mut encoded = serde_json::to_vec(&request)
             .map_err(|error| ClientError::Protocol(error.to_string()))?;
         encoded.push(b'\n');
-        if let Err(error) = self
+        let write_result = self
             .stdin
+            .as_mut()
+            .ok_or(ClientError::WorkerUnavailable)?
             .write_all(&encoded)
-            .and_then(|()| self.stdin.flush())
-        {
-            return Err(self.crash_or(ClientError::Io(error.to_string())));
+            .and_then(|()| {
+                self.stdin
+                    .as_mut()
+                    .ok_or_else(|| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::BrokenPipe,
+                            "worker stdin is closed",
+                        )
+                    })?
+                    .flush()
+            });
+        if let Err(error) = write_result {
+            let error = self.crash_or(ClientError::Io(error.to_string()));
+            self.shutdown();
+            return Err(error);
         }
 
-        match self.responses.recv_timeout(self.timeout) {
+        let response = self
+            .responses
+            .as_ref()
+            .ok_or(ClientError::WorkerUnavailable)?
+            .recv_timeout(self.timeout);
+        match response {
             Ok(Ok(line)) => parse_response(&line, &request_id),
-            Ok(Err(message)) => Err(self.crash_or(ClientError::Io(message))),
+            Ok(Err(message)) => {
+                let error = self.crash_or(ClientError::Io(message));
+                self.shutdown();
+                Err(error)
+            }
             Err(RecvTimeoutError::Timeout) => {
                 let timeout_error = ClientError::Timeout {
                     request_id,
                     timeout_ms: self.timeout.as_millis().try_into().unwrap_or(u64::MAX),
                 };
-                Err(self.crash_or(timeout_error))
+                self.shutdown();
+                Err(timeout_error)
             }
             Err(RecvTimeoutError::Disconnected) => {
-                let exit_code = self
-                    .child
-                    .try_wait()
-                    .ok()
-                    .flatten()
-                    .and_then(|status| status.code());
+                let exit_code = self.shutdown();
                 Err(ClientError::Crashed { exit_code })
             }
         }
@@ -323,12 +350,24 @@ impl WorkerClient {
             Err(error) => ClientError::Io(error.to_string()),
         }
     }
+
+    fn shutdown(&mut self) -> Option<i32> {
+        self.stdin.take();
+        self.responses.take();
+        match self.child.try_wait() {
+            Ok(Some(status)) => status.code(),
+            Ok(None) => {
+                let _ = self.child.kill();
+                self.child.wait().ok().and_then(|status| status.code())
+            }
+            Err(_) => None,
+        }
+    }
 }
 
 impl Drop for WorkerClient {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        self.shutdown();
     }
 }
 
@@ -480,6 +519,7 @@ mod tests {
         let error = client.ping().unwrap_err();
 
         assert!(matches!(error, ClientError::Timeout { .. }));
+        assert_eq!(client.ping().unwrap_err(), ClientError::WorkerUnavailable);
         drop(client);
         fs::remove_file(path).unwrap();
     }
@@ -494,6 +534,50 @@ mod tests {
         assert!(matches!(error, ClientError::Crashed { .. }));
         drop(client);
         fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn subprocess_round_trips_utf8_request_id_message_and_path() {
+        let worker = fake_worker(
+            "utf8-worker",
+            r#"import json
+import sys
+
+if "-X" not in sys.orig_argv or "utf8" not in sys.orig_argv:
+    raise SystemExit(3)
+
+for line in sys.stdin:
+    request = json.loads(line)
+    message = "Ścieżka: " + request["audio_path"]
+    print(json.dumps({
+        "request_id": request["request_id"],
+        "ok": False,
+        "error": {
+            "code": "echo_path",
+            "message": message,
+            "retryable": False,
+        },
+    }, ensure_ascii=False), flush=True)
+"#,
+        );
+        let audio_path = missing_path("zażółć-gęślą-jaźń").with_extension("wav");
+        fs::write(&audio_path, b"not a real wav").unwrap();
+        let request = WorkerRequest::transcribe("żądanie-ąęłóśźż", &audio_path, None).unwrap();
+        let mut client = WorkerClient::spawn(python(), &worker, Duration::from_secs(2)).unwrap();
+
+        let error = client.send::<TranscriptionResult>(request).unwrap_err();
+
+        assert_eq!(
+            error,
+            ClientError::Worker(WorkerError {
+                code: "echo_path".to_owned(),
+                message: format!("Ścieżka: {}", audio_path.display()),
+                retryable: false,
+            })
+        );
+        drop(client);
+        fs::remove_file(worker).unwrap();
+        fs::remove_file(audio_path).unwrap();
     }
 
     #[test]

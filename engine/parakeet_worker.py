@@ -15,13 +15,14 @@ from typing import Any, Callable, Protocol
 try:
     from engine.protocol import (
         MODEL_ID,
+        MODEL_REVISION,
         EngineInfo,
         handle_line,
     )
 except ModuleNotFoundError as error:
     if error.name not in {"engine", "engine.protocol"}:
         raise
-    from protocol import MODEL_ID, EngineInfo, handle_line
+    from protocol import MODEL_ID, MODEL_REVISION, EngineInfo, handle_line
 
 
 class RecognitionPipeline(Protocol):
@@ -40,12 +41,10 @@ class TransformersRuntime:
         sample_rate: int,
         language: str | None,
     ) -> str:
-        options: dict[str, Any] = {}
         if language is not None:
-            options["generate_kwargs"] = {"language": language}
+            raise ValueError("language hints are not supported")
         output = self.recognizer(
             {"raw": audio, "sampling_rate": sample_rate},
-            **options,
         )
         if not isinstance(output, dict) or not isinstance(
             output.get("text"),
@@ -67,6 +66,7 @@ def load_transformers_runtime(model_id: str) -> TransformersRuntime:
     recognizer = pipeline(
         "automatic-speech-recognition",
         model=model_id,
+        revision=MODEL_REVISION,
         device=0 if device == "cuda" else -1,
         dtype=torch.float16 if device == "cuda" else torch.float32,
     )
@@ -110,6 +110,11 @@ class ParakeetEngine:
 
 
 def run_worker() -> None:
+    for stream in (sys.stdin, sys.stdout):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(encoding="utf-8", errors="strict")
+
     engine = ParakeetEngine()
     for line in sys.stdin:
         if not line.strip():

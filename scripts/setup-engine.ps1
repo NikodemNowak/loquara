@@ -1,12 +1,22 @@
 param(
     [string]$Python = "python",
-    [switch]$SkipInstall
+    [switch]$SkipInstall,
+    [string]$WorkerPath = "",
+    [int]$PingTimeoutSeconds = 10
 )
 
 $ErrorActionPreference = "Stop"
 $repository = Split-Path -Parent $PSScriptRoot
 $requirements = Join-Path $repository "engine\requirements.txt"
-$worker = Join-Path $repository "engine\parakeet_worker.py"
+if ([string]::IsNullOrWhiteSpace($WorkerPath)) {
+    $worker = Join-Path $repository "engine\parakeet_worker.py"
+}
+else {
+    $worker = $WorkerPath
+}
+if ($PingTimeoutSeconds -le 0) {
+    throw "PingTimeoutSeconds must be positive."
+}
 
 & $Python -c "import sys; assert sys.version_info >= (3, 10), 'Python 3.10 or newer is required'; print(f'Python {sys.version.split()[0]}')"
 if ($LASTEXITCODE -ne 0) {
@@ -28,14 +38,13 @@ if ($LASTEXITCODE -ne 0) {
 $utf8 = New-Object System.Text.UTF8Encoding($false)
 $startInfo = New-Object System.Diagnostics.ProcessStartInfo
 $startInfo.FileName = $Python
-$startInfo.Arguments = "-u `"$worker`""
+$startInfo.Arguments = "-X utf8 -u `"$worker`""
 $startInfo.UseShellExecute = $false
 $startInfo.CreateNoWindow = $true
 $startInfo.RedirectStandardInput = $true
 $startInfo.RedirectStandardOutput = $true
-$startInfo.RedirectStandardError = $true
+$startInfo.RedirectStandardError = $false
 $startInfo.StandardOutputEncoding = $utf8
-$startInfo.StandardErrorEncoding = $utf8
 if ($null -ne $startInfo.PSObject.Properties["StandardInputEncoding"]) {
     $startInfo.StandardInputEncoding = $utf8
 }
@@ -43,6 +52,7 @@ if ($null -ne $startInfo.PSObject.Properties["StandardInputEncoding"]) {
 $process = New-Object System.Diagnostics.Process
 $process.StartInfo = $startInfo
 $originalInputEncoding = [Console]::InputEncoding
+$processStarted = $false
 try {
     # Windows PowerShell 5.1 has no StandardInputEncoding property and uses
     # Console.InputEncoding when it constructs Process.StandardInput.
@@ -50,6 +60,7 @@ try {
     if (-not $process.Start()) {
         throw "Could not start Parakeet worker."
     }
+    $processStarted = $true
 
     $pingBytes = $utf8.GetBytes(
         "{`"request_id`":`"setup-ping`",`"command`":`"ping`"}`n"
@@ -57,18 +68,24 @@ try {
     $process.StandardInput.BaseStream.Write($pingBytes, 0, $pingBytes.Length)
     $process.StandardInput.BaseStream.Flush()
     $process.StandardInput.Close()
+    $timeoutMilliseconds = $PingTimeoutSeconds * 1000
+    if (-not $process.WaitForExit($timeoutMilliseconds)) {
+        throw "Parakeet worker ping timed out after $PingTimeoutSeconds seconds."
+    }
     $ping = $process.StandardOutput.ReadToEnd().Trim()
-    $workerError = $process.StandardError.ReadToEnd().Trim()
-    $process.WaitForExit()
     $workerExitCode = $process.ExitCode
 }
 finally {
     [Console]::InputEncoding = $originalInputEncoding
+    if ($processStarted -and -not $process.HasExited) {
+        $process.Kill()
+        $process.WaitForExit()
+    }
     $process.Dispose()
 }
 
 if ($workerExitCode -ne 0) {
-    throw "Parakeet worker ping failed: $workerError"
+    throw "Parakeet worker ping failed."
 }
 
 $response = $ping | ConvertFrom-Json

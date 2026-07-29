@@ -13,6 +13,7 @@ from numpy.typing import NDArray
 
 
 MODEL_ID = "nvidia/parakeet-tdt-0.6b-v3"
+MODEL_REVISION = "7c35754d166cca382ad1e53e68b01e7c575f3a1d"
 SAMPLE_RATE = 16_000
 
 
@@ -120,6 +121,15 @@ def handle_line(line: str, engine: TranscriptionEngine) -> dict[str, Any]:
                 "invalid_request",
                 "language must be a non-empty string when provided",
             )
+        if language is not None:
+            return _error(
+                request_id,
+                "unsupported_language_hint",
+                (
+                    "language hints are not supported; "
+                    "Parakeet detects language automatically"
+                ),
+            )
 
         try:
             audio = read_wav_mono_16khz(path)
@@ -137,8 +147,6 @@ def handle_line(line: str, engine: TranscriptionEngine) -> dict[str, Any]:
             "model": info.model,
             "duration_ms": round(len(audio) * 1000 / SAMPLE_RATE),
         }
-        if language is not None:
-            result["language"] = language
         return _success(request_id, result)
 
     return _error(
@@ -173,6 +181,26 @@ def _decode_pcm(frames: bytes, sample_width: int) -> NDArray[np.float32]:
     raise ValueError(f"unsupported PCM sample width: {sample_width} bytes")
 
 
+def _low_pass_for_downsampling(
+    samples: NDArray[np.float32],
+    source_rate: int,
+) -> NDArray[np.float64]:
+    """Apply a deterministic windowed-sinc anti-alias filter."""
+    tap_count = 129
+    half = tap_count // 2
+    offsets = np.arange(-half, half + 1, dtype=np.float64)
+    cutoff = 0.5 * SAMPLE_RATE / source_rate * 0.94
+    kernel = 2 * cutoff * np.sinc(2 * cutoff * offsets)
+    kernel *= np.hamming(tap_count)
+    kernel /= kernel.sum()
+    padded = np.pad(
+        samples.astype(np.float64),
+        (half, half),
+        mode="edge",
+    )
+    return np.convolve(padded, kernel, mode="valid")
+
+
 def read_wav_mono_16khz(path: str | Path) -> NDArray[np.float32]:
     """Read PCM WAV, mix channels, and linearly resample to exactly 16 kHz."""
     with wave.open(str(path), "rb") as wav_file:
@@ -205,5 +233,14 @@ def read_wav_mono_16khz(path: str | Path) -> NDArray[np.float32]:
     target_positions = (
         np.arange(target_length, dtype=np.float64) * source_rate / SAMPLE_RATE
     )
-    resampled = np.interp(target_positions, source_positions, mono)
+    interpolation_source = (
+        _low_pass_for_downsampling(mono, source_rate)
+        if source_rate > SAMPLE_RATE
+        else mono
+    )
+    resampled = np.interp(
+        target_positions,
+        source_positions,
+        interpolation_source,
+    )
     return resampled.astype(np.float32)
