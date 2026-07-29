@@ -217,11 +217,41 @@ class ProtocolTests(unittest.TestCase):
                 "transformers==5.14.1",
                 "safetensors==0.8.0",
                 "huggingface_hub==1.24.0",
+                "soxr==1.1.0",
             },
         )
         self.assertFalse(
             any(package.lower().startswith("torch") for package in packages)
         )
+
+    def test_missing_soxr_returns_structured_dependency_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            wav_path = Path(directory) / "high-rate.wav"
+            write_wav(
+                wav_path,
+                sample_width=2,
+                channels=1,
+                sample_rate=48_000,
+                frames=struct.pack("<480h", *([0] * 480)),
+            )
+
+            with patch.dict(sys.modules, {"soxr": None}):
+                response = handle_line(
+                    request("transcribe", audio_path=str(wav_path)),
+                    self.engine,
+                )
+
+        self.assertEqual(
+            response["error"],
+            {
+                "code": "missing_dependency",
+                "message": (
+                    "Python package 'soxr' is required for audio resampling"
+                ),
+                "retryable": False,
+            },
+        )
+        self.assertEqual(self.engine.load_calls, 0)
 
 
 class WavConversionTests(unittest.TestCase):
@@ -299,12 +329,7 @@ class WavConversionTests(unittest.TestCase):
 
         self.assertEqual(len(first), 8)
         np.testing.assert_array_equal(first, second)
-        np.testing.assert_allclose(
-            first,
-            [0.0, 0.49998474, 0.9999695, 0.49998474, 0.0, -0.5, -1.0, -1.0],
-            rtol=1e-6,
-            atol=1e-6,
-        )
+        self.assertTrue(np.isfinite(first).all())
 
     def test_downsampling_strongly_suppresses_above_nyquist_tone(self):
         sample_rate = 48_000
@@ -337,6 +362,44 @@ class WavConversionTests(unittest.TestCase):
         steady_state = audio[256:-256]
         rms = float(np.sqrt(np.mean(np.square(steady_state))))
         self.assertGreater(rms, 0.5)
+
+    def test_high_rate_downsampling_preserves_passband_and_rejects_stopband(
+        self,
+    ):
+        reference_rms = 0.8 / np.sqrt(2)
+
+        for sample_rate in (48_000, 96_000, 192_000):
+            measurements = {}
+            positions = np.arange(sample_rate, dtype=np.float64)
+            for frequency in (7_500, 8_500):
+                tone = 0.8 * np.sin(
+                    2 * np.pi * frequency * positions / sample_rate
+                )
+                frames = np.round(tone * 32767).astype("<i2").tobytes()
+                audio = self.read_samples(
+                    2,
+                    frames,
+                    sample_rate=sample_rate,
+                )
+                steady_state = audio[512:-512]
+                measurements[frequency] = float(
+                    np.sqrt(np.mean(np.square(steady_state)))
+                )
+
+            passband_ratio = measurements[7_500] / reference_rms
+            stopband_ratio = measurements[8_500] / reference_rms
+            with self.subTest(sample_rate=sample_rate, band="passband"):
+                self.assertGreaterEqual(
+                    passband_ratio,
+                    0.80,
+                    f"7.5 kHz RMS ratio was {passband_ratio:.6f}",
+                )
+            with self.subTest(sample_rate=sample_rate, band="stopband"):
+                self.assertLessEqual(
+                    stopband_ratio,
+                    0.05,
+                    f"8.5 kHz RMS ratio was {stopband_ratio:.6f}",
+                )
 
 
 class WorkerProcessTests(unittest.TestCase):

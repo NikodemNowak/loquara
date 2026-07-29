@@ -34,6 +34,10 @@ class TranscriptionEngine(Protocol):
     ) -> str: ...
 
 
+class MissingDependencyError(RuntimeError):
+    """A required local runtime dependency is unavailable."""
+
+
 def _error(
     request_id: str | None,
     code: str,
@@ -133,6 +137,8 @@ def handle_line(line: str, engine: TranscriptionEngine) -> dict[str, Any]:
 
         try:
             audio = read_wav_mono_16khz(path)
+        except MissingDependencyError as error:
+            return _error(request_id, "missing_dependency", str(error))
         except (OSError, ValueError, wave.Error) as error:
             return _error(request_id, "invalid_audio", str(error))
 
@@ -181,24 +187,24 @@ def _decode_pcm(frames: bytes, sample_width: int) -> NDArray[np.float32]:
     raise ValueError(f"unsupported PCM sample width: {sample_width} bytes")
 
 
-def _low_pass_for_downsampling(
+def _resample_with_soxr(
     samples: NDArray[np.float32],
     source_rate: int,
-) -> NDArray[np.float64]:
-    """Apply a deterministic windowed-sinc anti-alias filter."""
-    tap_count = 129
-    half = tap_count // 2
-    offsets = np.arange(-half, half + 1, dtype=np.float64)
-    cutoff = 0.5 * SAMPLE_RATE / source_rate * 0.94
-    kernel = 2 * cutoff * np.sinc(2 * cutoff * offsets)
-    kernel *= np.hamming(tap_count)
-    kernel /= kernel.sum()
-    padded = np.pad(
-        samples.astype(np.float64),
-        (half, half),
-        mode="edge",
+) -> NDArray[np.float32]:
+    try:
+        import soxr
+    except ImportError as error:
+        raise MissingDependencyError(
+            "Python package 'soxr' is required for audio resampling"
+        ) from error
+
+    resampled = soxr.resample(
+        samples,
+        source_rate,
+        SAMPLE_RATE,
+        quality="VHQ",
     )
-    return np.convolve(padded, kernel, mode="valid")
+    return np.asarray(resampled, dtype=np.float32)
 
 
 def read_wav_mono_16khz(path: str | Path) -> NDArray[np.float32]:
@@ -224,23 +230,4 @@ def read_wav_mono_16khz(path: str | Path) -> NDArray[np.float32]:
     mono = samples.reshape(-1, channels).mean(axis=1, dtype=np.float32)
     if source_rate == SAMPLE_RATE or len(mono) == 0:
         return mono.astype(np.float32, copy=False)
-
-    target_length = round(len(mono) * SAMPLE_RATE / source_rate)
-    if target_length == 0:
-        return np.empty(0, dtype=np.float32)
-
-    source_positions = np.arange(len(mono), dtype=np.float64)
-    target_positions = (
-        np.arange(target_length, dtype=np.float64) * source_rate / SAMPLE_RATE
-    )
-    interpolation_source = (
-        _low_pass_for_downsampling(mono, source_rate)
-        if source_rate > SAMPLE_RATE
-        else mono
-    )
-    resampled = np.interp(
-        target_positions,
-        source_positions,
-        interpolation_source,
-    )
-    return resampled.astype(np.float32)
+    return _resample_with_soxr(mono, source_rate)
