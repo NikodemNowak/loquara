@@ -12,9 +12,25 @@
   "app": {
     "windows": [
       {
+        "label": "main",
         "title": "Mów",
         "width": 960,
         "height": 680
+      },
+      {
+        "label": "overlay",
+        "title": "Mów — dyktowanie",
+        "url": "index.html?window=overlay",
+        "width": 312,
+        "height": 56,
+        "decorations": false,
+        "resizable": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "visible": false,
+        "focus": false,
+        "transparent": false,
+        "shadow": false
       }
     ]
   },

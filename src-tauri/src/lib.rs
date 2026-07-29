@@ -1,9 +1,158 @@
+pub mod audio;
+pub mod dictation;
 pub mod domain;
+pub mod platform;
+pub mod storage;
 pub mod transcription;
+
+use crate::dictation::AppState;
+use std::path::PathBuf;
+use tauri::menu::MenuBuilder;
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::{Emitter, Manager, WindowEvent};
+use tauri_plugin_global_shortcut::{Code, ShortcutState};
+
+fn worker_path() -> PathBuf {
+    let current = std::env::current_dir().unwrap_or_default();
+    let direct = current.join("engine").join("parakeet_worker.py");
+    if direct.is_file() {
+        direct
+    } else {
+        current
+            .parent()
+            .unwrap_or(&current)
+            .join("engine")
+            .join("parakeet_worker.py")
+    }
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            let _ = platform::show_main(app);
+        }))
+        .plugin(tauri_plugin_autostart::Builder::new().build())
+        .plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(|app, shortcut, event| {
+                    if event.state != ShortcutState::Pressed {
+                        return;
+                    }
+                    let app = app.clone();
+                    let state = app.state::<AppState>().inner().clone();
+                    if shortcut.key == Code::Escape {
+                        let _ = dictation::cancel_recording_inner(&app, &state);
+                    } else {
+                        tauri::async_runtime::spawn(async move {
+                            let _ = dictation::toggle_recording(app, state).await;
+                        });
+                    }
+                })
+                .build(),
+        )
+        .setup(|app| {
+            let data_dir = app.path().app_data_dir()?;
+            std::fs::create_dir_all(&data_dir)?;
+            let recordings_dir = data_dir.join("recordings");
+            let storage = storage::Storage::open(data_dir.join("mow.sqlite3"), &recordings_dir)
+                .map_err(|error| error.to_string())?;
+            let state = AppState::new(
+                audio::AudioRecorder::new(recordings_dir),
+                storage,
+                "python",
+                worker_path(),
+            );
+            let (level_sender, level_receiver) = std::sync::mpsc::sync_channel(2);
+            state.audio.set_level_sender(level_sender);
+            let level_app = app.handle().clone();
+            std::thread::spawn(move || {
+                while let Ok(rms) = level_receiver.recv() {
+                    let _ = level_app.emit("dictation://level", rms);
+                }
+            });
+            let shortcut = state
+                .settings
+                .read()
+                .map_err(|_| "settings lock poisoned")?
+                .shortcut
+                .clone();
+            app.manage(state);
+            platform::register_shortcuts(app.handle(), &shortcut)
+                .map_err(|error| error.to_string())?;
+
+            let menu = MenuBuilder::new(app)
+                .text("toggle", "Start/Stop recording")
+                .text("paste", "Paste last transcript")
+                .separator()
+                .text("open", "Open Mów")
+                .text("quit", "Quit")
+                .build()?;
+            let mut tray = TrayIconBuilder::with_id("mow")
+                .menu(&menu)
+                .tooltip("Mów")
+                .show_menu_on_left_click(false)
+                .on_menu_event(|app, event| match event.id().as_ref() {
+                    "toggle" => {
+                        let app = app.clone();
+                        let state = app.state::<AppState>().inner().clone();
+                        tauri::async_runtime::spawn(async move {
+                            let _ = dictation::toggle_recording(app, state).await;
+                        });
+                    }
+                    "paste" => {
+                        let state = app.state::<AppState>();
+                        let _ = dictation::paste_transcript_inner(None, &state);
+                    }
+                    "open" => {
+                        let _ = platform::show_main(app);
+                    }
+                    "quit" => app.exit(0),
+                    _ => {}
+                })
+                .on_tray_icon_event(|tray, event| {
+                    if matches!(
+                        event,
+                        TrayIconEvent::Click {
+                            button: MouseButton::Left,
+                            button_state: MouseButtonState::Up,
+                            ..
+                        }
+                    ) {
+                        let _ = platform::show_main(tray.app_handle());
+                    }
+                });
+            if let Some(icon) = app.default_window_icon() {
+                tray = tray.icon(icon.clone());
+            }
+            tray.build(app)?;
+            Ok(())
+        })
+        .on_window_event(|window, event| {
+            if window.label() == "main"
+                && let WindowEvent::CloseRequested { api, .. } = event
+            {
+                api.prevent_close();
+                let _ = window.hide();
+            }
+        })
+        .invoke_handler(tauri::generate_handler![
+            dictation::get_app_snapshot,
+            dictation::list_input_devices,
+            dictation::start_recording,
+            dictation::stop_recording,
+            dictation::cancel_recording,
+            dictation::retry_transcription,
+            dictation::paste_transcript,
+            dictation::list_history,
+            dictation::delete_history,
+            dictation::list_vocabulary,
+            dictation::add_vocabulary,
+            dictation::delete_vocabulary,
+            dictation::get_settings,
+            dictation::update_settings,
+            dictation::update_setting_value,
+        ])
         .run(tauri::generate_context!())
         .expect("nie udało się uruchomić aplikacji Mów");
 }

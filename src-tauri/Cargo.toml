@@ -11,9 +11,30 @@ name = "mow_lib"
 crate-type = ["lib", "cdylib", "staticlib"]
 
 [dependencies]
+cpal = "0.16"
+hound = "3.5"
+regex = "1.11"
+rusqlite = { version = "0.37", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tauri = "2.11.5"
+tauri = { version = "2.11.5", features = ["tray-icon"] }
+tauri-plugin-autostart = "2"
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-single-instance = "2"
+thiserror = "2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.60", features = [
+    "Win32_Foundation",
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
+    "Win32_System_Ole",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[dev-dependencies]
+tempfile = "3"
 
 [build-dependencies]
 tauri-build = "2.6.3"
