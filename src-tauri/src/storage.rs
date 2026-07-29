@@ -1,3 +1,4 @@
+use crate::audio::part_path_for;
 use regex::Regex;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::de::DeserializeOwned;
@@ -8,6 +9,8 @@ use std::sync::Mutex;
 use thiserror::Error;
 
 pub const INTERRUPTED_ERROR: &str = "Previous dictation was interrupted before completion.";
+pub const INTERRUPTED_BEFORE_FINALIZE_ERROR: &str =
+    "Previous dictation was interrupted before audio finalization.";
 
 #[derive(Debug, Error)]
 pub enum StorageError {
@@ -466,11 +469,76 @@ impl Storage {
     }
 
     pub fn reconcile_interrupted(&self) -> Result<usize, StorageError> {
-        Ok(self.connection()?.execute(
-            "UPDATE history SET status='failed', error=?1
-             WHERE status IN ('recording','processing')",
-            [INTERRUPTED_ERROR],
-        )?)
+        fs::create_dir_all(&self.recordings_dir)?;
+        let managed_root = self.recordings_dir.canonicalize()?;
+        let interrupted: Vec<(String, RecordingStatus, Option<String>)> = {
+            let connection = self.connection()?;
+            let mut statement = connection.prepare(
+                "SELECT id,status,audio_path FROM history
+                 WHERE status IN ('recording','processing')",
+            )?;
+            statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                })?
+                .map(|row| {
+                    let (id, status, audio_path) = row?;
+                    Ok((id, RecordingStatus::parse(status)?, audio_path))
+                })
+                .collect::<Result<Vec<_>, StorageError>>()?
+        };
+
+        let mut retryable_ids = Vec::new();
+        let mut interrupted_before_finalize_ids = Vec::new();
+        for (id, status, audio_path) in interrupted {
+            let final_path = audio_path.as_deref().map(Path::new);
+            let has_managed_final = final_path.is_some_and(|path| {
+                path.canonicalize().is_ok_and(|canonical| {
+                    canonical.is_file()
+                        && canonical
+                            .parent()
+                            .is_some_and(|parent| parent.starts_with(&managed_root))
+                        && canonical
+                            .extension()
+                            .is_some_and(|extension| extension == "wav")
+                })
+            });
+            if status == RecordingStatus::Processing && has_managed_final {
+                retryable_ids.push(id);
+                continue;
+            }
+
+            if let Some(final_path) = final_path
+                && is_safe_managed_wav_candidate(final_path, &managed_root)
+            {
+                let partial_path = part_path_for(final_path);
+                if partial_path.is_file() {
+                    fs::remove_file(partial_path)?;
+                }
+            }
+            interrupted_before_finalize_ids.push(id);
+        }
+
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction()?;
+        for id in &retryable_ids {
+            transaction.execute(
+                "UPDATE history SET status='failed', error=?2 WHERE id=?1",
+                params![id, INTERRUPTED_ERROR],
+            )?;
+        }
+        for id in &interrupted_before_finalize_ids {
+            transaction.execute(
+                "UPDATE history SET status='failed', audio_path=NULL, error=?2 WHERE id=?1",
+                params![id, INTERRUPTED_BEFORE_FINALIZE_ERROR],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(retryable_ids.len() + interrupted_before_finalize_ids.len())
     }
 
     pub fn cleanup_retention(
@@ -522,6 +590,14 @@ impl Storage {
             deleted_audio: cleared_ids.len(),
         })
     }
+}
+
+fn is_safe_managed_wav_candidate(path: &Path, managed_root: &Path) -> bool {
+    path.extension().is_some_and(|extension| extension == "wav")
+        && path
+            .parent()
+            .and_then(|parent| parent.canonicalize().ok())
+            .is_some_and(|parent| parent.starts_with(managed_root))
 }
 
 fn mode_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Mode> {
@@ -696,27 +772,79 @@ mod tests {
     }
 
     #[test]
-    fn reopening_reconciles_interrupted_rows_to_retryable_failed() {
+    fn reopening_reconciles_interrupted_rows_using_real_final_and_partial_audio() {
         let temp = tempfile::tempdir().unwrap();
         let database = temp.path().join("mow.sqlite3");
         let recordings = temp.path().join("recordings");
+        fs::create_dir_all(&recordings).unwrap();
         let storage = Storage::open(&database, &recordings).unwrap();
-        storage
-            .insert_recording(&recording("recording", RecordingStatus::Recording, None))
-            .unwrap();
-        storage
-            .insert_recording(&recording("processing", RecordingStatus::Processing, None))
-            .unwrap();
+        let final_audio = recordings.join("processing-final.wav");
+        fs::write(&final_audio, b"wav").unwrap();
+        let missing_final = recordings.join("recording-part.wav");
+        let partial_audio = crate::audio::part_path_for(&missing_final);
+        fs::write(&partial_audio, b"partial").unwrap();
+        let missing_processing_final = recordings.join("processing-part.wav");
+        let processing_partial_audio = crate::audio::part_path_for(&missing_processing_final);
+        fs::write(&processing_partial_audio, b"partial").unwrap();
+        let outside_dir = temp.path().join("outside");
+        fs::create_dir_all(&outside_dir).unwrap();
+        let malicious_final = outside_dir.join("outside.wav");
+        let malicious_partial = crate::audio::part_path_for(&malicious_final);
+        fs::write(&malicious_partial, b"must remain").unwrap();
+
+        let mut final_row = recording("processing-final", RecordingStatus::Processing, None);
+        final_row.audio_path = Some(final_audio.to_string_lossy().into_owned());
+        storage.insert_recording(&final_row).unwrap();
+        let mut partial_row = recording("recording-part", RecordingStatus::Recording, None);
+        partial_row.audio_path = Some(missing_final.to_string_lossy().into_owned());
+        storage.insert_recording(&partial_row).unwrap();
+        let mut processing_partial_row =
+            recording("processing-part", RecordingStatus::Processing, None);
+        processing_partial_row.audio_path =
+            Some(missing_processing_final.to_string_lossy().into_owned());
+        storage.insert_recording(&processing_partial_row).unwrap();
+        let mut malicious_row = recording("outside", RecordingStatus::Processing, None);
+        malicious_row.audio_path = Some(malicious_final.to_string_lossy().into_owned());
+        storage.insert_recording(&malicious_row).unwrap();
         drop(storage);
 
         let reopened = Storage::open(&database, &recordings).unwrap();
 
-        for id in ["recording", "processing"] {
-            let row = reopened.get_recording(id).unwrap().unwrap();
-            assert_eq!(row.status, RecordingStatus::Failed);
-            assert_eq!(row.error.as_deref(), Some(INTERRUPTED_ERROR));
-            assert!(row.audio_path.is_some());
-        }
+        let final_row = reopened.get_recording("processing-final").unwrap().unwrap();
+        assert_eq!(final_row.status, RecordingStatus::Failed);
+        assert_eq!(final_row.error.as_deref(), Some(INTERRUPTED_ERROR));
+        assert_eq!(
+            final_row.audio_path.as_deref(),
+            Some(final_audio.to_string_lossy().as_ref())
+        );
+        assert!(final_audio.is_file());
+
+        let partial_row = reopened.get_recording("recording-part").unwrap().unwrap();
+        assert_eq!(partial_row.status, RecordingStatus::Failed);
+        assert_eq!(
+            partial_row.error.as_deref(),
+            Some(INTERRUPTED_BEFORE_FINALIZE_ERROR)
+        );
+        assert!(partial_row.audio_path.is_none());
+        assert!(!partial_audio.exists());
+
+        let processing_partial_row = reopened.get_recording("processing-part").unwrap().unwrap();
+        assert_eq!(processing_partial_row.status, RecordingStatus::Failed);
+        assert_eq!(
+            processing_partial_row.error.as_deref(),
+            Some(INTERRUPTED_BEFORE_FINALIZE_ERROR)
+        );
+        assert!(processing_partial_row.audio_path.is_none());
+        assert!(!processing_partial_audio.exists());
+
+        let malicious_row = reopened.get_recording("outside").unwrap().unwrap();
+        assert_eq!(malicious_row.status, RecordingStatus::Failed);
+        assert_eq!(
+            malicious_row.error.as_deref(),
+            Some(INTERRUPTED_BEFORE_FINALIZE_ERROR)
+        );
+        assert!(malicious_row.audio_path.is_none());
+        assert!(malicious_partial.is_file());
     }
 
     #[test]

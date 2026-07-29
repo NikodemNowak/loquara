@@ -2,8 +2,8 @@ use crate::audio::{AudioRecorder, InputDeviceInfo, cleanup_partial};
 use crate::domain::{DictationEvent, DictationState, transition};
 use crate::platform::{self, SystemWindows, WindowTarget, WindowsApi};
 use crate::storage::{
-    HistoryQuery, Mode, Recording, RecordingStatus, Retention, Storage, VocabularyEntry,
-    postprocess,
+    HistoryQuery, Mode, Recording, RecordingStatus, Retention, Storage, StorageError,
+    VocabularyEntry, postprocess,
 };
 use crate::transcription::{ClientError, TranscriptionResult, WorkerClient};
 use serde::{Deserialize, Serialize};
@@ -18,6 +18,29 @@ use thiserror::Error;
 pub enum CoordinatorError {
     #[error("the requested operation is invalid for the current state")]
     InvalidState,
+}
+
+#[derive(Debug, Error, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "code", rename_all = "snake_case")]
+pub enum AppError {
+    #[error("recording is still active: {recording_id}")]
+    ActiveRecording { recording_id: String },
+    #[error("recording is busy: {recording_id}")]
+    Busy { recording_id: String },
+    #[error("recording cannot be retried: {message}")]
+    NotRetryable { message: String },
+    #[error("storage failed: {message}")]
+    Storage { message: String },
+    #[error("filesystem failed: {message}")]
+    Io { message: String },
+}
+
+impl From<StorageError> for AppError {
+    fn from(error: StorageError) -> Self {
+        Self::Storage {
+            message: error.to_string(),
+        }
+    }
 }
 
 pub struct CoordinatorMachine {
@@ -620,14 +643,9 @@ pub async fn stop_recording_inner(app: AppHandle, state: AppState) -> Result<App
             return Err(message);
         }
     };
-    if let Err(error) = state.storage.update_status(
-        &completed.id,
-        RecordingStatus::Processing,
-        None,
-        None,
-        Some(completed.duration_ms),
-        None,
-    ) {
+    if let Err(error) =
+        mark_processing(state.storage.as_ref(), &completed.id, completed.duration_ms)
+    {
         let message = error.to_string();
         let _ = recover_terminal_state(
             &state.machine,
@@ -672,6 +690,27 @@ pub async fn stop_recording_inner(app: AppHandle, state: AppState) -> Result<App
         .await;
     });
     Ok(snapshot)
+}
+
+fn mark_processing(
+    storage: &Storage,
+    recording_id: &str,
+    duration_ms: u64,
+) -> Result<(), AppError> {
+    match storage.update_status(
+        recording_id,
+        RecordingStatus::Processing,
+        None,
+        None,
+        Some(duration_ms),
+        None,
+    ) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(AppError::Storage {
+            message: format!("recording disappeared before processing: {recording_id}"),
+        }),
+        Err(error) => Err(error.into()),
+    }
 }
 
 #[tauri::command]
@@ -847,33 +886,33 @@ pub fn retry_transcription(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<AppSnapshot, String> {
-    let recording = state
-        .storage
-        .get_recording(&recording_id)
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| "recording not found".to_owned())?;
-    if recording.status != RecordingStatus::Failed {
-        return Err("only a failed recording can be retried".into());
-    }
-    let audio_path = PathBuf::from(
-        recording
-            .audio_path
-            .ok_or_else(|| "recording has no audio".to_owned())?,
-    );
-    if !audio_path.is_file() {
-        return Err("recording audio is missing".into());
-    }
-    let audio_path_string = audio_path.to_string_lossy().into_owned();
-    state
-        .machine
-        .lock()
-        .map_err(|_| "coordinator lock poisoned")?
-        .retry_recording(&recording_id, audio_path_string)
-        .map_err(|error| error.to_string())?;
-    state
-        .storage
-        .mark_retrying(&recording_id)
-        .map_err(|error| error.to_string())?;
+    let audio_path = {
+        let mut machine = state
+            .machine
+            .lock()
+            .map_err(|_| "coordinator lock poisoned")?;
+        if !matches!(
+            machine.snapshot(),
+            DictationState::Idle | DictationState::Failed { .. }
+        ) {
+            return Err(CoordinatorError::InvalidState.to_string());
+        }
+        let recording = state
+            .storage
+            .get_recording(&recording_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "recording not found".to_owned())?;
+        let audio_path = retry_audio_path(&recording).map_err(|error| error.to_string())?;
+        match state.storage.mark_retrying(&recording_id) {
+            Ok(true) => {}
+            Ok(false) => return Err("recording disappeared before retry".into()),
+            Err(error) => return Err(error.to_string()),
+        }
+        machine
+            .retry_recording(&recording_id, audio_path.to_string_lossy().into_owned())
+            .map_err(|error| error.to_string())?;
+        audio_path
+    };
     emit_state(&app, &state);
     let background_state = state.inner().clone();
     let background_app = app.clone();
@@ -881,6 +920,29 @@ pub fn retry_transcription(
         transcribe_recording(background_app, background_state, recording_id, audio_path).await;
     });
     state.snapshot()
+}
+
+fn retry_audio_path(recording: &Recording) -> Result<PathBuf, AppError> {
+    if recording.status != RecordingStatus::Failed {
+        return Err(AppError::NotRetryable {
+            message: "only a failed recording can be retried".into(),
+        });
+    }
+    let audio_path =
+        PathBuf::from(
+            recording
+                .audio_path
+                .as_deref()
+                .ok_or_else(|| AppError::NotRetryable {
+                    message: "recording has no finalized audio".into(),
+                })?,
+        );
+    if !audio_path.is_file() {
+        return Err(AppError::NotRetryable {
+            message: "recording audio is missing".into(),
+        });
+    }
+    Ok(audio_path)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -947,38 +1009,88 @@ pub fn list_history(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn delete_history(recording_id: String, state: State<'_, AppState>) -> Result<bool, String> {
-    let recording = state
-        .storage
-        .get_recording(&recording_id)
-        .map_err(|error| error.to_string())?;
-    if let Some(recording) = recording
-        && let Some(audio_path) = recording.audio_path
-    {
-        remove_managed_audio(Path::new(&audio_path), state.storage.recordings_dir())?;
-    }
-    state
-        .storage
-        .delete_recording(&recording_id)
-        .map_err(|error| error.to_string())
+pub fn delete_history(recording_id: String, state: State<'_, AppState>) -> Result<bool, AppError> {
+    delete_history_safely(&state.machine, state.storage.as_ref(), &recording_id)
 }
 
-fn remove_managed_audio(path: &Path, managed_dir: &Path) -> Result<(), String> {
+fn delete_history_safely(
+    machine: &Mutex<CoordinatorMachine>,
+    storage: &Storage,
+    recording_id: &str,
+) -> Result<bool, AppError> {
+    let machine = machine.lock().map_err(|_| AppError::Busy {
+        recording_id: recording_id.to_owned(),
+    })?;
+    match machine.snapshot() {
+        DictationState::Recording {
+            recording_id: active,
+            ..
+        } if active == recording_id => {
+            return Err(AppError::ActiveRecording {
+                recording_id: recording_id.to_owned(),
+            });
+        }
+        DictationState::Processing {
+            recording_id: active,
+            ..
+        }
+        | DictationState::Pasting {
+            recording_id: active,
+            ..
+        } if active == recording_id => {
+            return Err(AppError::Busy {
+                recording_id: recording_id.to_owned(),
+            });
+        }
+        _ => {}
+    }
+
+    let Some(recording) = storage.get_recording(recording_id)? else {
+        return Ok(false);
+    };
+    match recording.status {
+        RecordingStatus::Recording => {
+            return Err(AppError::ActiveRecording {
+                recording_id: recording_id.to_owned(),
+            });
+        }
+        RecordingStatus::Processing => {
+            return Err(AppError::Busy {
+                recording_id: recording_id.to_owned(),
+            });
+        }
+        RecordingStatus::Completed | RecordingStatus::Failed | RecordingStatus::Cancelled => {}
+    }
+    if let Some(audio_path) = recording.audio_path {
+        remove_managed_audio(Path::new(&audio_path), storage.recordings_dir())?;
+    }
+    let deleted = storage.delete_recording(recording_id)?;
+    drop(machine);
+    Ok(deleted)
+}
+
+fn remove_managed_audio(path: &Path, managed_dir: &Path) -> Result<(), AppError> {
     if !path.exists() {
         return Ok(());
     }
-    let managed = managed_dir
-        .canonicalize()
-        .map_err(|error| error.to_string())?;
-    let canonical = path.canonicalize().map_err(|error| error.to_string())?;
+    let managed = managed_dir.canonicalize().map_err(|error| AppError::Io {
+        message: error.to_string(),
+    })?;
+    let canonical = path.canonicalize().map_err(|error| AppError::Io {
+        message: error.to_string(),
+    })?;
     if !canonical.starts_with(&managed)
         || canonical
             .extension()
             .is_none_or(|extension| extension != "wav")
     {
-        return Err("refusing to delete audio outside the managed recordings directory".into());
+        return Err(AppError::Io {
+            message: "refusing to delete audio outside the managed recordings directory".into(),
+        });
     }
-    std::fs::remove_file(canonical).map_err(|error| error.to_string())
+    std::fs::remove_file(canonical).map_err(|error| AppError::Io {
+        message: error.to_string(),
+    })
 }
 
 #[tauri::command]
@@ -1094,6 +1206,134 @@ pub fn update_setting_value(
 mod tests {
     use super::*;
     use crate::domain::{DictationState, RecoveryRecording};
+    use std::fs;
+
+    fn history_recording(id: &str, status: RecordingStatus, audio_path: &Path) -> Recording {
+        Recording {
+            id: id.to_owned(),
+            created_at: 1,
+            duration_ms: 10,
+            status,
+            text: None,
+            model: None,
+            audio_path: Some(audio_path.to_string_lossy().into_owned()),
+            source_app: None,
+            error: None,
+        }
+    }
+
+    #[test]
+    fn deleting_a_recording_in_progress_is_rejected_without_touching_history_or_audio() {
+        let temp = tempfile::tempdir().unwrap();
+        let recordings_dir = temp.path().join("recordings");
+        fs::create_dir_all(&recordings_dir).unwrap();
+        let storage = Storage::open_in_memory(&recordings_dir).unwrap();
+        let audio_path = recordings_dir.join("active.wav");
+        fs::write(&audio_path, b"wav").unwrap();
+        storage
+            .insert_recording(&history_recording(
+                "active",
+                RecordingStatus::Recording,
+                &audio_path,
+            ))
+            .unwrap();
+        let machine = Mutex::new(CoordinatorMachine::default());
+        machine
+            .lock()
+            .unwrap()
+            .started("active", audio_path.to_string_lossy())
+            .unwrap();
+
+        let error = delete_history_safely(&machine, &storage, "active").unwrap_err();
+
+        assert!(matches!(error, AppError::ActiveRecording { .. }));
+        assert!(storage.get_recording("active").unwrap().is_some());
+        assert!(audio_path.is_file());
+    }
+
+    #[test]
+    fn deleting_processing_history_is_rejected_without_touching_history_or_audio() {
+        let temp = tempfile::tempdir().unwrap();
+        let recordings_dir = temp.path().join("recordings");
+        fs::create_dir_all(&recordings_dir).unwrap();
+        let storage = Storage::open_in_memory(&recordings_dir).unwrap();
+        let audio_path = recordings_dir.join("processing.wav");
+        fs::write(&audio_path, b"wav").unwrap();
+        storage
+            .insert_recording(&history_recording(
+                "processing",
+                RecordingStatus::Processing,
+                &audio_path,
+            ))
+            .unwrap();
+        let machine = Mutex::new(CoordinatorMachine {
+            state: DictationState::Processing {
+                recording_id: "processing".into(),
+                audio_path: audio_path.to_string_lossy().into_owned(),
+            },
+        });
+
+        let error = delete_history_safely(&machine, &storage, "processing").unwrap_err();
+
+        assert!(matches!(error, AppError::Busy { .. }));
+        assert!(storage.get_recording("processing").unwrap().is_some());
+        assert!(audio_path.is_file());
+    }
+
+    #[test]
+    fn deleting_completed_and_failed_history_removes_rows_and_managed_audio() {
+        let temp = tempfile::tempdir().unwrap();
+        let recordings_dir = temp.path().join("recordings");
+        fs::create_dir_all(&recordings_dir).unwrap();
+        let storage = Storage::open_in_memory(&recordings_dir).unwrap();
+        let machine = Mutex::new(CoordinatorMachine::default());
+
+        for (id, status) in [
+            ("completed", RecordingStatus::Completed),
+            ("failed", RecordingStatus::Failed),
+        ] {
+            let audio_path = recordings_dir.join(format!("{id}.wav"));
+            fs::write(&audio_path, b"wav").unwrap();
+            storage
+                .insert_recording(&history_recording(id, status, &audio_path))
+                .unwrap();
+
+            assert!(delete_history_safely(&machine, &storage, id).unwrap());
+            assert!(storage.get_recording(id).unwrap().is_none());
+            assert!(!audio_path.exists());
+        }
+    }
+
+    #[test]
+    fn missing_history_row_cannot_be_marked_as_processing() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = Storage::open_in_memory(temp.path().join("recordings")).unwrap();
+
+        let error = mark_processing(&storage, "missing", 10).unwrap_err();
+
+        assert!(matches!(error, AppError::Storage { .. }));
+    }
+
+    #[test]
+    fn retry_requires_a_failed_row_with_existing_finalized_audio() {
+        let temp = tempfile::tempdir().unwrap();
+        let final_audio = temp.path().join("final.wav");
+        fs::write(&final_audio, b"wav").unwrap();
+        let retryable =
+            history_recording("retryable", RecordingStatus::Failed, final_audio.as_path());
+        let mut interrupted = history_recording(
+            "interrupted",
+            RecordingStatus::Failed,
+            final_audio.as_path(),
+        );
+        interrupted.audio_path = None;
+
+        assert_eq!(retry_audio_path(&retryable).unwrap(), final_audio);
+        assert!(matches!(
+            retry_audio_path(&interrupted),
+            Err(AppError::NotRetryable { .. })
+        ));
+    }
 
     #[test]
     fn coordinator_rejects_a_second_start_without_losing_active_state() {
