@@ -29,7 +29,7 @@ export function App({ adapter: adapterProp }: { adapter?: AppAdapter }) {
     setToasts((items) => [...items, { id, text, kind }].slice(-3));
     window.setTimeout(() => setToasts((items) => items.filter((item) => item.id !== id)), 5000);
   }, []);
-  const { snapshot, setSnapshot, history, refreshHistory, loading } = useAppModel(adapter, (message) => toast(message, "error"));
+  const { snapshot, setSnapshot, history, refreshHistory, loading } = useAppModel(adapter, toast);
 
   let content;
   if (loading) {

@@ -1,9 +1,10 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, test, vi } from "vitest";
 
 import { App } from "./App";
-import { adapterStub } from "../test/fixtures";
+import { adapterStub, snapshot } from "../test/fixtures";
+import type { AppSnapshot } from "../lib/types";
 
 describe("główna nawigacja", () => {
   test("przechodzi klawiaturą między wszystkimi sekcjami", async () => {
@@ -40,5 +41,32 @@ describe("główna nawigacja", () => {
       expect(unlistenState).toHaveBeenCalledOnce();
       expect(unlistenError).toHaveBeenCalledOnce();
     });
+  });
+
+  test("nie nadpisuje nowszego zdarzenia spóźnionym snapshotem startowym", async () => {
+    let resolveSnapshot!: (value: AppSnapshot) => void;
+    let emitState!: (value: AppSnapshot) => void;
+    const getAppSnapshot = vi.fn(() => new Promise<AppSnapshot>((resolve) => {
+      resolveSnapshot = resolve;
+    }));
+    const adapter = adapterStub({
+      getAppSnapshot,
+      listHistory: async () => [],
+      onState: async (listener) => {
+        emitState = listener;
+        return () => undefined;
+      },
+    });
+    render(<App adapter={adapter} />);
+    await waitFor(() => expect(emitState).toBeTypeOf("function"));
+
+    act(() => emitState({
+      ...snapshot,
+      dictation: { status: "recording", recordingId: "new", audioPath: "new.wav" },
+    }));
+    resolveSnapshot(snapshot);
+
+    expect(await screen.findByRole("button", { name: /Zatrzymaj nagrywanie/ })).toBeVisible();
+    expect(getAppSnapshot).toHaveBeenCalledOnce();
   });
 });

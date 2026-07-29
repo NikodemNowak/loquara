@@ -32,6 +32,7 @@ export function useAppModel(adapter: AppAdapter, onError: (message: string) => v
 
   useEffect(() => {
     let active = true;
+    let stateEventSeen = false;
     const unlisteners: Array<() => void> = [];
     const keepOrDispose = (unlisten: () => void) => {
       if (active) unlisteners.push(unlisten);
@@ -40,13 +41,17 @@ export function useAppModel(adapter: AppAdapter, onError: (message: string) => v
     Promise.all([adapter.getAppSnapshot(), adapter.listHistory({})])
       .then(([nextSnapshot, nextHistory]) => {
         if (!active) return;
-        setSnapshot(nextSnapshot);
+        if (!stateEventSeen) {
+          previousStatus.current = nextSnapshot.dictation.status;
+          setSnapshot(nextSnapshot);
+        }
         setHistory(nextHistory);
       })
       .catch((error) => onError(`Nie udało się uruchomić widoku: ${normalizeError(error)}`))
       .finally(() => active && setLoading(false));
     adapter.onState((next) => {
       if (!active) return;
+      stateEventSeen = true;
       const wasTerminal =
         ["processing", "pasting"].includes(previousStatus.current) &&
         ["idle", "failed"].includes(next.dictation.status);

@@ -22,6 +22,7 @@ export function RecorderOverlay({ adapter }: { adapter: AppAdapter }) {
     let active = true;
     let failed = false;
     let snapshotReady = false;
+    let stateEventSeen = false;
     let registrations = 0;
     let latestSnapshot: AppSnapshot | undefined;
     const unlisteners: Array<() => void> = [];
@@ -43,12 +44,13 @@ export function RecorderOverlay({ adapter }: { adapter: AppAdapter }) {
     };
     void adapter.getAppSnapshot()
       .then((next) => {
-        latestSnapshot = next;
+        if (!stateEventSeen) latestSnapshot = next;
         snapshotReady = true;
         showWhenReady();
       })
       .catch(fail);
     void adapter.onState((next) => {
+      stateEventSeen = true;
       latestSnapshot = next;
       if (snapshotReady && registrations === 2 && active && !failed) setSnapshot(next);
     }).then((unlisten) => {

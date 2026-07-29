@@ -132,4 +132,30 @@ describe("nakładka dyktowania", () => {
     expect(await screen.findByText("Gotowy")).toBeVisible();
     expect(getAppSnapshot).toHaveBeenCalledTimes(2);
   });
+
+  test("nie nadpisuje nowszego zdarzenia spóźnionym snapshotem startowym", async () => {
+    let resolveSnapshot!: (value: AppSnapshot) => void;
+    let emitState!: (value: AppSnapshot) => void;
+    const adapter = adapterStub({
+      getAppSnapshot: () => new Promise((resolve) => { resolveSnapshot = resolve; }),
+      onState: async (listener) => {
+        emitState = listener;
+        return () => undefined;
+      },
+      onLevel: async () => () => undefined,
+    });
+    render(<RecorderOverlay adapter={adapter} />);
+    await waitFor(() => expect(emitState).toBeTypeOf("function"));
+
+    act(() => emitState({
+      dictation: { status: "recording", recordingId: "new", audioPath: "new.wav" },
+      settings: { inputDevice: null, shortcut: "Ctrl+Space", autoPaste: true, retentionDays: 30, launchOnLogin: true, activeMode: "clean" },
+    }));
+    resolveSnapshot({
+      dictation: { status: "idle" },
+      settings: { inputDevice: null, shortcut: "Ctrl+Space", autoPaste: true, retentionDays: 30, launchOnLogin: true, activeMode: "clean" },
+    });
+
+    expect(await screen.findByRole("button", { name: "Zatrzymaj nagrywanie" })).toBeVisible();
+  });
 });
