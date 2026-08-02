@@ -93,7 +93,7 @@ export function App({ adapter: adapterProp }: { adapter?: AppAdapter }) {
           <button className="rail-btn rail-btn--control rail-btn--close" aria-label={t("win.close")} title={t("win.close")} onClick={close}><X size={16} /></button>
         </div>
       </aside>
-      <div className="app-content">{content}</div>
+      <div className="app-content"><div className="app-drag" data-tauri-drag-region /><div className="app-scroll">{content}</div></div>
       <ToastRegion items={toasts} onDismiss={(id) => setToasts((items) => items.filter((item) => item.id !== id))} />
     </main>
   );
