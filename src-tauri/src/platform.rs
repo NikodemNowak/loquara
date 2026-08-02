@@ -278,6 +278,14 @@ pub fn register_shortcuts<R: Runtime>(
         .map_err(|error| PlatformError::ShortcutRegistration(error.to_string()))
 }
 
+/// Temporarily unregisters all global shortcuts (used while the user records
+/// a new shortcut in settings, so the old combo does not fire mid-capture).
+pub fn suspend_shortcuts<R: Runtime>(app: &AppHandle<R>) -> Result<(), PlatformError> {
+    app.global_shortcut()
+        .unregister_all()
+        .map_err(|error| PlatformError::ShortcutRegistration(error.to_string()))
+}
+
 pub fn replace_toggle_shortcut<R: Runtime>(
     app: &AppHandle<R>,
     old: &str,

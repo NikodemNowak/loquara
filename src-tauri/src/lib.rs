@@ -313,6 +313,7 @@ pub fn run() {
             dictation::request_cancel,
             dictation::hide_overlay,
             dictation::save_overlay_position,
+            dictation::set_shortcut_suspended,
             dictation::retry_transcription,
             dictation::paste_transcript,
             dictation::list_history,

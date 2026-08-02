@@ -1,4 +1,4 @@
-import { screen, waitFor } from "@testing-library/react";
+import { fireEvent, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, test, vi } from "vitest";
 
@@ -103,5 +103,31 @@ describe("ustawienia", () => {
       onToast={() => undefined}
     />);
     expect(await screen.findByText(/Nie udało się wczytać mikrofonów/)).toBeVisible();
+  });
+
+  test("nagrywa nowy skrót przez wciśnięcie kombinacji", async () => {
+    const updateSettings = vi.fn(async (next: typeof settings) => ({ settings: next, warning: null }));
+    const setShortcutSuspended = vi.fn(async () => undefined);
+    renderWithI18n(<SettingsPage adapter={adapterStub({ updateSettings, setShortcutSuspended })} initialSettings={settings} onToast={() => undefined} />);
+
+    await userEvent.click(screen.getByRole("button", { name: /Zmień globalny skrót/ }));
+    expect(await screen.findByText("Naciśnij nowy skrót…")).toBeVisible();
+    expect(setShortcutSuspended).toHaveBeenCalledWith(true);
+
+    fireEvent.keyDown(window, { key: "k", ctrlKey: true });
+
+    await waitFor(() => expect(updateSettings).toHaveBeenCalledWith(expect.objectContaining({ shortcut: "Ctrl+K" })));
+    await waitFor(() => expect(setShortcutSuspended).toHaveBeenLastCalledWith(false));
+  });
+
+  test("esc anuluje nagrywanie skrótu bez zapisu", async () => {
+    const updateSettings = vi.fn(async (next: typeof settings) => ({ settings: next, warning: null }));
+    renderWithI18n(<SettingsPage adapter={adapterStub({ updateSettings })} initialSettings={settings} onToast={() => undefined} />);
+
+    await userEvent.click(screen.getByRole("button", { name: /Zmień globalny skrót/ }));
+    fireEvent.keyDown(window, { key: "Escape" });
+
+    expect(updateSettings).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: /Zmień globalny skrót/ })).toBeEnabled();
   });
 });

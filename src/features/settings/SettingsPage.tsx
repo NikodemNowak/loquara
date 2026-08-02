@@ -2,14 +2,13 @@ import { useEffect, useState } from "react";
 
 import { Check, Cpu, Languages, Mic, Palette, SlidersHorizontal, Trash2 } from "../../components/Icons";
 import { BrandLogo } from "../../components/BrandLogo";
+import { ShortcutCapture } from "./ShortcutCapture";
 import { applyTheme } from "../../app/theme";
 import type { ToastKind } from "../../components/Toast";
 import type { AppAdapter } from "../../lib/tauri";
 import type { AppSettings, InputDeviceInfo, ModelDescriptor, ModelDownloadProgress, ModelStatus } from "../../lib/types";
 import { normalizeError } from "../../lib/errors";
 import { useI18n } from "../../lib/i18n";
-
-const shortcutPattern = /^(?:(?:Ctrl|Alt|Shift|Meta)\+)+(?:[A-Z0-9]|Space|Enter|F(?:[1-9]|1[0-2]))$/i;
 
 function ProviderMark({ provider }: { provider: string }) {
   return <span className={`provider-mark provider-mark--${provider.toLowerCase()}`} aria-label={provider} title={provider}>
@@ -35,7 +34,6 @@ export function SettingsPage({
   const [modelStatus, setModelStatus] = useState<ModelStatus>();
   const [models, setModels] = useState<ModelDescriptor[]>([]);
   const [systemMemory, setSystemMemory] = useState<{ vramGb: number; ramGb: number; cpuCores: number }>({ vramGb: 0, ramGb: 0, cpuCores: 0 });
-  const [shortcutError, setShortcutError] = useState("");
   const [saving, setSaving] = useState(false);
   const [downloading, setDownloading] = useState("");
   const [deleting, setDeleting] = useState("");
@@ -126,10 +124,6 @@ export function SettingsPage({
     }
   };
 
-  const changeShortcut = (shortcut: string) => {
-    setSettings((current) => ({ ...current, shortcut }));
-    setShortcutError(shortcutPattern.test(shortcut) ? "" : t("settings.shortcut.error"));
-  };
 
   const download = async (key: string) => {
     setDownloading(key);
@@ -181,7 +175,7 @@ export function SettingsPage({
           <section className="settings-group">
             <div className="group-heading"><Mic size={18} /><div><h2>{t("settings.recording.title")}</h2><p>{t("settings.recording.subtitle")}</p></div></div>
             <label className="setting-row"><span><strong>{t("settings.mic.label")}</strong><small>{deviceError || t("settings.mic.description")}</small></span><select disabled={saving || Boolean(deviceError)} value={settings.inputDevice ?? ""} onChange={(event) => void save({ ...settings, inputDevice: event.target.value || null })}><option value="">{t("settings.mic.default")}</option>{devices.map((device) => <option value={device.id} key={device.id}>{device.name}</option>)}</select></label>
-            <label className="setting-row"><span><strong>{t("settings.shortcut.label")}</strong><small>{shortcutError || t("settings.shortcut.description")}</small></span><input disabled={saving} className={shortcutError ? "invalid" : ""} value={settings.shortcut} onChange={(event) => changeShortcut(event.target.value)} onBlur={() => !shortcutError && void save(settings)} aria-invalid={Boolean(shortcutError)} /></label>
+            <div className="setting-row"><span><strong>{t("settings.shortcut.label")}</strong><small>{t("settings.shortcut.description")}</small></span><ShortcutCapture value={settings.shortcut} disabled={saving} onCapture={(combo) => void save({ ...settings, shortcut: combo })} onActiveChange={(active) => { void adapter.setShortcutSuspended(active).catch(() => undefined); }} /></div>
           </section>
           <section className="settings-group">
             <div className="group-heading"><SlidersHorizontal size={18} /><div><h2>{t("settings.behavior.title")}</h2></div></div>

@@ -28,6 +28,7 @@ export interface AppAdapter {
   requestCancel(): Promise<AppSnapshot>;
   hideOverlay(): Promise<void>;
   saveOverlayPosition(x: number, y: number): Promise<void>;
+  setShortcutSuspended(suspended: boolean): Promise<void>;
   retryTranscription(recordingId: string): Promise<AppSnapshot>;
   pasteTranscript(recordingId?: string): Promise<void>;
   listHistory(query: HistoryQuery): Promise<Recording[]>;
@@ -85,6 +86,7 @@ const realAdapter: AppAdapter = {
   requestCancel: () => invoke("request_cancel"),
   hideOverlay: () => invoke("hide_overlay"),
   saveOverlayPosition: (x, y) => invoke("save_overlay_position", { x, y }),
+  setShortcutSuspended: (suspended) => invoke("set_shortcut_suspended", { suspended }),
   retryTranscription: (recordingId) =>
     invoke("retry_transcription", { recordingId }),
   pasteTranscript: (recordingId) =>
@@ -221,6 +223,7 @@ export function createBrowserAdapter(): AppAdapter {
     requestCancel: async () => snapshot,
     hideOverlay: async () => undefined,
     saveOverlayPosition: async () => undefined,
+    setShortcutSuspended: async () => undefined,
     retryTranscription: async (recordingId) => {
       const item = history.find((recording) => recording.id === recordingId);
       if (!item?.audioPath) throw new Error(translate("errors.noAudio"));

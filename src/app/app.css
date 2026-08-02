@@ -73,6 +73,11 @@ input[type="checkbox"]:disabled { opacity: 0.5; cursor: not-allowed; }
 .shortcut b { font-weight: 400; font-size: 11px; }
 .shortcut--inline { display: inline-flex; margin-left: 5px; vertical-align: middle; }
 .shortcut--inline kbd { min-width: 0; padding: 2px 5px; font-size: 10px; }
+.shortcut-capture { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-width: 96px; min-height: 30px; padding: 3px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); cursor: pointer; transition: border-color 0.12s ease, box-shadow 0.12s ease; }
+.shortcut-capture:hover { border-color: var(--border-strong); }
+.shortcut-capture--active, .shortcut-capture--active:hover { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 15%, transparent); }
+.shortcut-capture .shortcut { margin-left: 0; }
+.shortcut-capture__prompt { color: var(--accent); font-size: 12px; font-weight: 600; }
 
 /* ===== Today - centered quiet hero ===== */
 .today-page { width: min(720px, 100%); padding-top: 36px; }

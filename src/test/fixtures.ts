@@ -88,6 +88,7 @@ export function adapterStub(overrides: Partial<AppAdapter> = {}): AppAdapter {
     requestCancel: async () => snapshot,
     hideOverlay: async () => undefined,
     saveOverlayPosition: async () => undefined,
+    setShortcutSuspended: async () => undefined,
     retryTranscription: async () => snapshot,
     pasteTranscript: async () => undefined,
     listHistory: async () => recordings,

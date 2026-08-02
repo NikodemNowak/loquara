@@ -1292,6 +1292,24 @@ pub fn hide_overlay(app: AppHandle) {
 }
 
 #[tauri::command]
+pub fn set_shortcut_suspended(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    suspended: bool,
+) -> Result<(), String> {
+    if suspended {
+        platform::suspend_shortcuts(&app).map_err(|error| error.to_string())
+    } else {
+        let shortcut = state
+            .settings
+            .read()
+            .map(|settings| settings.shortcut.clone())
+            .unwrap_or_else(|_| "Ctrl+Space".to_string());
+        platform::register_shortcuts(&app, &shortcut).map_err(|error| error.to_string())
+    }
+}
+
+#[tauri::command]
 pub fn save_overlay_position(
     x: i32,
     y: i32,
