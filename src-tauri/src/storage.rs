@@ -221,9 +221,9 @@ impl Storage {
             "INSERT OR IGNORE INTO modes
                (id,config_json,name,description,prompt,enabled,is_default,created_at)
              VALUES
-               ('clean','{}','Czysty','Lekka normalizacja tekstu','',1,1,0),
-               ('message','{}','Wiadomość','Naturalny styl wiadomości','',1,0,1),
-               ('code','{}','Kod','Dyktowanie terminów technicznych','',1,0,2);
+               ('clean','{}','Clean','Light text normalization','',1,1,0),
+               ('message','{}','Message','Natural message style','',1,0,1),
+               ('code','{}','Code','Dictating technical terms','',1,0,2);
              UPDATE schema_version SET version = 2 WHERE version < 2;",
         )?;
         Ok(())
@@ -988,7 +988,7 @@ mod tests {
                 .iter()
                 .map(|mode| mode.name.as_str())
                 .collect::<Vec<_>>(),
-            vec!["Czysty", "Wiadomość", "Kod"]
+            vec!["Clean", "Message", "Code"]
         );
         assert_eq!(defaults.iter().filter(|mode| mode.is_default).count(), 1);
 

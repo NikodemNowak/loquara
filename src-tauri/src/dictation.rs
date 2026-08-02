@@ -521,7 +521,7 @@ fn model_weight_artifacts(snapshot: &Path) -> Result<Vec<String>, String> {
         }
         let bytes = std::fs::read(&index_path).map_err(|error| error.to_string())?;
         let index: Value = serde_json::from_slice(&bytes)
-            .map_err(|error| format!("Nieprawidłowy {index_name}: {error}"))?;
+            .map_err(|error| format!("Invalid {index_name}: {error}"))?;
         let weight_map = index
             .get("weight_map")
             .and_then(Value::as_object)
@@ -532,7 +532,7 @@ fn model_weight_artifacts(snapshot: &Path) -> Result<Vec<String>, String> {
             let shard = value
                 .as_str()
                 .filter(|value| !value.is_empty())
-                .ok_or_else(|| format!("{index_name} zawiera nieprawidłową nazwę sharda"))?;
+                .ok_or_else(|| format!("{index_name} contains an invalid shard name"))?;
             let shard_path = Path::new(shard);
             if shard_path.is_absolute()
                 || !shard_path
@@ -540,7 +540,7 @@ fn model_weight_artifacts(snapshot: &Path) -> Result<Vec<String>, String> {
                     .all(|component| matches!(component, Component::Normal(_)))
             {
                 return Err(format!(
-                    "{index_name} zawiera niedozwoloną ścieżkę sharda: {shard}"
+                    "{index_name} contains a disallowed shard path: {shard}"
                 ));
             }
             shards.insert(shard.to_owned());
@@ -599,7 +599,7 @@ fn model_status_from_snapshot(snapshot: &Path, id: &str, revision: &str) -> Mode
         ),
         Ok(true) if !snapshot.is_dir() => (
             ModelStatusState::NotInstalled,
-            Some("Ścieżka rewizji modelu nie jest katalogiem.".into()),
+            Some("The model revision path is not a directory.".into()),
         ),
         Ok(true) => {
             let mut missing = Vec::new();
@@ -623,7 +623,7 @@ fn model_status_from_snapshot(snapshot: &Path, id: &str, revision: &str) -> Mode
             if let Some(error) = error {
                 (
                     ModelStatusState::Error,
-                    Some(format!("Nie można sprawdzić artefaktów modelu: {error}")),
+                    Some(format!("Could not check model artifacts: {error}")),
                 )
             } else if missing.is_empty() {
                 (ModelStatusState::Ready, None)
@@ -631,7 +631,7 @@ fn model_status_from_snapshot(snapshot: &Path, id: &str, revision: &str) -> Mode
                 (
                     ModelStatusState::NotInstalled,
                     Some(format!(
-                        "Brakujące lub puste pliki: {}.",
+                        "Missing or empty files: {}.",
                         missing.join(", ")
                     )),
                 )
@@ -640,7 +640,7 @@ fn model_status_from_snapshot(snapshot: &Path, id: &str, revision: &str) -> Mode
         Err(error) => (
             ModelStatusState::Error,
             Some(format!(
-                "Nie można sprawdzić lokalnego cache modelu: {error}"
+                "Could not inspect the local model cache: {error}"
             )),
         ),
     };
@@ -1736,7 +1736,7 @@ pub fn retry_transcription(
             .clone();
         if let Some(message) = (model_status_from_local(&state.model_home, &selected_model).state
             != ModelStatusState::Ready)
-            .then(|| format!("Wybrany model nie jest gotowy. Pobierz go przed ponowieniem: {selected_model}."))
+            .then(|| format!("The selected model is not ready. Download it before retrying: {selected_model}."))
         {
             return Err(message);
         }
@@ -1868,7 +1868,7 @@ pub async fn play_recording(
         return Err(format!("brak pliku audio: {}", path.display()));
     }
     if path.extension().and_then(|extension| extension.to_str()) != Some("wav") {
-        return Err("obsługiwane są tylko lokalne pliki WAV".into());
+        return Err("Only local WAV files are supported".into());
     }
     tauri::async_runtime::spawn_blocking(move || crate::sound::play_file(&path))
         .await
@@ -2069,14 +2069,14 @@ pub fn list_modes(state: State<'_, AppState>) -> Result<Vec<Mode>, String> {
 fn validate_active_mode(storage: &Storage, id: &str) -> Result<Mode, String> {
     match storage.get_mode(id).map_err(|error| error.to_string())? {
         None => Err(format!("Tryb „{id}” nie istnieje.")),
-        Some(mode) if !mode.enabled => Err(format!("Tryb „{}” jest wyłączony.", mode.name)),
+        Some(mode) if !mode.enabled => Err(format!("Mode \"{}\" is disabled.", mode.name)),
         Some(mode) => Ok(mode),
     }
 }
 
 fn validate_mode_upsert(active_mode: &str, mode: &Mode) -> Result<(), String> {
     if mode.id == active_mode && !mode.enabled {
-        Err("Nie można wyłączyć aktualnie używanego trybu.".into())
+        Err("Cannot disable the mode that is currently in use.".into())
     } else {
         Ok(())
     }
@@ -2084,7 +2084,7 @@ fn validate_mode_upsert(active_mode: &str, mode: &Mode) -> Result<(), String> {
 
 fn validate_mode_delete(active_mode: &str, id: &str) -> Result<(), String> {
     if id == active_mode {
-        Err("Nie można usunąć aktualnie używanego trybu.".into())
+        Err("Cannot delete the mode that is currently in use.".into())
     } else {
         Ok(())
     }
@@ -2217,7 +2217,7 @@ pub async fn download_model(
     let engine_dir = state
         .worker_path
         .parent()
-        .ok_or_else(|| "Nie można ustalić katalogu silnika.".to_string())?
+        .ok_or_else(|| "Could not determine the engine directory.".to_string())?
         .to_path_buf();
     let script = engine_dir.join("download_model.py");
     if !script.is_file() {
@@ -2251,11 +2251,11 @@ pub async fn download_model(
         let stdout = child
             .stdout
             .take()
-            .ok_or_else(|| "Nie można odczytać postępu pobierania.".to_string())?;
+            .ok_or_else(|| "Could not read the download progress.".to_string())?;
         let stderr = child
             .stderr
             .take()
-            .ok_or_else(|| "Nie można odczytać błędu pobierania.".to_string())?;
+            .ok_or_else(|| "Could not read the download error.".to_string())?;
         let stderr_thread = std::thread::spawn(move || {
             let mut output = String::new();
             let mut reader = BufReader::new(stderr);
@@ -2280,7 +2280,7 @@ pub async fn download_model(
         let status = child.wait().map_err(|error| error.to_string())?;
         let stderr = stderr_thread
             .join()
-            .map_err(|_| "Nie można odczytać błędu pobierania.".to_string())?;
+            .map_err(|_| "Could not read the download error.".to_string())?;
         Ok::<_, String>((status, stderr))
     })
     .await
@@ -2293,8 +2293,8 @@ pub async fn download_model(
         {
             Err("Model jest ograniczony (gated) na Hugging Face. "
                 .to_string()
-                + "Zaloguj się przez `huggingface-cli login`, zaakceptuj warunki "
-                + "na stronie modelu i spróbuj ponownie.")
+                + "Sign in with `huggingface-cli login`, accept the terms "
+                + "on the model page, then try again.")
         } else {
             Err(stderr.lines().last().unwrap_or(&stderr).trim().to_owned())
         };
@@ -2306,7 +2306,7 @@ pub async fn download_model(
     } else {
         Err(status
             .message
-            .unwrap_or_else(|| "Pobieranie zakończyło się niepełnym modelem.".into()))
+            .unwrap_or_else(|| "The download finished with an incomplete model.".into()))
     }
 }
 
@@ -2316,7 +2316,7 @@ pub fn delete_model(model: String, state: State<'_, AppState>) -> Result<(), Str
         return Err(format!("Nieznany model: {model}."));
     }
     if !matches!(state.snapshot()?.dictation, DictationState::Idle) {
-        return Err("Zatrzymaj dyktowanie przed usunięciem modelu.".into());
+        return Err("Stop dictating before deleting a model.".into());
     }
     let active_model = state
         .settings
@@ -2325,13 +2325,13 @@ pub fn delete_model(model: String, state: State<'_, AppState>) -> Result<(), Str
         .model
         .clone();
     if active_model == model {
-        return Err("Najpierw wybierz inny model, aby usunąć aktualnie używany.".into());
+        return Err("Select another model before deleting the active one.".into());
     }
     let cache = state.model_home.join(&model);
     match std::fs::remove_dir_all(&cache) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(format!("Nie udało się usunąć modelu: {error}")),
+        Err(error) => Err(format!("Could not delete the model: {error}")),
     }
 }
 
@@ -3055,7 +3055,7 @@ mod tests {
         assert!(
             validate_active_mode(&storage, "message")
                 .unwrap_err()
-                .contains("wyłączony")
+                .contains("disabled")
         );
         assert_eq!(validate_active_mode(&storage, "clean").unwrap().id, "clean");
     }

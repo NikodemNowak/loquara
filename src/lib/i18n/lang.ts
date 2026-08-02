@@ -39,7 +39,11 @@ export function setCurrentLang(lang: I18nLanguage): void {
 
 export function cachedLang(): I18nLanguage {
   const raw = localStorage.getItem("mow-lang");
-  return raw === "pl" || raw === "en" ? raw : "pl";
+  if (raw === "pl" || raw === "en") return raw;
+  const system = (typeof navigator === "object" && navigator.language ? navigator.language : "en")
+    .split("-")[0]
+    .toLowerCase();
+  return system === "pl" ? "pl" : "en";
 }
 
 export function cachedPref(): "system" | "pl" | "en" {

@@ -1,43 +1,45 @@
 # Loquara
 
-Loquara to lokalna, otwartoźródłowa aplikacja do dyktowania na Windows, macOS i Linux. Nagrywa mikrofon po globalnym skrócie, transkrybuje wypowiedź modelem NVIDIA Parakeet na karcie graficznej i może automatycznie wkleić tekst do aktywnej aplikacji.
+Loquara is a local, open-source dictation app for Windows (macOS and Linux builds included). Hold a global shortcut, speak, and get a transcription from an NVIDIA Parakeet model running on your GPU — optionally pasted straight into the active app.
 
-## Najważniejsze możliwości
+## Highlights
 
-- globalny skrót `Ctrl+Space` uruchamia i kończy nagrywanie, `Esc` je anuluje;
-- mała nakładka pokazuje nagrywanie, przetwarzanie, wklejanie i błąd — tylko podczas dyktowania;
-- zasobnik systemowy pozwala rozpocząć nagranie, wkleić ostatni tekst i otworzyć główne okno;
-- historia zachowuje nagrania i tekst, a słownik oraz tryby poprawiają wynik;
-- jasny, ciemny i systemowy motyw;
-- opcjonalny autostart oraz automatyczne wklejanie;
-- **wszystko działa lokalnie** — audio nie opuszcza komputera.
+- global shortcut `Ctrl+Space` starts and stops recording, `Esc` cancels;
+- a minimal floating pill shows a live waveform while dictating — nothing else;
+- distinct sound cues mark recording start, stop, and transcript-ready;
+- system tray: start recording, paste the last transcript, open the main window;
+- history keeps audio and text; a custom vocabulary and modes refine results;
+- shortcut capture: click the shortcut field and press the new combo to set it;
+- light, dark, and system theme;
+- Polish and English UI — follows the OS language (Polish on Polish systems, English otherwise), switchable anytime in settings;
+- **everything runs locally** — audio never leaves the machine.
 
-## Prywatność i architektura
+## Privacy and architecture
 
-Interfejs React działa w Tauri. Rust przechwytuje dźwięk, zapisuje SQLite i integruje skróty, zasobnik oraz schowek. Długowieczny worker Python ładuje `nvidia/parakeet-tdt-0.6b-v3` w dokładnej rewizji `7c35754d166cca382ad1e53e68b01e7c575f3a1d` przez Transformers/PyTorch CUDA. Po jednorazowym pobraniu modelu transkrypcja nie wysyła nagrań do usługi chmurowej.
+The React UI runs in Tauri. Rust captures audio, stores SQLite, and handles shortcuts, tray, and clipboard. A long-lived Python worker loads `nvidia/parakeet-tdt-0.6b-v3` at the pinned revision `7c35754d166cca382ad1e53e68b01e7c575f3a1d` via Transformers/PyTorch CUDA. After a one-time model download, transcription sends nothing to the cloud.
 
-## Wymagania
+## Requirements
 
-- Windows 10/11 x64, macOS lub Linux (x64);
-- Node.js, `pnpm`, Rust zgodny z `rust-version` (dla builda);
-- Python 3.10+ (testowane z 3.13);
-- PyTorch z CUDA zainstalowany osobno, zgodny ze sterownikiem NVIDIA;
-- co najmniej 6 GB wolnego miejsca na model w cache Hugging Face.
+- Windows 10/11 x64, macOS, or Linux (x64);
+- Node.js, `pnpm`, and a Rust toolchain matching `rust-version` (for building);
+- Python 3.10+ (tested with 3.13);
+- PyTorch with CUDA installed separately, matching your NVIDIA driver;
+- at least 6 GB of free space for the model in the Hugging Face cache.
 
-`engine/requirements.txt` celowo nie zawiera PyTorch, aby nie zastąpić zoptymalizowanego wydania CUDA.
+`engine/requirements.txt` deliberately omits PyTorch so it never replaces your optimized CUDA build.
 
-## Instalacja silnika i modelu
+## Engine and model setup
 
-W PowerShell (lub bash na macOS/Linux):
+In PowerShell (or bash on macOS/Linux):
 
 ```powershell
 .\scripts\setup-engine.ps1
 .\scripts\download-model.ps1
 ```
 
-`setup-engine.ps1` instaluje dokładne wersje lekkich zależności, sprawdza CUDA, nazwę GPU i ping workera. `download-model.ps1` pobiera dokładną rewizję do standardowego cache Hugging Face, jest idempotentny i raportuje ścieżkę oraz liczbę bajtów. Jeśli Python nie jest w `PATH`, ustaw `MOW_PYTHON` na pełną ścieżkę do `python.exe`.
+`setup-engine.ps1` installs the pinned lightweight dependencies, checks CUDA, the GPU name, and pings the worker. `download-model.ps1` downloads the pinned revision into the standard Hugging Face cache; it is idempotent and reports the path and byte count. If Python is not on `PATH`, set `MOW_PYTHON` to the full path of `python.exe`.
 
-## Uruchamianie i budowanie
+## Run and build
 
 ```powershell
 pnpm install
@@ -45,20 +47,24 @@ pnpm install
 pnpm tauri build
 ```
 
-Opcje `run-dev.ps1`: `-SetupEngine`, `-DownloadModel` i `-Built`. Binarka release powstaje w `src-tauri\target\release\loquara.exe`, a instalator NSIS w `src-tauri\target\release\bundle\nsis`.
+`run-dev.ps1` options: `-SetupEngine`, `-DownloadModel`, and `-Built`. The release binary lands in `src-tauri\target\release\loquara.exe`, the NSIS installer in `src-tauri\target\release\bundle\nsis`.
 
-Pełna weryfikacja uruchomieniowa:
+Full runtime verification:
 
 ```powershell
 .\tests\smoke.ps1 -ExePath .\src-tauri\target\release\loquara.exe
 ```
 
-## Dane lokalne
+## Language
 
-- ustawienia, historia i nagrania: `%APPDATA%\io.loquara.desktop`;
-- model: `%USERPROFILE%\.cache\huggingface\hub` albo ścieżki wynikające z `HF_HOME` / `HF_HUB_CACHE`;
-- dane modelu i nagrania nie są dołączane do repozytorium.
+The interface ships in Polish and English. It follows the OS language — Polish on Polish systems, English everywhere else — and can be switched anytime in **Settings → General**.
 
-## Licencja
+## Local data
 
-MIT — szczegóły w pliku [LICENSE](LICENSE).
+- settings, history, and recordings: `%APPDATA%\io.loquara.desktop`;
+- model: `%USERPROFILE%\.cache\huggingface\hub` or paths from `HF_HOME` / `HF_HUB_CACHE`;
+- model data and recordings are never committed to the repository.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

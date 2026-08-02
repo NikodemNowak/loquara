@@ -1,15 +1,47 @@
 import { translate, type TranslationKey } from "./i18n/lang";
 
-/** Known backend sentinel messages that the UI should display localized. */
-const backendMessages: Record<string, TranslationKey> = {
+/** Backend messages (exact matches) that the UI should display localized. */
+const exactMessages: Record<string, TranslationKey> = {
   "Previous dictation was interrupted before audio finalization.":
     "errors.interruptedBeforeFinalize",
+  "Stop dictating before deleting a model.": "errors.stopBeforeModelDelete",
+  "Select another model before deleting the active one.": "errors.selectOtherBeforeModelDelete",
+  "Only local WAV files are supported": "errors.onlyWav",
+  "Cannot disable the mode that is currently in use.": "errors.modeInUseDisable",
+  "Cannot delete the mode that is currently in use.": "errors.modeInUseDelete",
+  "Could not determine the engine directory.": "errors.engineDir",
+  "Could not read the download progress.": "errors.downloadProgress",
+  "Could not read the download error.": "errors.downloadError",
+  "The download finished with an incomplete model.": "errors.downloadIncomplete",
+  "The model revision path is not a directory.": "errors.revisionNotDir",
 };
+
+/** Backend messages with dynamic parts, matched by pattern. */
+const patternMessages: Array<[
+  RegExp,
+  TranslationKey,
+  (match: RegExpMatchArray) => Record<string, string>,
+]> = [
+  [/^The selected model is not ready\. Download it before retrying: (.+)\.$/, "errors.modelNotReady", (m) => ({ model: m[1] })],
+  [/^Missing or empty files: (.+)$/, "errors.missingFiles", (m) => ({ files: m[1] })],
+  [/^Mode "(.+)" is disabled\.$/, "errors.modeDisabled", (m) => ({ mode: m[1] })],
+  [/^Invalid (.+): (.+)$/, "errors.invalidIndex", (m) => ({ name: m[1], error: m[2] })],
+  [/^Could not check model artifacts: (.+)$/, "errors.artifactsCheck", (m) => ({ error: m[1] })],
+  [/^Could not inspect the local model cache: (.+)$/, "errors.cacheCheck", (m) => ({ error: m[1] })],
+  [/^Could not delete the model: (.+)$/, "errors.modelDeleteFailed", (m) => ({ error: m[1] })],
+  [/^(.+) contains an invalid shard name$/, "errors.invalidShardName", (m) => ({ name: m[1] })],
+  [/^(.+) contains a disallowed shard path: (.+)$/, "errors.invalidShardPath", (m) => ({ name: m[1], shard: m[2] })],
+];
 
 export function normalizeError(error: unknown, fallback = translate("errors.unknown")): string {
   const message = extractMessage(error, fallback);
-  const localized = backendMessages[message];
-  return localized ? translate(localized) : message;
+  const exact = exactMessages[message];
+  if (exact) return translate(exact);
+  for (const [pattern, key, toParams] of patternMessages) {
+    const match = message.match(pattern);
+    if (match) return translate(key, toParams(match));
+  }
+  return message;
 }
 
 function extractMessage(error: unknown, fallback: string): string {

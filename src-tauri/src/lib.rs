@@ -336,7 +336,7 @@ pub fn run() {
             dictation::system_locale,
         ])
         .run(tauri::generate_context!())
-        .expect("nie udało się uruchomić aplikacji Loquara");
+        .expect("failed to launch the Loquara app");
 }
 
 /// Labels for the tray context menu, localized for one UI language subtag.
@@ -355,9 +355,9 @@ fn tray_labels(locale: &str) -> TrayLabels {
             submenu_microphones: "Mikrofon",
             toggle: "Start/Zatrzymaj nagrywanie",
             paste: "Wklej ostatni tekst",
-            mic_none: "(brak mikrofonów)",
-            open: "Otwórz Loquarę",
-            quit: "Zakończ",
+            mic_none: "(no microphones)",
+            open: "Open Loquara",
+            quit: "Quit",
         },
         _ => TrayLabels {
             submenu_microphones: "Microphone",

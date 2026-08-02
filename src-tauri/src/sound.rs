@@ -1,4 +1,4 @@
-//! Krótkie dźwięki sygnalizacyjne (piknięcia) dla przepływu dyktowania.
+//! Short cue sounds (beeps) for the dictation flow.
 
 fn sine_pcm(frequency_hz: f32, duration_ms: u32, volume: f32, sample_rate: u32) -> Vec<i16> {
     let count = (sample_rate as u64 * u64::from(duration_ms)) / 1000;
@@ -76,7 +76,7 @@ pub fn play_file(path: &std::path::Path) -> Result<(), String> {
     }
     hound::WavReader::open(path)
         .map(|_| ())
-        .map_err(|error| format!("Nieprawidłowy plik WAV: {error}"))?;
+        .map_err(|error| format!("Invalid WAV file: {error}"))?;
     #[cfg(windows)]
     {
         use windows_sys::Win32::Media::Audio::{PlaySoundW, SND_ASYNC, SND_FILENAME, SND_NODEFAULT};
@@ -103,22 +103,22 @@ pub fn play_file(path: &std::path::Path) -> Result<(), String> {
         };
         command
             .spawn()
-            .map_err(|error| format!("Nie można uruchomić odtwarzacza: {error}"))?;
+            .map_err(|error| format!("Could not start the audio player: {error}"))?;
     }
     Ok(())
 }
 
-/// Dyktowanie ruszyło: krótki, energiczny sygnał wznoszący.
+/// Dictation started: short, energetic rising cue.
 pub fn play_recording_started() {
     play_wav(&wrap_wav(&sequence(&[(587.0, 55), (880.0, 75)], 0.35, 44_100), 44_100));
 }
 
-/// Dyktowanie zakończone: wyraźnie kontrastowy sygnał opadający.
+/// Dictation stopped: clearly contrasting falling cue.
 pub fn play_recording_stopped() {
     play_wav(&wrap_wav(&sequence(&[(523.0, 55), (392.0, 95)], 0.35, 44_100), 44_100));
 }
 
-/// Transkrypcja gotowa do wklejenia: trzy nuty w górę.
+/// Transcript ready to paste: three rising notes.
 pub fn play_transcription_ready() {
     play_wav(&wrap_wav(
         &sequence(&[(784.0, 55), (1046.0, 55), (1318.0, 90)], 0.35, 44_100),
