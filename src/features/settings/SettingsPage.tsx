@@ -204,7 +204,8 @@ export function SettingsPage({
               {([["system", "settings.language.system"], ["pl", "settings.language.pl"], ["en", "settings.language.en"]] as const).map(([value, label]) => <label key={value}><input type="radio" name="language" checked={settings.language === value} onChange={() => void save({ ...settings, language: value })} /><span>{t(label)}</span></label>)}
             </div>
           </section>
-           <section className="model-card model-library" aria-busy={!models.length}>
+        </div>
+        <section className="model-card model-library" aria-busy={!models.length}>
              <div className="model-card__top"><div><span className="model-kicker"><Cpu size={11} /> {t("settings.models.kicker")}</span><h2>{t("settings.models.heading")}</h2></div><span className={`ready-badge ready-badge--${selectedState ?? "checking"}`}>{selectedState === "ready" && <Check size={13} />}{selectedStatusLabel}</span></div>
              <p className="model-card__intro">{t("settings.models.intro")}{downloadProgress ? <strong className="model-progress-label"> {downloadProgress.phase === "preparing" ? t("settings.models.preparingFiles") : downloadProgress.phase === "validating" ? t("settings.models.validating") : t("settings.models.downloading")}</strong> : null}</p>
              <div className="model-library__legend"><span>{t("settings.models.legend.model")}</span><span>{t("settings.models.legend.source")}</span><span>{t("settings.models.legend.size")}</span></div>
@@ -223,6 +224,7 @@ export function SettingsPage({
                  return (
                    <label key={model.key} className={`model-option ${selected ? "model-option--selected" : ""} ${disabled ? "model-option--disabled" : ""}`}>
                     <input
+                      className="sr-only"
                       type="radio"
                       name="model"
                       value={model.key}
@@ -232,7 +234,8 @@ export function SettingsPage({
                     />
                      <span className="model-option__identity"><ProviderMark provider={model.provider} /><span className="model-option__name"><strong title={model.display}>{model.display}</strong><small>{model.provider} · {model.languages} · {installed ? formatBytes(model.installedSizeBytes) : `~${formatBytes(model.estimatedSizeBytes)}`}</small></span></span>
                      <span className="model-option__meta">
-                       <span className={`model-option__status model-option__status--${model.status}`}><i aria-hidden="true" />{model.source === "cloud" ? t("settings.models.source.cloud") : t("settings.models.source.local")} · {model.status === "ready" ? t("settings.models.status.downloaded") : model.status === "error" ? t("common.error") : t("settings.models.status.notDownloaded")}</span>
+                       {selected ? <span className="model-option__check" aria-hidden="true"><Check size={15} /></span> : null}
+                       <span className={`model-option__status model-option__status--${model.status}`}><i aria-hidden="true" />{model.source === "cloud" ? `${t("settings.models.source.cloud")} · ` : ""}{model.status === "ready" ? t("settings.models.status.downloaded") : model.status === "error" ? t("common.error") : t("settings.models.status.notDownloaded")}</span>
                         {!installed && !disabled ? <button type="button" className={`model-download ${isDownloading ? "model-download--active" : ""}`} disabled={Boolean(downloading) || Boolean(deleting)} onClick={(event) => { event.preventDefault(); void download(model.key); }} aria-label={t("settings.models.downloadAria", { model: model.display })}>{isDownloading ? progress?.phase === "validating" ? t("settings.models.checking") : progressPercent === null ? t("settings.models.preparingShort") : `${progressPercent}%` : t("settings.models.download")}</button> : null}
                        {installed && !selected ? <button type="button" className="model-remove" disabled={Boolean(downloading) || Boolean(deleting)} onClick={(event) => { event.preventDefault(); void remove(model); }} aria-label={t("settings.models.removeAria", { model: model.display })} title={t("settings.models.removeTitle")}>{isDeleting ? "…" : <Trash2 size={14} />}</button> : null}
                      </span>
@@ -245,7 +248,6 @@ export function SettingsPage({
              {(modelStatus?.message ?? selectedModel?.message) && selectedState !== "ready" ? <p className="model-card__message">{modelStatus?.message ?? selectedModel?.message}</p> : null}
            </section>
            <p className="privacy-line"><strong>Offline by default</strong><span>{t("settings.privacy.body")}</span></p>
-        </div>
       </div>
     </section>
   );
