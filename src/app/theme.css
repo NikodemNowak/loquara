@@ -1,41 +1,41 @@
-/* Loquara design tokens - neutral grays, classic blue accent. */
+/* Loquara design tokens - macOS-style window/group separation, neutral grays. */
 :root {
   color-scheme: light;
   font-family: "Inter Variable", Inter, "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
   font-synthesis: none;
 
-  --bg: #f4f6f8;
+  --bg: #f0f1f4;
   --surface: #ffffff;
   --surface-raised: #ffffff;
-  --surface-subtle: #edf1f5;
-  --surface-hover: #e6ebf0;
+  --surface-subtle: #f4f5f7;
+  --surface-hover: #eaecef;
 
-  --text: #18212b;
-  --muted: #687585;
-  --faint: #9aa6b3;
+  --text: #1a1f27;
+  --muted: #6b7480;
+  --faint: #9aa3ae;
 
-  --border: #dce3ea;
-  --border-strong: #c3ced9;
+  --border: #e3e6ea;
+  --border-strong: #c8ced6;
 
   --accent: #2f6fe4;
   --accent-hover: #245fc9;
-  --accent-soft: #eaf1ff;
+  --accent-soft: #e8f0fe;
   --accent-contrast: #ffffff;
 
   --danger: #c74436;
-  --danger-soft: #fceceb;
+  --danger-soft: #fbeae8;
   --success: #27845b;
   --success-soft: #e2f2ea;
   --warning: #c27a16;
 
-  --shadow-sm: 0 1px 2px rgba(24, 33, 43, 0.05);
-  --shadow: 0 1px 2px rgba(24, 33, 43, 0.04), 0 12px 28px rgba(24, 33, 43, 0.08);
-  --shadow-lg: 0 2px 4px rgba(24, 33, 43, 0.06), 0 20px 44px -12px rgba(24, 33, 43, 0.16);
+  --shadow-sm: 0 1px 2px rgba(16, 24, 40, 0.05);
+  --shadow: 0 4px 16px -4px rgba(16, 24, 40, 0.08);
+  --shadow-lg: 0 8px 32px -8px rgba(16, 24, 40, 0.16);
 
-  --r-sm: 8px;
-  --r-md: 12px;
-  --r-lg: 16px;
-  --r-xl: 22px;
+  --r-sm: 6px;
+  --r-md: 8px;
+  --r-lg: 10px;
+  --r-xl: 14px;
 
   /* The recorder pill is always dark, in both themes. */
   --pill-border: rgba(255, 255, 255, 0.08);
@@ -49,33 +49,33 @@
 :root[data-theme="dark"] {
   color-scheme: dark;
 
-  --bg: #121519;
-  --surface: #191d22;
-  --surface-raised: #20252c;
-  --surface-subtle: #232930;
-  --surface-hover: #2a313a;
+  --bg: #17181b;
+  --surface: #222427;
+  --surface-raised: #2a2d31;
+  --surface-subtle: #26292d;
+  --surface-hover: #2f3338;
 
-  --text: #f4f7fb;
-  --muted: #a3adba;
-  --faint: #747f8d;
+  --text: #f2f4f7;
+  --muted: #9aa3ad;
+  --faint: #6d7680;
 
-  --border: #303741;
-  --border-strong: #46515f;
+  --border: #303439;
+  --border-strong: #42474e;
 
   --accent: #78a9ff;
   --accent-hover: #96bcff;
-  --accent-soft: #1d304d;
+  --accent-soft: #1e2c47;
   --accent-contrast: #0d1b33;
 
   --danger: #ff7965;
-  --danger-soft: #40231f;
+  --danger-soft: #3a2421;
   --success: #70d0a0;
-  --success-soft: #17352a;
+  --success-soft: #17332a;
   --warning: #e0a44a;
 
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.42);
-  --shadow: 0 1px 2px rgba(0, 0, 0, 0.42), 0 18px 42px rgba(0, 0, 0, 0.3);
-  --shadow-lg: 0 2px 6px rgba(0, 0, 0, 0.45), 0 24px 64px -16px rgba(0, 0, 0, 0.55);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow: 0 4px 16px -4px rgba(0, 0, 0, 0.5);
+  --shadow-lg: 0 8px 32px -8px rgba(0, 0, 0, 0.6);
 }
 
 /* Deterministic, theme-aware scrollbars (no OS-style bars). */
