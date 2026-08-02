@@ -371,3 +371,8 @@ body.overlay-window #root { width: 340px; height: 64px; overflow: hidden; }
   .history-workspace { min-height: 330px; }
   .history-list { max-height: 330px; }
 }
+
+.retry-unavailable { grid-column: 1 / -1; color: var(--faint); font-size: 11px; line-height: 1.4; }
+.error-boundary { display: grid; place-content: center; justify-items: center; gap: 10px; height: 100%; padding: 24px; text-align: center; }
+.error-boundary strong { font-size: 15px; }
+.error-boundary p { margin: 0; max-width: 460px; overflow-wrap: anywhere; color: var(--muted); font-size: 12px; }

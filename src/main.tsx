@@ -2,6 +2,7 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 
 import { App } from "./app/App";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 import { applyTheme, initialTheme } from "./app/theme";
 import { RecorderOverlay } from "./features/dictation/RecorderOverlay";
 import { I18nProvider } from "./lib/i18n";
@@ -24,7 +25,9 @@ applyTheme(initialTheme());
 createRoot(root).render(
   <StrictMode>
     <I18nProvider>
-      {isOverlay ? <RecorderOverlay adapter={getAdapter()} /> : <App />}
+      <ErrorBoundary>
+        {isOverlay ? <RecorderOverlay adapter={getAdapter()} /> : <App />}
+      </ErrorBoundary>
     </I18nProvider>
   </StrictMode>,
 );

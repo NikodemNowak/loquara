@@ -14,6 +14,12 @@ describe("normalizeError", () => {
     expect(normalizeError(input)).not.toContain("[object Object]");
   });
 
+  test("lokalizuje znane komunikaty backendu", () => {
+    expect(normalizeError("Previous dictation was interrupted before audio finalization.")).toBe(
+      "Poprzednie dyktowanie przerwano przed zapisaniem audio.",
+    );
+  });
+
   test("bezpiecznie obsługuje cykliczny obiekt", () => {
     const cyclic: Record<string, unknown> = {};
     cyclic.self = cyclic;

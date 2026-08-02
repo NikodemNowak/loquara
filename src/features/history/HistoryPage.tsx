@@ -8,6 +8,7 @@ import type { Recording, RecordingStatus } from "../../lib/types";
 import type { ToastKind } from "../../components/Toast";
 import { useAsyncAction } from "../../lib/useAsyncAction";
 import { dateLocale, useI18n, type TranslationKey } from "../../lib/i18n";
+import { normalizeError } from "../../lib/errors";
 
 const statusLabels: Record<RecordingStatus, TranslationKey> = {
   completed: "history.status.completed",
@@ -136,12 +137,14 @@ export function HistoryPage({
                 />
               </div>
             </>}
-            {selected.error && <p className="error-note">{selected.error}</p>}
+            {selected.error && <p className="error-note">{normalizeError(selected.error)}</p>}
             <div className="inspector-actions">
               <button disabled={!selected.text || busy} onClick={() => void copy(selected.text ?? "")}><Copy size={15} />{pendingKey === "copy" ? t("history.action.copying") : t("history.action.copy")}</button>
               <button disabled={!selected.text || busy} onClick={() => void action("paste", () => adapter.pasteTranscript(selected.id))}>{pendingKey === "paste" ? t("common.pasting") : t("history.action.paste")}</button>
               <button disabled={!selected.audioPath || ["recording", "processing"].includes(selected.status) || busy} onClick={() => void action("play", () => adapter.playRecording(selected.id))}><Play size={15} />{pendingKey === "play" ? t("history.action.playing") : t("history.action.play")}</button>
-              <button disabled={selected.status !== "failed" || !selected.audioPath || busy} onClick={() => void action("retry", () => adapter.retryTranscription(selected.id))}><RotateCcw size={15} />{pendingKey === "retry" ? t("history.action.retrying") : t("common.retry")}</button>
+              {selected.status === "failed" && !selected.audioPath
+                ? <span className="retry-unavailable">{t("history.action.retryUnavailable")}</span>
+                : <button disabled={selected.status !== "failed" || !selected.audioPath || busy} onClick={() => void action("retry", () => adapter.retryTranscription(selected.id))}><RotateCcw size={15} />{pendingKey === "retry" ? t("history.action.retrying") : t("common.retry")}</button>}
               <button className="danger-button" disabled={["recording", "processing"].includes(selected.status) || busy} onClick={() => void action("delete", () => adapter.deleteHistory(selected.id))}><Trash2 size={15} />{pendingKey === "delete" ? t("common.deleting") : t("history.action.delete")}</button>
             </div>
           </> : <EmptyState title={t("history.inspector.emptyTitle")} description={t("history.inspector.emptyDescription")} />}

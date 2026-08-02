@@ -36,15 +36,20 @@ fn sine_wav(frequency_hz: f32, duration_ms: u32, volume: f32, sample_rate: u32) 
 #[cfg(windows)]
 fn play_wav(wav: &[u8]) {
     use std::os::raw::c_void;
-    use windows_sys::Win32::Media::Audio::{PlaySoundW, SND_ASYNC, SND_MEMORY};
-    let pointer = wav.as_ptr() as *const u16 as *const c_void;
-    unsafe {
-        PlaySoundW(
-            pointer as windows_sys::core::PCWSTR,
-            std::ptr::null_mut(),
-            SND_ASYNC | SND_MEMORY,
-        );
-    }
+    use windows_sys::Win32::Media::Audio::{PlaySoundW, SND_MEMORY, SND_SYNC};
+    // PlaySoundW reads the buffer asynchronously, so keep it alive on a
+    // dedicated thread that blocks until playback finishes (no use-after-free).
+    let owned = wav.to_vec();
+    std::thread::spawn(move || {
+        let pointer = owned.as_ptr() as *const u16 as *const c_void;
+        unsafe {
+            PlaySoundW(
+                pointer as windows_sys::core::PCWSTR,
+                std::ptr::null_mut(),
+                SND_SYNC | SND_MEMORY,
+            );
+        }
+    });
 }
 
 #[cfg(not(windows))]
@@ -59,14 +64,14 @@ pub fn play_file(path: &std::path::Path) -> Result<(), String> {
         .map_err(|error| format!("Nieprawidłowy plik WAV: {error}"))?;
     #[cfg(windows)]
     {
-        use windows_sys::Win32::Media::Audio::{PlaySoundW, SND_FILENAME, SND_NODEFAULT, SND_SYNC};
+        use windows_sys::Win32::Media::Audio::{PlaySoundW, SND_ASYNC, SND_FILENAME, SND_NODEFAULT};
         let path = std::fs::canonicalize(path).map_err(|error| error.to_string())?;
         let wide: Vec<u16> = path.to_string_lossy().encode_utf16().chain(std::iter::once(0)).collect();
         unsafe {
             PlaySoundW(
                 wide.as_ptr(),
                 std::ptr::null_mut(),
-                SND_SYNC | SND_FILENAME | SND_NODEFAULT,
+                SND_ASYNC | SND_FILENAME | SND_NODEFAULT,
             );
         }
     }

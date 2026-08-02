@@ -34,6 +34,24 @@ describe("historia", () => {
     expect(pasteTranscript).toHaveBeenCalledWith("complete-1");
   });
 
+  test("wyjaśnia brak ponowienia nagrania bez zapisanego audio", async () => {
+    const failedNoAudio = {
+      id: "failed-no-audio",
+      createdAt: 1_786_000_300_000,
+      durationMs: 0,
+      status: "failed" as const,
+      text: null,
+      model: null,
+      audioPath: null,
+      sourceApp: null,
+      error: "Previous dictation was interrupted before audio finalization.",
+    };
+    renderWithI18n(<HistoryPage adapter={adapterStub()} recordings={[failedNoAudio]} onRefresh={async () => undefined} onToast={() => undefined} />);
+
+    expect(await screen.findByText("Nie można ponowić — brak zapisanego audio")).toBeVisible();
+    expect(screen.getByText("Poprzednie dyktowanie przerwano przed zapisaniem audio.")).toBeVisible();
+  });
+
   test("blokuje usuwanie aktywnego nagrania", async () => {
     renderPage();
     await userEvent.click(screen.getByRole("button", { name: /Aktywne nagranie/ }));
