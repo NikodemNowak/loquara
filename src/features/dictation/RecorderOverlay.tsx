@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 
-import { Check, Mic, RotateCcw, Square, X } from "../../components/Icons";
+import { Check, RotateCcw } from "../../components/Icons";
 import type { AppAdapter } from "../../lib/tauri";
 import type { AppSnapshot } from "../../lib/types";
 import { normalizeError } from "../../lib/errors";
@@ -10,7 +10,7 @@ function timeLabel(seconds: number) {
   return `${String(Math.floor(seconds / 60)).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
 }
 
-const WAVE_BARS = 24;
+const WAVE_BARS = 28;
 const WAVE_HEIGHT = 30;
 
 function LiveWaveform({ level, mode = "live" }: { level: number; mode?: "live" | "thinking" }) {
@@ -24,13 +24,13 @@ function LiveWaveform({ level, mode = "live" }: { level: number; mode?: "live" |
     if (!canvas) return;
     const context = canvas.getContext("2d");
     if (!context) return;
-    const cssWidth = canvas.clientWidth || 110;
+    const cssWidth = canvas.clientWidth || 180;
     const dpr = window.devicePixelRatio || 1;
     canvas.width = cssWidth * dpr;
     canvas.height = WAVE_HEIGHT * dpr;
     context.scale(dpr, dpr);
     const gap = 3;
-    const barWidth = Math.max(2.5, (cssWidth - gap * (WAVE_BARS - 1)) / WAVE_BARS);
+    const barWidth = Math.max(3, (cssWidth - gap * (WAVE_BARS - 1)) / WAVE_BARS);
     const envelopes = new Array<number>(WAVE_BARS).fill(0);
     const phases = Array.from({ length: WAVE_BARS }, (_, index) => index * 1.37);
     const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -46,17 +46,17 @@ function LiveWaveform({ level, mode = "live" }: { level: number; mode?: "live" |
         if (mode === "thinking") {
           const center = (Math.sin(time * 1.6) * 0.5 + 0.5) * (WAVE_BARS - 1);
           const dist = Math.abs(index - center);
-          energy = 0.12 + 0.75 * Math.exp(-(dist * dist) / 8);
+          energy = 0.16 + 0.72 * Math.exp(-(dist * dist) / 10);
         } else {
           const wave = 0.5 + 0.5 * Math.sin(time * (2.4 + (index % 5) * 0.35) + phases[index]);
           const centerBias = 1 - Math.abs(index - (WAVE_BARS - 1) / 2) / WAVE_BARS;
-          energy = 0.08 + target * (0.25 + 0.75 * wave) * (0.45 + centerBias);
+          energy = 0.1 + target * (0.25 + 0.75 * wave) * (0.5 + centerBias);
         }
-        envelopes[index] += (energy - envelopes[index]) * 0.2;
-        const height = Math.min(WAVE_HEIGHT, 4 + (WAVE_HEIGHT - 4) * Math.min(1, envelopes[index]));
+        envelopes[index] += (energy - envelopes[index]) * 0.28;
+        const height = Math.min(WAVE_HEIGHT, 5 + (WAVE_HEIGHT - 5) * Math.min(1, envelopes[index]));
         const x = index * (barWidth + gap);
         const y = (WAVE_HEIGHT - height) / 2;
-        context.globalAlpha = 0.45 + 0.55 * (height / WAVE_HEIGHT);
+        context.globalAlpha = 0.5 + 0.5 * (height / WAVE_HEIGHT);
         context.beginPath();
         context.roundRect(x, y, barWidth, height, barWidth / 2);
         context.fill();
@@ -161,8 +161,8 @@ export function RecorderOverlay({ adapter }: { adapter: AppAdapter }) {
   useEffect(() => {
     if (snapshot?.dictation.status !== "cancelling") return;
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Enter") void action(() => adapter.cancelRecording());
-      else if (event.key === "Escape") void action(() => adapter.requestCancel());
+      if (event.key === "Escape") void action(() => adapter.cancelRecording());
+      else if (event.key === "Enter") void action(() => adapter.requestCancel());
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
@@ -243,33 +243,18 @@ export function RecorderOverlay({ adapter }: { adapter: AppAdapter }) {
         <strong>{t("overlay.boot")}</strong>
       </div>}
       {!initError && state?.status === "recording" && <div className="overlay-content overlay-content--recording">
-        <span className="overlay-mic" aria-hidden="true"><Mic size={15} /></span>
         <time className="overlay-timer">{timeLabel(seconds)}</time>
         <LiveWaveform level={level} />
-        <button disabled={pending} className="overlay-action overlay-action--stop" aria-label={t("today.cta.stop")} onClick={() => void action(() => adapter.stopRecording())}>
-          <Square size={11} fill="currentColor" />
-        </button>
-        <button disabled={pending} className="overlay-cancel" aria-label={t("overlay.cancelRecording")} title={t("overlay.cancelTitle")} onClick={() => void action(() => adapter.requestCancel())}>
-          <X size={15} />
-        </button>
       </div>}
       {!initError && state?.status === "cancelling" && <div className="overlay-content overlay-content--cancelling">
-        <span className="overlay-danger-mark" aria-hidden="true">!</span>
         <div className="overlay-copy"><strong>{t("overlay.cancelling.title")}</strong><small>{t("overlay.cancelling.hint")}</small></div>
-        <button disabled={pending} className="overlay-action overlay-action--confirm" aria-label={t("overlay.cancelling.confirmAria")} title={t("overlay.cancelling.confirmTitle")} onClick={() => void action(() => adapter.cancelRecording())}>
-          <Check size={13} />
-        </button>
-        <button disabled={pending} className="overlay-action overlay-action--back" aria-label={t("overlay.cancelling.backAria")} title={t("overlay.cancelling.backTitle")} onClick={() => void action(() => adapter.requestCancel())}>
-          <X size={13} />
-        </button>
       </div>}
       {!initError && state?.status === "processing" && <div className="overlay-content overlay-content--processing">
-        <div className="overlay-copy"><strong>{snapshot?.modelLoading ? t("today.cta.loadingModel") : t("common.processing")}</strong><small>{snapshot?.modelLoading ? t("overlay.processing.firstRun") : t("overlay.processing.subtitle")}</small></div>
         <LiveWaveform level={0} mode="thinking" />
       </div>}
       {!initError && state?.status === "pasting" && <div className="overlay-content overlay-content--complete">
         <span className="overlay-complete-mark"><Check size={15} /></span>
-        <div className="overlay-copy"><strong>{t("common.pasting")}</strong><small>{t("common.done")}</small></div>
+        <div className="overlay-copy"><strong>{t("common.pasting")}</strong></div>
       </div>}
       {!initError && state?.status === "failed" && <div className="overlay-content overlay-content--failed">
         <span className="failure-mark" aria-hidden="true">!</span>

@@ -308,22 +308,11 @@ body.overlay-window #root { width: 340px; height: 64px; overflow: hidden; }
 .overlay-copy strong { overflow: hidden; font-size: 11px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
 .overlay-copy small { overflow: hidden; color: var(--pill-muted); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
 .overlay-content--cancelling .overlay-copy, .overlay-content--processing .overlay-copy, .overlay-content--complete .overlay-copy, .overlay-content--failed .overlay-copy, .overlay-content--failed .overlay-failure-copy, .recorder-overlay--init-error .overlay-failure-copy { flex: 1; }
-.overlay-mic { display: grid; place-items: center; width: 34px; height: 34px; flex: 0 0 auto; border-radius: 50%; color: #fff; background: #e34c44; animation: dot-pulse 1.6s ease-in-out infinite; }
-.overlay-timer { font-size: 14px; font-weight: 650; font-variant-numeric: tabular-nums; letter-spacing: 0.02em; }
+.overlay-timer { flex: 0 0 auto; color: var(--pill-muted); font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; letter-spacing: 0.02em; }
 .live-waveform { flex: 1 1 auto; height: 30px; min-width: 60px; }
-.overlay-action { display: grid; place-items: center; width: 28px; height: 28px; flex: 0 0 auto; padding: 0; border: 1px solid transparent; border-radius: 8px; color: var(--pill-text); background: rgba(255, 255, 255, 0.08); cursor: pointer; transition: background 0.12s ease, transform 0.1s ease; }
-.overlay-action:hover { background: rgba(255, 255, 255, 0.16); }
-.overlay-action:active { transform: scale(0.94); }
-.overlay-action--stop { color: #17171b; background: #f4f4f6; }
-.overlay-action--stop:hover { background: #ffffff; }
-.overlay-action--confirm { color: #fff; background: #e34c44; }
-.overlay-action--confirm:hover { background: #ef5a52; }
-.overlay-action--back { color: var(--pill-muted); background: transparent; }
-.overlay-action--back:hover { color: var(--pill-text); background: rgba(255, 255, 255, 0.08); }
-.overlay-cancel { display: grid; place-items: center; width: 24px; height: 28px; flex: 0 0 auto; padding: 0; border: 0; border-radius: 8px; color: var(--pill-muted); background: transparent; cursor: pointer; transition: color 0.12s ease, background 0.12s ease; }
-.overlay-cancel:hover { color: var(--pill-text); background: rgba(255, 255, 255, 0.08); }
-.overlay-danger-mark { display: grid; place-items: center; width: 28px; height: 28px; flex: 0 0 auto; border-radius: 9px; color: #fff; background: #e34c44; font-size: 14px; font-weight: 700; }
-.overlay-processing-mark { display: grid; place-items: center; width: 28px; height: 28px; flex: 0 0 auto; border-radius: 9px; background: rgba(255, 255, 255, 0.08); }
+.overlay-content--cancelling { justify-content: center; text-align: center; }
+.overlay-content--cancelling .overlay-copy small { font-size: 9.5px; }
+.overlay-content--processing { padding: 0 6px; }
 .overlay-complete-mark { display: grid; place-items: center; width: 28px; height: 28px; flex: 0 0 auto; border-radius: 9px; color: var(--pill-success); background: rgba(61, 220, 151, 0.14); }
 .failure-mark { display: grid; place-items: center; width: 20px; height: 20px; flex: 0 0 auto; border: 1.5px solid var(--pill-danger); border-radius: 50%; color: var(--pill-danger); font-size: 11px; font-weight: 700; }
 .overlay-failure-copy { display: grid; gap: 1px; min-width: 0; }

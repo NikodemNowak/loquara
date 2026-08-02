@@ -1,6 +1,6 @@
 //! Krótkie dźwięki sygnalizacyjne (piknięcia) dla przepływu dyktowania.
 
-fn sine_wav(frequency_hz: f32, duration_ms: u32, volume: f32, sample_rate: u32) -> Vec<u8> {
+fn sine_pcm(frequency_hz: f32, duration_ms: u32, volume: f32, sample_rate: u32) -> Vec<i16> {
     let count = (sample_rate as u64 * u64::from(duration_ms)) / 1000;
     let mut samples = Vec::with_capacity(count as usize);
     for index in 0..count {
@@ -10,7 +10,10 @@ fn sine_wav(frequency_hz: f32, duration_ms: u32, volume: f32, sample_rate: u32) 
         let value = (t * std::f32::consts::TAU * frequency_hz).sin() * volume * attack * (1.0 - envelope * 0.35);
         samples.push((value.clamp(-1.0, 1.0) * 32767.0) as i16);
     }
+    samples
+}
 
+fn wrap_wav(samples: &[i16], sample_rate: u32) -> Vec<u8> {
     let header_size = 44;
     let data_size = samples.len() * 2;
     let mut wav = Vec::with_capacity(header_size + data_size);
@@ -31,6 +34,19 @@ fn sine_wav(frequency_hz: f32, duration_ms: u32, volume: f32, sample_rate: u32) 
         wav.extend_from_slice(&sample.to_le_bytes());
     }
     wav
+}
+
+/// Builds a short melody: notes back to back with a tiny gap, one WAV header.
+fn sequence(notes: &[(f32, u32)], volume: f32, sample_rate: u32) -> Vec<i16> {
+    let gap_samples = (sample_rate as usize * 5) / 1000;
+    let mut combined = Vec::new();
+    for (index, (frequency, duration)) in notes.iter().enumerate() {
+        if index > 0 {
+            combined.extend(std::iter::repeat(0i16).take(gap_samples));
+        }
+        combined.extend(sine_pcm(*frequency, *duration, volume, sample_rate));
+    }
+    combined
 }
 
 #[cfg(windows)]
@@ -54,7 +70,6 @@ fn play_wav(wav: &[u8]) {
 
 #[cfg(not(windows))]
 fn play_wav(_wav: &[u8]) {}
-
 pub fn play_file(path: &std::path::Path) -> Result<(), String> {
     if !path.is_file() {
         return Err(format!("Nie znaleziono pliku audio: {}", path.display()));
@@ -93,19 +108,20 @@ pub fn play_file(path: &std::path::Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Dyktowanie ruszyło: krótki, energiczny sygnał wznoszący.
 pub fn play_recording_started() {
-    play_wav(&sine_wav(880.0, 90, 0.35, 44_100));
+    play_wav(&wrap_wav(&sequence(&[(587.0, 55), (880.0, 75)], 0.35, 44_100), 44_100));
 }
 
+/// Dyktowanie zakończone: wyraźnie kontrastowy sygnał opadający.
 pub fn play_recording_stopped() {
-    play_wav(&sine_wav(660.0, 120, 0.35, 44_100));
+    play_wav(&wrap_wav(&sequence(&[(523.0, 55), (392.0, 95)], 0.35, 44_100), 44_100));
 }
 
+/// Transkrypcja gotowa do wklejenia: trzy nuty w górę.
 pub fn play_transcription_ready() {
-    let first = sine_wav(1046.0, 80, 0.35, 44_100);
-    let second = sine_wav(1318.0, 90, 0.35, 44_100);
-    let mut combined = first;
-    combined.extend_from_slice(&[0u8; 2000]);
-    combined.extend_from_slice(&second);
-    play_wav(&combined);
+    play_wav(&wrap_wav(
+        &sequence(&[(784.0, 55), (1046.0, 55), (1318.0, 90)], 0.35, 44_100),
+        44_100,
+    ));
 }

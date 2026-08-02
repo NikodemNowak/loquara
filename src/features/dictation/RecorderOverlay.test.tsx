@@ -27,12 +27,17 @@ function overlay(state: DictationState) {
 
 describe("nakładka dyktowania", () => {
   test.each([
-    [{ status: "processing", recordingId: "a", audioPath: "a.wav" }, "Przepisuję…"],
     [{ status: "pasting", recordingId: "a", audioPath: "a.wav", transcript: "tekst" }, "Wklejam…"],
     [{ status: "failed", recovery: { recordingId: "a", audioPath: "a.wav" }, error: "Błąd" }, "Nie udało się"],
   ] satisfies Array<[DictationState, string]>)("pokazuje stan %s", async (state, label) => {
     overlay(state);
     expect(await screen.findByText(label)).toBeVisible();
+  });
+
+  test("przetwarzanie pokazuje samą falę, bez tekstu", async () => {
+    overlay({ status: "processing", recordingId: "a", audioPath: "a.wav" });
+    expect(await screen.findByLabelText("Poziom mikrofonu")).toBeInTheDocument();
+    expect(screen.queryByText("Przepisuję…")).not.toBeInTheDocument();
   });
 
   test("ukrywa okno po powrocie do stanu idle", async () => {
@@ -50,13 +55,9 @@ describe("nakładka dyktowania", () => {
     expect(screen.queryByText("tekst z modelu")).not.toBeInTheDocument();
   });
 
-  test("reaguje na poziom audio, pokazuje licznik i zatrzymuje lub otwiera potwierdzenie", async () => {
+  test("reaguje na poziom audio i pokazuje licznik", async () => {
     vi.useFakeTimers();
-    const stopRecording = vi.fn(async () => ({ dictation: { status: "idle" }, settings: { inputDevice: null, shortcut: "Ctrl+Space", autoPaste: true, retentionDays: 30, launchOnLogin: true, activeMode: "clean", showOverlay: true, model: "parakeet", streaming: true, theme: "system", language: "system" }, modelLoading: false }));
-    const cancelRecording = vi.fn(async () => ({ dictation: { status: "idle" }, settings: { inputDevice: null, shortcut: "Ctrl+Space", autoPaste: true, retentionDays: 30, launchOnLogin: true, activeMode: "clean", showOverlay: true, model: "parakeet", streaming: true, theme: "system", language: "system" }, modelLoading: false }));
-    const requestCancel = vi.fn(async () => ({ dictation: { status: "cancelling", recordingId: "a", audioPath: "a.wav" }, settings: { inputDevice: null, shortcut: "Ctrl+Space", autoPaste: true, retentionDays: 30, launchOnLogin: true, activeMode: "clean", showOverlay: true, model: "parakeet", streaming: true, theme: "system", language: "system" }, modelLoading: false }));
     const view = overlay({ status: "recording", recordingId: "a", audioPath: "a.wav" });
-    Object.assign(view.adapter, { stopRecording, cancelRecording, requestCancel });
     await act(async () => { await Promise.resolve(); });
     expect(screen.getByText("00:00")).toBeVisible();
     act(() => {
@@ -65,12 +66,6 @@ describe("nakładka dyktowania", () => {
     });
     expect(screen.getByText("00:02")).toBeVisible();
     expect(screen.getByLabelText("Poziom mikrofonu")).toHaveAttribute("data-level", "0.80");
-    fireEvent.click(screen.getByRole("button", { name: "Zatrzymaj nagrywanie" }));
-    await act(async () => { await Promise.resolve(); });
-    fireEvent.click(screen.getByRole("button", { name: "Anuluj nagrywanie" }));
-    expect(stopRecording).toHaveBeenCalled();
-    expect(requestCancel).toHaveBeenCalled();
-    expect(cancelRecording).not.toHaveBeenCalled();
     vi.clearAllTimers();
     vi.useRealTimers();
   });
@@ -88,7 +83,7 @@ describe("nakładka dyktowania", () => {
     expect(cancelRecording).not.toHaveBeenCalled();
   });
 
-  test("Enter w potwierdzeniu anuluje nagrywanie", async () => {
+  test("Enter w potwierdzeniu wraca do nagrywania", async () => {
     const cancelRecording = vi.fn(async () => ({ dictation: { status: "idle" }, settings: { inputDevice: null, shortcut: "Ctrl+Space", autoPaste: true, retentionDays: 30, launchOnLogin: true, activeMode: "clean", showOverlay: true, model: "parakeet", streaming: true, theme: "system", language: "system" }, modelLoading: false }));
     const requestCancel = vi.fn(async () => ({ dictation: { status: "cancelling", recordingId: "a", audioPath: "a.wav" }, settings: { inputDevice: null, shortcut: "Ctrl+Space", autoPaste: true, retentionDays: 30, launchOnLogin: true, activeMode: "clean", showOverlay: true, model: "parakeet", streaming: true, theme: "system", language: "system" }, modelLoading: false }));
     const view = overlay({ status: "cancelling", recordingId: "a", audioPath: "a.wav" });
@@ -97,11 +92,11 @@ describe("nakładka dyktowania", () => {
 
     fireEvent.keyDown(window, { key: "Enter" });
 
-    expect(cancelRecording).toHaveBeenCalledTimes(1);
-    expect(requestCancel).not.toHaveBeenCalled();
+    expect(requestCancel).toHaveBeenCalledTimes(1);
+    expect(cancelRecording).not.toHaveBeenCalled();
   });
 
-  test("Esc w potwierdzeniu wraca do nagrywania", async () => {
+  test("Esc w potwierdzeniu anuluje nagrywanie", async () => {
     const cancelRecording = vi.fn(async () => ({ dictation: { status: "idle" }, settings: { inputDevice: null, shortcut: "Ctrl+Space", autoPaste: true, retentionDays: 30, launchOnLogin: true, activeMode: "clean", showOverlay: true, model: "parakeet", streaming: true, theme: "system", language: "system" }, modelLoading: false }));
     const requestCancel = vi.fn(async () => ({ dictation: { status: "cancelling", recordingId: "a", audioPath: "a.wav" }, settings: { inputDevice: null, shortcut: "Ctrl+Space", autoPaste: true, retentionDays: 30, launchOnLogin: true, activeMode: "clean", showOverlay: true, model: "parakeet", streaming: true, theme: "system", language: "system" }, modelLoading: false }));
     const view = overlay({ status: "cancelling", recordingId: "a", audioPath: "a.wav" });
@@ -110,21 +105,8 @@ describe("nakładka dyktowania", () => {
 
     fireEvent.keyDown(window, { key: "Escape" });
 
-    expect(requestCancel).toHaveBeenCalledTimes(1);
-    expect(cancelRecording).not.toHaveBeenCalled();
-  });
-
-  test("przyciski potwierdzenia i powrotu wywołują właściwe akcje", async () => {
-    const cancelRecording = vi.fn(async () => ({ dictation: { status: "idle" }, settings: { inputDevice: null, shortcut: "Ctrl+Space", autoPaste: true, retentionDays: 30, launchOnLogin: true, activeMode: "clean", showOverlay: true, model: "parakeet", streaming: true, theme: "system", language: "system" }, modelLoading: false }));
-    const requestCancel = vi.fn(async () => ({ dictation: { status: "cancelling", recordingId: "a", audioPath: "a.wav" }, settings: { inputDevice: null, shortcut: "Ctrl+Space", autoPaste: true, retentionDays: 30, launchOnLogin: true, activeMode: "clean", showOverlay: true, model: "parakeet", streaming: true, theme: "system", language: "system" }, modelLoading: false }));
-    const view = overlay({ status: "cancelling", recordingId: "a", audioPath: "a.wav" });
-    Object.assign(view.adapter, { cancelRecording, requestCancel });
-
-    await userEvent.click(await screen.findByRole("button", { name: "Potwierdź anulowanie" }));
-    await userEvent.click(screen.getByRole("button", { name: "Wróć do nagrywania" }));
-
     expect(cancelRecording).toHaveBeenCalledTimes(1);
-    expect(requestCancel).toHaveBeenCalledTimes(1);
+    expect(requestCancel).not.toHaveBeenCalled();
   });
 
   test("potwierdzenie znika po upływie czasu i wraca do nagrywania", async () => {
@@ -150,16 +132,16 @@ describe("nakładka dyktowania", () => {
     expect(screen.getByText(/audio jest bezpiecznie zapisane/i)).toBeVisible();
   });
 
-  test("pokazuje błąd zatrzymania, zachowuje stan i odblokowuje akcje", async () => {
-    const stopRecording = vi.fn(async () => { throw new Error("Mikrofon nie odpowiada"); });
-    const view = overlay({ status: "recording", recordingId: "a", audioPath: "a.wav" });
-    Object.assign(view.adapter, { stopRecording });
+  test("pokazuje błąd anulowania i zachowuje stan", async () => {
+    const cancelRecording = vi.fn(async () => { throw new Error("Mikrofon nie odpowiada"); });
+    const view = overlay({ status: "cancelling", recordingId: "a", audioPath: "a.wav" });
+    Object.assign(view.adapter, { cancelRecording });
 
-    await userEvent.click(await screen.findByRole("button", { name: "Zatrzymaj nagrywanie" }));
+    await screen.findByText("Anulować nagrywanie?");
+    fireEvent.keyDown(window, { key: "Escape" });
 
     expect(await screen.findByRole("alert")).toHaveTextContent("Mikrofon nie odpowiada");
-    expect(screen.getByText("00:00")).toBeVisible();
-    expect(screen.getByRole("button", { name: "Zatrzymaj nagrywanie" })).toBeEnabled();
+    expect(screen.getByText("Anulować nagrywanie?")).toBeVisible();
   });
 
   test("sprząta opóźnione listenery po odmontowaniu", async () => {
@@ -242,6 +224,6 @@ describe("nakładka dyktowania", () => {
       modelLoading: false,
     });
 
-    expect(await screen.findByRole("button", { name: "Zatrzymaj nagrywanie" })).toBeVisible();
+    expect(await screen.findByText("00:00")).toBeVisible();
   });
 });
