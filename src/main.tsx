@@ -7,6 +7,7 @@ import { RecorderOverlay } from "./features/dictation/RecorderOverlay";
 import { I18nProvider } from "./lib/i18n";
 import { translate } from "./lib/i18n";
 import { getAdapter } from "./lib/tauri";
+import "@fontsource-variable/inter";
 import "./app/theme.css";
 import "./app/app.css";
 
@@ -18,6 +19,9 @@ if (!root) {
 
 const isOverlay = new URLSearchParams(window.location.search).get("window") === "overlay";
 document.body.classList.toggle("overlay-window", isOverlay);
+if (isOverlay) {
+  document.body.setAttribute("data-tauri-drag-region", "");
+}
 applyTheme(initialTheme());
 
 createRoot(root).render(

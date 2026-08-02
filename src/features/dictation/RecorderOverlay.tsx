@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 
-import { Check, Mic, RotateCcw, Square, X } from "../../components/Icons";
+import { Check, RotateCcw, Square, X } from "../../components/Icons";
 import type { AppAdapter } from "../../lib/tauri";
 import type { AppSnapshot } from "../../lib/types";
 import { normalizeError } from "../../lib/errors";
@@ -10,11 +10,14 @@ function timeLabel(seconds: number) {
   return `${String(Math.floor(seconds / 60)).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
 }
 
+const WAVE_BARS = 16;
+const WAVE_WIDTH = 96;
+const WAVE_HEIGHT = 28;
+
 function LiveWaveform({ level }: { level: number }) {
   const { t } = useI18n();
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const levelRef = useRef(level);
-  const phaseRef = useRef(0);
   levelRef.current = level;
 
   useEffect(() => {
@@ -22,42 +25,58 @@ function LiveWaveform({ level }: { level: number }) {
     if (!canvas) return;
     const context = canvas.getContext("2d");
     if (!context) return;
-    const width = 120;
-    const height = 26;
     const dpr = window.devicePixelRatio || 1;
-    canvas.width = width * dpr;
-    canvas.height = height * dpr;
+    canvas.width = WAVE_WIDTH * dpr;
+    canvas.height = WAVE_HEIGHT * dpr;
     context.scale(dpr, dpr);
-    let frame = 0;
+    const gradient = context.createLinearGradient(0, 0, WAVE_WIDTH, 0);
+    gradient.addColorStop(0, "#8f85ff");
+    gradient.addColorStop(1, "#c4b8ff");
+    const gap = 3;
+    const barWidth = (WAVE_WIDTH - gap * (WAVE_BARS - 1)) / WAVE_BARS;
+    const seeds = Array.from({ length: WAVE_BARS }, (_, index) => ({
+      phase: index * 1.71,
+      speed: 2.2 + ((index * 37) % 9) / 4,
+      shape: 0.45 + ((index * 53) % 11) / 16,
+    }));
+    const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    let smoothed = 0;
     let raf = 0;
 
-    const draw = () => {
-      const level = levelRef.current;
-      const amplitude = 0.25 + Math.max(0, Math.min(1, level)) * 0.7;
-      phaseRef.current += 0.06 + level * 0.04;
-      context.clearRect(0, 0, width, height);
-      context.beginPath();
-      for (let x = 0; x <= width; x += 1) {
-        const y =
-          height / 2 +
-          Math.sin(phaseRef.current + x * 0.16) * height * 0.22 * amplitude +
-          Math.sin(phaseRef.current * 0.6 + x * 0.045) * height * 0.12 * amplitude;
-        if (x === 0) context.moveTo(x, y);
-        else context.lineTo(x, y);
+    const draw = (now: number) => {
+      const target = Math.max(0, Math.min(1, levelRef.current));
+      smoothed += (target - smoothed) * 0.16;
+      const time = reduceMotion ? 0 : now / 1000;
+      context.clearRect(0, 0, WAVE_WIDTH, WAVE_HEIGHT);
+      context.fillStyle = gradient;
+      for (let index = 0; index < WAVE_BARS; index += 1) {
+        const seed = seeds[index];
+        const wave = 0.5 + 0.5 * Math.sin(time * seed.speed * 1.6 + seed.phase);
+        const energy = 0.14 + smoothed * 0.86;
+        const barHeight = Math.min(WAVE_HEIGHT, 3 + (WAVE_HEIGHT - 6) * energy * (seed.shape * 0.55 + wave * 0.45));
+        const x = index * (barWidth + gap);
+        const y = (WAVE_HEIGHT - barHeight) / 2;
+        context.globalAlpha = 0.55 + 0.45 * (barHeight / WAVE_HEIGHT);
+        context.beginPath();
+        context.roundRect(x, y, barWidth, barHeight, barWidth / 2);
+        context.fill();
       }
-      context.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue("--text").trim() || "#f3f1ea";
-      context.lineWidth = 1.4;
-      context.lineJoin = "round";
-      context.lineCap = "round";
-      context.stroke();
-      frame += 1;
+      context.globalAlpha = 1;
       raf = requestAnimationFrame(draw);
     };
-    draw();
+    raf = requestAnimationFrame(draw);
     return () => cancelAnimationFrame(raf);
   }, []);
 
-  return <canvas ref={canvasRef} className="live-waveform" aria-label={t("overlay.micLevel")} data-level={level.toFixed(2)} />;
+  return (
+    <canvas
+      ref={canvasRef}
+      className="live-waveform"
+      style={{ width: WAVE_WIDTH, height: WAVE_HEIGHT }}
+      aria-label={t("overlay.micLevel")}
+      data-level={level.toFixed(2)}
+    />
+  );
 }
 
 export function RecorderOverlay({ adapter }: { adapter: AppAdapter }) {
@@ -104,7 +123,7 @@ export function RecorderOverlay({ adapter }: { adapter: AppAdapter }) {
     void adapter.onState((next) => {
       stateEventSeen = true;
       latestSnapshot = next;
-       if (snapshotReady && registrations === 2 && active && !failed) setSnapshot(next);
+      if (snapshotReady && registrations === 2 && active && !failed) setSnapshot(next);
     }).then((unlisten) => {
       if (!active || failed) unlisten();
       else {
@@ -222,14 +241,14 @@ export function RecorderOverlay({ adapter }: { adapter: AppAdapter }) {
         <strong>{t("overlay.boot")}</strong>
       </div>}
       {!initError && state?.status === "recording" && <div className="overlay-content overlay-content--recording">
-        <span className="overlay-mic" aria-hidden="true"><Mic size={15} /></span>
-        <div className="overlay-copy"><strong>{t("overlay.recording")}</strong><time>{timeLabel(seconds)}</time></div>
+        <span className="record-dot" aria-hidden="true" />
+        <time className="overlay-timer">{timeLabel(seconds)}</time>
         <LiveWaveform level={level} />
         <button data-tauri-drag-region="false" disabled={pending} className="overlay-action overlay-action--stop" aria-label={t("today.cta.stop")} onClick={() => void action(() => adapter.stopRecording())}>
-          <Square size={12} fill="currentColor" />
+          <Square size={11} fill="currentColor" />
         </button>
         <button data-tauri-drag-region="false" disabled={pending} className="overlay-cancel" aria-label={t("overlay.cancelRecording")} title={t("overlay.cancelTitle")} onClick={() => void action(() => adapter.requestCancel())}>
-          <X size={14} />
+          <X size={15} />
         </button>
       </div>}
       {!initError && state?.status === "cancelling" && <div className="overlay-content overlay-content--cancelling">

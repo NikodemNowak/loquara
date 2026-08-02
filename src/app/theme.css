@@ -1,48 +1,84 @@
+/* Loquara design tokens - warm paper light, true dark, signature violet. */
 :root {
   color-scheme: light;
-  font-family: "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+  font-family: "Inter Variable", Inter, "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
   font-synthesis: none;
-  --bg: #f4f6f8;
+
+  --bg: #f5f4f1;
   --surface: #ffffff;
   --surface-raised: #ffffff;
-  --surface-subtle: #edf1f5;
-  --surface-hover: #e6ebf0;
-  --text: #18212b;
-  --muted: #687585;
-  --faint: #9aa6b3;
-  --border: #dce3ea;
-  --border-strong: #c3ced9;
-  --accent: #2f6fe4;
-  --accent-hover: #245fc9;
-  --accent-soft: #eaf1ff;
-  --danger: #c74436;
-  --danger-soft: #fceceb;
-  --success: #27845b;
-  --shadow: 0 1px 2px rgba(24, 33, 43, 0.04), 0 12px 28px rgba(24, 33, 43, 0.07);
+  --surface-subtle: #efece7;
+  --surface-hover: #e8e4dd;
+
+  --text: #211e1a;
+  --muted: #6f685c;
+  --faint: #a8a094;
+
+  --border: #e6e2da;
+  --border-strong: #d4cfc3;
+
+  --accent: #6a58e8;
+  --accent-hover: #5847d6;
+  --accent-soft: #edebfd;
+  --accent-contrast: #ffffff;
+
+  --danger: #d4493f;
+  --danger-soft: #fae7e5;
+  --success: #2e9e6b;
+  --success-soft: #e0f2e9;
+  --warning: #c07f16;
+
+  --shadow-sm: 0 1px 2px rgba(33, 30, 26, 0.05);
+  --shadow: 0 1px 2px rgba(33, 30, 26, 0.05), 0 16px 40px -12px rgba(33, 30, 26, 0.14);
+  --shadow-lg: 0 2px 6px rgba(33, 30, 26, 0.06), 0 24px 64px -16px rgba(33, 30, 26, 0.22);
+
+  --r-sm: 8px;
+  --r-md: 12px;
+  --r-lg: 16px;
+  --r-xl: 22px;
+
+  /* The recorder pill is always dark, in both themes. */
+  --pill-border: rgba(255, 255, 255, 0.09);
+  --pill-text: #f4f4f6;
+  --pill-muted: #9c9ca6;
+  --pill-accent: #a99fff;
+  --pill-danger: #ff6b62;
+  --pill-success: #3ddc97;
 }
 
 :root[data-theme="dark"] {
   color-scheme: dark;
-  --bg: #121519;
-  --surface: #191d22;
-  --surface-raised: #20252c;
-  --surface-subtle: #232930;
-  --surface-hover: #2a313a;
-  --text: #f4f7fb;
-  --muted: #a3adba;
-  --faint: #747f8d;
-  --border: #303741;
-  --border-strong: #46515f;
-  --accent: #78a9ff;
-  --accent-hover: #96bcff;
-  --accent-soft: #1d304d;
-  --danger: #ff7965;
-  --danger-soft: #40231f;
-  --success: #70d0a0;
-  --shadow: 0 1px 2px rgba(0, 0, 0, 0.42), 0 18px 42px rgba(0, 0, 0, 0.3);
+
+  --bg: #131210;
+  --surface: #1c1b18;
+  --surface-raised: #242320;
+  --surface-subtle: #22211e;
+  --surface-hover: #2c2a26;
+
+  --text: #f2f0eb;
+  --muted: #a49d92;
+  --faint: #6e695f;
+
+  --border: #2c2a26;
+  --border-strong: #403c35;
+
+  --accent: #9c90ff;
+  --accent-hover: #b3aaff;
+  --accent-soft: #272349;
+  --accent-contrast: #1c1733;
+
+  --danger: #ff7d70;
+  --danger-soft: #392320;
+  --success: #66ce9a;
+  --success-soft: #163327;
+  --warning: #e0a44a;
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.35);
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 16px 40px -12px rgba(0, 0, 0, 0.5);
+  --shadow-lg: 0 2px 6px rgba(0, 0, 0, 0.45), 0 24px 64px -16px rgba(0, 0, 0, 0.6);
 }
 
-/* Deterministic, theme-aware scrollbars (no more OS-style bars). */
+/* Deterministic, theme-aware scrollbars (no OS-style bars). */
 :root { scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent; }
 *::-webkit-scrollbar { width: 10px; height: 10px; }
 *::-webkit-scrollbar-track { background: transparent; }
@@ -54,4 +90,4 @@
 }
 *::-webkit-scrollbar-thumb:hover { background-color: var(--faint); }
 *::-webkit-scrollbar-corner { background: transparent; }
-::selection { background: color-mix(in srgb, var(--accent) 28%, transparent); }
+::selection { background: color-mix(in srgb, var(--accent) 26%, transparent); }
