@@ -29,9 +29,6 @@ function LiveWaveform({ level }: { level: number }) {
     canvas.width = WAVE_WIDTH * dpr;
     canvas.height = WAVE_HEIGHT * dpr;
     context.scale(dpr, dpr);
-    const gradient = context.createLinearGradient(0, 0, WAVE_WIDTH, 0);
-    gradient.addColorStop(0, "#8f85ff");
-    gradient.addColorStop(1, "#c4b8ff");
     const gap = 3;
     const barWidth = (WAVE_WIDTH - gap * (WAVE_BARS - 1)) / WAVE_BARS;
     const seeds = Array.from({ length: WAVE_BARS }, (_, index) => ({
@@ -48,7 +45,7 @@ function LiveWaveform({ level }: { level: number }) {
       smoothed += (target - smoothed) * 0.16;
       const time = reduceMotion ? 0 : now / 1000;
       context.clearRect(0, 0, WAVE_WIDTH, WAVE_HEIGHT);
-      context.fillStyle = gradient;
+      context.fillStyle = "#e8ecf4";
       for (let index = 0; index < WAVE_BARS; index += 1) {
         const seed = seeds[index];
         const wave = 0.5 + 0.5 * Math.sin(time * seed.speed * 1.6 + seed.phase);
