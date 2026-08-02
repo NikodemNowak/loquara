@@ -8,7 +8,6 @@ import { RecorderOverlay } from "./features/dictation/RecorderOverlay";
 import { I18nProvider } from "./lib/i18n";
 import { translate } from "./lib/i18n";
 import { getAdapter } from "./lib/tauri";
-import "@fontsource-variable/inter";
 import "./app/theme.css";
 import "./app/app.css";
 

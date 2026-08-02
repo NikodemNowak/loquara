@@ -1,45 +1,59 @@
 import {
-  BookOpen,
-  Check,
-  Clock3,
-  Copy,
-  Cpu,
-  Home,
-  Keyboard,
-  Languages,
-  Mic,
-  Minus,
-  Palette,
-  Play,
-  Plus,
-  RotateCcw,
-  Search,
-  Settings,
-  SlidersHorizontal,
-  Square,
-  Trash2,
-  X,
-} from "lucide-react";
+  AddRegular,
+  ArrowCounterclockwiseRegular,
+  BookOpenRegular,
+  CheckmarkRegular,
+  ColorRegular,
+  CopyRegular,
+  DeleteRegular,
+  DesktopRegular,
+  DismissRegular,
+  HistoryRegular,
+  HomeRegular,
+  KeyboardRegular,
+  LocalLanguageRegular,
+  MicRegular,
+  OptionsRegular,
+  PlayRegular,
+  SearchRegular,
+  SettingsRegular,
+  StopFilled,
+  SubtractRegular,
+} from "@fluentui/react-icons";
+import type { ComponentType } from "react";
 
-export {
-  BookOpen,
-  Check,
-  Clock3,
-  Copy,
-  Cpu,
-  Home,
-  Keyboard,
-  Languages,
-  Mic,
-  Minus,
-  Palette,
-  Play,
-  Plus,
-  RotateCcw,
-  Search,
-  Settings,
-  SlidersHorizontal,
-  Square,
-  Trash2,
-  X,
+type FluentComponent = ComponentType<{ width?: number | string; height?: number | string; className?: string }>;
+
+export type IconProps = {
+  size?: number | string;
+  strokeWidth?: number;
+  fill?: string;
+  className?: string;
 };
+
+function wrap(Fluent: FluentComponent) {
+  return function Icon({ size = 20, className }: IconProps) {
+    return <Fluent width={size} height={size} className={className} aria-hidden="true" />;
+  };
+}
+
+export const Home = wrap(HomeRegular);
+export const Clock3 = wrap(HistoryRegular);
+export const Settings = wrap(SettingsRegular);
+export const Mic = wrap(MicRegular);
+export const Minus = wrap(SubtractRegular);
+export const X = wrap(DismissRegular);
+export const Search = wrap(SearchRegular);
+export const Copy = wrap(CopyRegular);
+export const Play = wrap(PlayRegular);
+export const Trash2 = wrap(DeleteRegular);
+export const RotateCcw = wrap(ArrowCounterclockwiseRegular);
+export const Plus = wrap(AddRegular);
+export const Check = wrap(CheckmarkRegular);
+export const Square = wrap(StopFilled);
+export const BookOpen = wrap(BookOpenRegular);
+export const Cpu = wrap(DesktopRegular);
+export const Languages = wrap(LocalLanguageRegular);
+export const Palette = wrap(ColorRegular);
+export const SlidersHorizontal = wrap(OptionsRegular);
+export const Keyboard = wrap(KeyboardRegular);

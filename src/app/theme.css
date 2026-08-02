@@ -1,7 +1,7 @@
 /* Loquara design tokens - macOS-style window/group separation, neutral grays. */
 :root {
   color-scheme: light;
-  font-family: "Inter Variable", Inter, "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+  font-family: "Segoe UI Variable Text", "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
   font-synthesis: none;
 
   --bg: #f0f1f4;
