@@ -17,6 +17,12 @@ pub enum DictationState {
         #[serde(rename = "audioPath")]
         audio_path: String,
     },
+    Cancelling {
+        #[serde(rename = "recordingId")]
+        recording_id: String,
+        #[serde(rename = "audioPath")]
+        audio_path: String,
+    },
     Processing {
         #[serde(rename = "recordingId")]
         recording_id: String,
@@ -55,6 +61,7 @@ pub enum DictationEvent {
     PasteCompleted,
     Retry,
     Cancel,
+    CancelRequest,
 }
 
 pub fn transition(state: DictationState, event: DictationEvent) -> DictationState {
@@ -79,7 +86,38 @@ pub fn transition(state: DictationState, event: DictationEvent) -> DictationStat
             recording_id,
             audio_path,
         },
+        (
+            DictationState::Recording {
+                recording_id,
+                audio_path,
+            },
+            DictationEvent::CancelRequest,
+        ) => DictationState::Cancelling {
+            recording_id,
+            audio_path,
+        },
         (DictationState::Recording { .. }, DictationEvent::Cancel) => DictationState::Idle,
+        (
+            DictationState::Cancelling {
+                recording_id,
+                audio_path,
+            },
+            DictationEvent::CancelRequest,
+        ) => DictationState::Recording {
+            recording_id,
+            audio_path,
+        },
+        (DictationState::Cancelling { .. }, DictationEvent::Cancel) => DictationState::Idle,
+        (
+            DictationState::Cancelling {
+                recording_id,
+                audio_path,
+            },
+            DictationEvent::Stop,
+        ) => DictationState::Processing {
+            recording_id,
+            audio_path,
+        },
         (
             DictationState::Processing {
                 recording_id,
@@ -236,6 +274,49 @@ mod tests {
     }
 
     #[test]
+    fn cancel_request_arms_then_dismisses_the_confirm_prompt() {
+        let recovery = recording();
+        let recording_state = DictationState::Recording {
+            recording_id: recovery.recording_id.clone(),
+            audio_path: recovery.audio_path.clone(),
+        };
+        let cancelling_state = DictationState::Cancelling {
+            recording_id: recovery.recording_id.clone(),
+            audio_path: recovery.audio_path.clone(),
+        };
+
+        assert_eq!(
+            transition(recording_state.clone(), DictationEvent::CancelRequest),
+            cancelling_state.clone()
+        );
+        assert_eq!(
+            transition(cancelling_state.clone(), DictationEvent::CancelRequest),
+            recording_state
+        );
+    }
+
+    #[test]
+    fn cancelling_can_confirm_to_idle_or_finalize_to_processing() {
+        let recovery = recording();
+        let cancelling_state = DictationState::Cancelling {
+            recording_id: recovery.recording_id.clone(),
+            audio_path: recovery.audio_path.clone(),
+        };
+
+        assert_eq!(
+            transition(cancelling_state.clone(), DictationEvent::Cancel),
+            DictationState::Idle
+        );
+        assert_eq!(
+            transition(cancelling_state, DictationEvent::Stop),
+            DictationState::Processing {
+                recording_id: recovery.recording_id,
+                audio_path: recovery.audio_path,
+            }
+        );
+    }
+
+    #[test]
     fn state_json_contract_uses_exact_tags_fields_and_round_trips() {
         let cases: Vec<(DictationState, Value)> = vec![
             (DictationState::Idle, json!({ "status": "idle" })),
@@ -246,6 +327,17 @@ mod tests {
                 },
                 json!({
                     "status": "recording",
+                    "recordingId": "recording-1",
+                    "audioPath": r"C:\recordings\recording-1.wav",
+                }),
+            ),
+            (
+                DictationState::Cancelling {
+                    recording_id: "recording-1".into(),
+                    audio_path: r"C:\recordings\recording-1.wav".into(),
+                },
+                json!({
+                    "status": "cancelling",
                     "recordingId": "recording-1",
                     "audioPath": r"C:\recordings\recording-1.wav",
                 }),
@@ -338,6 +430,7 @@ mod tests {
             ),
             (DictationEvent::Retry, json!({ "type": "retry" })),
             (DictationEvent::Cancel, json!({ "type": "cancel" })),
+            (DictationEvent::CancelRequest, json!({ "type": "cancel_request" })),
         ];
 
         for (event, expected_json) in cases {

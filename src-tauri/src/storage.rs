@@ -193,14 +193,29 @@ impl Storage {
             self.connection()?
                 .query_row("SELECT version FROM schema_version", [], |row| row.get(0))?;
         if version < 2 {
-            self.connection()?.execute_batch(
-                "ALTER TABLE modes ADD COLUMN name TEXT NOT NULL DEFAULT '';
-                 ALTER TABLE modes ADD COLUMN description TEXT NOT NULL DEFAULT '';
-                 ALTER TABLE modes ADD COLUMN prompt TEXT NOT NULL DEFAULT '';
-                 ALTER TABLE modes ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1;
-                 ALTER TABLE modes ADD COLUMN is_default INTEGER NOT NULL DEFAULT 0;
-                 ALTER TABLE modes ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0;",
-            )?;
+            let columns: Vec<String> = self
+                .connection()?
+                .prepare("PRAGMA table_info(modes)")?
+                .query_map([], |row| row.get::<_, String>(1))?
+                .collect::<Result<_, _>>()?;
+            let mut migrations = String::new();
+            for (column, definition) in [
+                ("name", "TEXT NOT NULL DEFAULT ''"),
+                ("description", "TEXT NOT NULL DEFAULT ''"),
+                ("prompt", "TEXT NOT NULL DEFAULT ''"),
+                ("enabled", "INTEGER NOT NULL DEFAULT 1"),
+                ("is_default", "INTEGER NOT NULL DEFAULT 0"),
+                ("created_at", "INTEGER NOT NULL DEFAULT 0"),
+            ] {
+                if !columns.iter().any(|existing| existing == column) {
+                    migrations.push_str(&format!(
+                        "ALTER TABLE modes ADD COLUMN {column} {definition};"
+                    ));
+                }
+            }
+            if !migrations.is_empty() {
+                self.connection()?.execute_batch(&migrations)?;
+            }
         }
         self.connection()?.execute_batch(
             "INSERT OR IGNORE INTO modes
@@ -840,8 +855,60 @@ fn apply_vocabulary(mut processed: String, vocabulary: &[VocabularyEntry]) -> St
                 .replace_all(&processed, regex::NoExpand(&entry.replacement))
                 .into_owned();
         }
+        processed = fuzzy_apply_vocabulary(processed, &entry);
     }
     processed
+}
+
+fn fuzzy_apply_vocabulary(mut text: String, entry: &VocabularyEntry) -> String {
+    let heard = entry.heard.trim().to_lowercase();
+    if heard.is_empty() {
+        return text;
+    }
+    let replacement = entry.replacement.trim();
+    let mut rebuilt = String::with_capacity(text.len());
+    let mut word = String::new();
+    let mut flush = |word: &mut String, rebuilt: &mut String| {
+        if word.is_empty() {
+            return;
+        }
+        let word_lower = word.to_lowercase();
+        let word_clean = word_lower.trim_matches(|c: char| !c.is_alphanumeric());
+        if !word_clean.is_empty() && levenshtein(word_clean, &heard) <= 1 {
+            rebuilt.push_str(replacement);
+        } else {
+            rebuilt.push_str(word);
+        }
+        word.clear();
+    };
+    for character in text.chars() {
+        if character.is_whitespace() {
+            flush(&mut word, &mut rebuilt);
+            rebuilt.push(character);
+        } else {
+            word.push(character);
+        }
+    }
+    flush(&mut word, &mut rebuilt);
+    rebuilt
+}
+
+fn levenshtein(left: &str, right: &str) -> usize {
+    let left = left.chars().collect::<Vec<_>>();
+    let right = right.chars().collect::<Vec<_>>();
+    let mut previous = (0..=right.len()).collect::<Vec<_>>();
+    let mut current = vec![0; right.len() + 1];
+    for (i, lc) in left.iter().enumerate() {
+        current[0] = i + 1;
+        for (j, rc) in right.iter().enumerate() {
+            let cost = if lc == rc { 0 } else { 1 };
+            current[j + 1] = (previous[j + 1] + 1)
+                .min(current[j] + 1)
+                .min(previous[j] + cost);
+        }
+        std::mem::swap(&mut previous, &mut current);
+    }
+    previous[right.len()]
 }
 
 #[cfg(test)]
@@ -877,6 +944,38 @@ mod tests {
         assert_eq!(
             storage.table_names().unwrap(),
             vec!["history", "modes", "settings", "vocabulary"]
+        );
+    }
+
+    #[test]
+    fn reopening_v2_database_with_partial_migration_is_idempotent() {
+        let temp = tempfile::tempdir().unwrap();
+        let database = temp.path().join("mow.sqlite3");
+        let recordings = temp.path().join("recordings");
+        let connection = rusqlite::Connection::open(&database).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE modes (
+                   id TEXT PRIMARY KEY,
+                   config_json TEXT NOT NULL,
+                   name TEXT NOT NULL DEFAULT '',
+                   description TEXT NOT NULL DEFAULT '',
+                   prompt TEXT NOT NULL DEFAULT '',
+                   enabled INTEGER NOT NULL DEFAULT 1,
+                   is_default INTEGER NOT NULL DEFAULT 0,
+                   created_at INTEGER NOT NULL DEFAULT 0
+                 );
+                 CREATE TABLE schema_version (version INTEGER NOT NULL);
+                 INSERT INTO schema_version(version) VALUES (0);",
+            )
+            .unwrap();
+
+        let storage = Storage::open(&database, &recordings).unwrap();
+
+        assert_eq!(storage.schema_version().unwrap(), 2);
+        assert_eq!(
+            storage.list_modes().unwrap().iter().map(|mode| mode.id.clone()).collect::<Vec<_>>(),
+            vec!["clean", "message", "code"]
         );
     }
 
@@ -1132,6 +1231,28 @@ mod tests {
             "żółw jest w Nowy Sącz, naprawdę?"
         );
         assert_eq!(postprocess("przyzolwowy", &vocabulary), "przyzolwowy");
+    }
+
+    #[test]
+    fn vocabulary_approximates_similar_sounding_words() {
+        let vocabulary = vec![VocabularyEntry {
+            id: 1,
+            heard: "parakit".into(),
+            replacement: "Parakeet".into(),
+        }];
+
+        assert_eq!(
+            postprocess("uruchom parakyt i zobacz", &vocabulary),
+            "uruchom Parakeet i zobacz"
+        );
+        assert_eq!(
+            postprocess("parakit jest gotowy", &vocabulary),
+            "Parakeet jest gotowy"
+        );
+        assert_eq!(
+            postprocess("przetestujmy parakitta", &vocabulary),
+            "przetestujmy parakitta"
+        );
     }
 
     fn mode(id: &str, prompt: &str) -> Mode {

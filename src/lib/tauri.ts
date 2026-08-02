@@ -7,12 +7,15 @@ import type {
   HistoryQuery,
   InputDeviceInfo,
   Mode,
+  ModelDescriptor,
+  ModelDownloadProgress,
   ModelStatus,
   Recording,
   SettingsUpdateResult,
   VocabularyEntry,
 } from "./types";
 import { normalizeError } from "./errors";
+import { translate } from "./i18n/lang";
 
 type Listener<T> = (payload: T) => void;
 
@@ -22,10 +25,15 @@ export interface AppAdapter {
   startRecording(): Promise<AppSnapshot>;
   stopRecording(): Promise<AppSnapshot>;
   cancelRecording(): Promise<AppSnapshot>;
+  requestCancel(): Promise<AppSnapshot>;
+  hideOverlay(): Promise<void>;
+  saveOverlayPosition(x: number, y: number): Promise<void>;
   retryTranscription(recordingId: string): Promise<AppSnapshot>;
   pasteTranscript(recordingId?: string): Promise<void>;
   listHistory(query: HistoryQuery): Promise<Recording[]>;
   deleteHistory(recordingId: string): Promise<boolean>;
+  playRecording(recordingId: string): Promise<void>;
+  correctTranscript(recordingId: string, text: string): Promise<number>;
   listVocabulary(): Promise<VocabularyEntry[]>;
   addVocabulary(heard: string, replacement: string): Promise<VocabularyEntry>;
   deleteVocabulary(id: number): Promise<boolean>;
@@ -34,29 +42,57 @@ export interface AppAdapter {
   deleteMode(id: string): Promise<boolean>;
   getSettings(): Promise<AppSettings>;
   getModelStatus(): Promise<ModelStatus>;
+  listModels(): Promise<ModelDescriptor[]>;
+  downloadModel(model: string): Promise<void>;
+  deleteModel(model: string): Promise<void>;
   updateSettings(settings: AppSettings): Promise<SettingsUpdateResult>;
   updateSettingValue(key: string, value: unknown): Promise<void>;
   onState(listener: Listener<AppSnapshot>): Promise<UnlistenFn>;
   onLevel(listener: Listener<number>): Promise<UnlistenFn>;
+  onModelProgress(listener: Listener<ModelDownloadProgress>): Promise<UnlistenFn>;
   onError(listener: Listener<string>): Promise<UnlistenFn>;
 }
 
 export function platformErrorMessage(payload: unknown): string {
-  return normalizeError(payload, "Nieznany błąd platformy.");
+  return normalizeError(payload, translate("errors.platform"));
+}
+
+function isStateNotManaged(error: unknown): boolean {
+  const message = normalizeError(error, "").toLowerCase();
+  return message.includes("state not managed") || message.includes("not managed for field");
+}
+
+async function invokeAfterStateReady<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    try {
+      return await invoke<T>(command, args);
+    } catch (error) {
+      lastError = error;
+      if (!isStateNotManaged(error)) throw error;
+      await new Promise((resolve) => window.setTimeout(resolve, 50));
+    }
+  }
+  throw lastError ?? new Error(translate("errors.stateInit"));
 }
 
 const realAdapter: AppAdapter = {
-  getAppSnapshot: () => invoke("get_app_snapshot"),
+  getAppSnapshot: () => invokeAfterStateReady("get_app_snapshot"),
   listInputDevices: () => invoke("list_input_devices"),
   startRecording: () => invoke("start_recording"),
   stopRecording: () => invoke("stop_recording"),
   cancelRecording: () => invoke("cancel_recording"),
+  requestCancel: () => invoke("request_cancel"),
+  hideOverlay: () => invoke("hide_overlay"),
+  saveOverlayPosition: (x, y) => invoke("save_overlay_position", { x, y }),
   retryTranscription: (recordingId) =>
     invoke("retry_transcription", { recordingId }),
   pasteTranscript: (recordingId) =>
     invoke("paste_transcript", { recordingId }),
-  listHistory: (query) => invoke("list_history", { query }),
+  listHistory: (query) => invokeAfterStateReady("list_history", { query }),
   deleteHistory: (recordingId) => invoke("delete_history", { recordingId }),
+  playRecording: (recordingId) => invoke("play_recording", { recordingId }),
+  correctTranscript: (recordingId, text) => invoke("correct_transcript", { recordingId, text }),
   listVocabulary: () => invoke("list_vocabulary"),
   addVocabulary: (heard, replacement) =>
     invoke("add_vocabulary", { heard, replacement }),
@@ -66,6 +102,9 @@ const realAdapter: AppAdapter = {
   deleteMode: (id) => invoke("delete_mode", { id }),
   getSettings: () => invoke("get_settings"),
   getModelStatus: () => invoke("get_model_status"),
+  listModels: () => invoke("list_models"),
+  downloadModel: (model) => invoke("download_model", { model }),
+  deleteModel: (model) => invoke("delete_model", { model }),
   updateSettings: (settings) => invoke("update_settings", { settings }),
   updateSettingValue: (key, value) =>
     invoke("update_setting_value", { key, value }),
@@ -73,6 +112,8 @@ const realAdapter: AppAdapter = {
     listen<AppSnapshot>("dictation://state", (event) => listener(event.payload)),
   onLevel: (listener) =>
     listen<number>("dictation://level", (event) => listener(event.payload)),
+  onModelProgress: (listener) =>
+    listen<ModelDownloadProgress>("models://progress", (event) => listener(event.payload)),
   onError: async (listener) => {
     const unlistenPaste = await listen<unknown>("dictation://paste_error", (event) =>
       listener(platformErrorMessage(event.payload)),
@@ -93,8 +134,13 @@ const initialSettings: AppSettings = {
   shortcut: "Ctrl+Space",
   autoPaste: true,
   retentionDays: 30,
-  launchOnLogin: true,
+  launchOnLogin: false,
   activeMode: "clean",
+  showOverlay: true,
+  model: "parakeet",
+  streaming: false,
+  theme: "system",
+  language: "system",
 };
 
 const demoHistory = (): Recording[] => [
@@ -117,14 +163,14 @@ const demoHistory = (): Recording[] => [
 
 const builtInModes = (): Mode[] =>
   [
-    ["clean", "Czysty", "Naturalny tekst bez wypełniaczy.", "Usuń wypełniacze i popraw interpunkcję."],
-    ["message", "Wiadomość", "Krótko, przyjaźnie i na temat.", "Zredaguj jako zwięzłą wiadomość."],
-    ["code", "Kod", "Nazwy techniczne bez autokorekty.", "Zachowaj składnię i nazwy symboli."],
+    ["clean", "demo.mode.clean.name", "demo.mode.clean.description", "demo.mode.clean.prompt"],
+    ["message", "demo.mode.message.name", "demo.mode.message.description", "demo.mode.message.prompt"],
+    ["code", "demo.mode.code.name", "demo.mode.code.description", "demo.mode.code.prompt"],
   ].map(([id, name, description, prompt], index) => ({
     id,
-    name,
-    description,
-    prompt,
+    name: translate(name as "demo.mode.clean.name"),
+    description: translate(description as "demo.mode.clean.description"),
+    prompt: translate(prompt as "demo.mode.clean.prompt"),
     enabled: true,
     isDefault: true,
     createdAt: index,
@@ -132,7 +178,7 @@ const builtInModes = (): Mode[] =>
 
 export function createBrowserAdapter(): AppAdapter {
   let settings = { ...initialSettings };
-  let snapshot: AppSnapshot = { dictation: { status: "idle" }, settings };
+  let snapshot: AppSnapshot = { dictation: { status: "idle" }, settings, modelLoading: false };
   let history = demoHistory();
   let vocabulary: VocabularyEntry[] = [
     { id: 1, heard: "parakit", replacement: "Parakeet" },
@@ -142,7 +188,7 @@ export function createBrowserAdapter(): AppAdapter {
   const levelListeners = new Set<Listener<number>>();
   const emit = () => stateListeners.forEach((listener) => listener(snapshot));
   const setState = (dictation: AppSnapshot["dictation"]) => {
-    snapshot = { dictation, settings };
+    snapshot = { dictation, settings, modelLoading: false };
     emit();
     return snapshot;
   };
@@ -172,9 +218,12 @@ export function createBrowserAdapter(): AppAdapter {
       return snapshot;
     },
     cancelRecording: async () => setState({ status: "idle" }),
+    requestCancel: async () => snapshot,
+    hideOverlay: async () => undefined,
+    saveOverlayPosition: async () => undefined,
     retryTranscription: async (recordingId) => {
       const item = history.find((recording) => recording.id === recordingId);
-      if (!item?.audioPath) throw new Error("Brak zachowanego audio.");
+      if (!item?.audioPath) throw new Error(translate("errors.noAudio"));
       return setState({ status: "processing", recordingId, audioPath: item.audioPath });
     },
     pasteTranscript: async () => undefined,
@@ -190,6 +239,8 @@ export function createBrowserAdapter(): AppAdapter {
       history = history.filter((item) => item.id !== recordingId);
       return before !== history.length;
     },
+    playRecording: async () => undefined,
+    correctTranscript: async () => 0,
     listVocabulary: async () => [...vocabulary],
     addVocabulary: async (heard, replacement) => {
       const item = { id: Math.max(0, ...vocabulary.map(({ id }) => id)) + 1, heard, replacement };
@@ -220,6 +271,14 @@ export function createBrowserAdapter(): AppAdapter {
       device: null,
       message: null,
     }),
+    listModels: async () => ([
+      { key: "parakeet", id: "nvidia/parakeet-tdt-0.6b-v3", provider: "NVIDIA", source: "local", revision: "7c35754d166cca382ad1e53e68b01e7c575f3a1d", display: "Parakeet TDT 0.6B v3", minVramGb: 3, minRamGb: 8, languages: "auto (PL/EN)", estimatedSizeBytes: 2_500_000_000, status: "ready", installedSizeBytes: 2_500_000_000, message: null },
+      { key: "whisper-turbo", id: "openai/whisper-large-v3-turbo", provider: "OpenAI", source: "local", revision: "41f01f3fe87f28c78e2fbf8b568835947dd65ed9", display: "Whisper Large v3 Turbo", minVramGb: 4, minRamGb: 8, languages: "auto (99)", estimatedSizeBytes: 1_600_000_000, status: "not_installed", installedSizeBytes: null, message: null },
+      { key: "whisper-small", id: "openai/whisper-small", provider: "OpenAI", source: "local", revision: "973afd24965f72e36ca33b3055d56a652f456b4d", display: "Whisper Small", minVramGb: 1.5, minRamGb: 4, languages: "auto (99)", estimatedSizeBytes: 1_000_000_000, status: "not_installed", installedSizeBytes: null, message: null },
+      { key: "cohere", id: "AEmotionStudio/cohere-transcribe-03-2026-models", provider: "Cohere", source: "local", revision: "d114f701a80b2150943f5dbae71458f4d1fcb37b", display: "Cohere Transcribe 2B", minVramGb: 5, minRamGb: 8, languages: "pl/en/fr/de/...", estimatedSizeBytes: 4_132_000_000, status: "not_installed", installedSizeBytes: null, message: null },
+    ]),
+    downloadModel: async () => undefined,
+    deleteModel: async () => undefined,
     updateSettings: async (next) => {
       settings = { ...next };
       snapshot = { ...snapshot, settings };
@@ -234,6 +293,7 @@ export function createBrowserAdapter(): AppAdapter {
       levelListeners.add(listener);
       return () => levelListeners.delete(listener);
     },
+    onModelProgress: async () => () => undefined,
     onError: async () => () => undefined,
   };
 }

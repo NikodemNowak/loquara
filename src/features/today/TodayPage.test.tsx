@@ -1,7 +1,8 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, test, vi } from "vitest";
 
+import { renderWithI18n } from "../../test/renderWithI18n";
 import { adapterStub, settings } from "../../test/fixtures";
 import type { DictationState } from "../../lib/types";
 import { TodayPage } from "./TodayPage";
@@ -9,9 +10,9 @@ import { TodayPage } from "./TodayPage";
 function renderState(state: DictationState, overrides = {}) {
   const onToast = vi.fn();
   const adapter = adapterStub(overrides);
-  const view = render(<TodayPage
+  const view = renderWithI18n(<TodayPage
     adapter={adapter}
-    snapshot={{ dictation: state, settings }}
+    snapshot={{ dictation: state, settings, modelLoading: false }}
     recordings={[]}
     onSnapshot={() => undefined}
     onHistory={() => undefined}
@@ -29,9 +30,9 @@ describe("CTA strony Dzisiaj", () => {
       onHistory: () => undefined,
       onToast: () => undefined,
     };
-    const { rerender } = render(<TodayPage
+    const { rerender } = renderWithI18n(<TodayPage
       {...props}
-      snapshot={{ dictation: { status: "idle" }, settings }}
+      snapshot={{ dictation: { status: "idle" }, settings, modelLoading: false }}
     />);
     expect(screen.getAllByLabelText("Skrót klawiszowy: Ctrl + Space")).toHaveLength(2);
 
@@ -40,6 +41,7 @@ describe("CTA strony Dzisiaj", () => {
       snapshot={{
         dictation: { status: "idle" },
         settings: { ...settings, shortcut: "Ctrl+Shift+M" },
+        modelLoading: false,
       }}
     />);
 
@@ -64,19 +66,19 @@ describe("CTA strony Dzisiaj", () => {
   });
 
   test("uruchamia, zatrzymuje i ponawia właściwe komendy", async () => {
-    const startRecording = vi.fn(async () => ({ dictation: { status: "idle" as const }, settings }));
+    const startRecording = vi.fn(async () => ({ dictation: { status: "idle" as const }, settings, modelLoading: false }));
     const first = renderState({ status: "idle" }, { startRecording });
     await userEvent.click(screen.getByRole("button", { name: /Zacznij mówić/ }));
     expect(startRecording).toHaveBeenCalledOnce();
     first.unmount();
 
-    const stopRecording = vi.fn(async () => ({ dictation: { status: "idle" as const }, settings }));
+    const stopRecording = vi.fn(async () => ({ dictation: { status: "idle" as const }, settings, modelLoading: false }));
     const second = renderState({ status: "recording", recordingId: "r", audioPath: "r.wav" }, { stopRecording });
     await userEvent.click(screen.getByRole("button", { name: /Zatrzymaj nagrywanie/ }));
     expect(stopRecording).toHaveBeenCalledOnce();
     second.unmount();
 
-    const retryTranscription = vi.fn(async () => ({ dictation: { status: "idle" as const }, settings }));
+    const retryTranscription = vi.fn(async () => ({ dictation: { status: "idle" as const }, settings, modelLoading: false }));
     renderState({ status: "failed", recovery: { recordingId: "failed", audioPath: "f.wav" }, error: "Błąd" }, { retryTranscription });
     await userEvent.click(screen.getByRole("button", { name: /Ponów/ }));
     expect(retryTranscription).toHaveBeenCalledWith("failed");

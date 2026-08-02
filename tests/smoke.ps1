@@ -8,11 +8,11 @@ param(
 $ErrorActionPreference = "Stop"
 $repository = Split-Path -Parent $PSScriptRoot
 if ([string]::IsNullOrWhiteSpace($ExePath)) {
-    $ExePath = Join-Path $repository "src-tauri\target\release\mow.exe"
+    $ExePath = Join-Path $repository "src-tauri\target\release\loquara.exe"
 }
 $ExePath = [IO.Path]::GetFullPath($ExePath)
 if (-not (Test-Path -LiteralPath $ExePath -PathType Leaf)) {
-    throw "Missing Mow executable: $ExePath"
+    throw "Missing Loquara executable: $ExePath"
 }
 if ($StartupTimeoutSeconds -le 0) {
     throw "StartupTimeoutSeconds must be positive."
@@ -27,7 +27,7 @@ $worker = $workerCandidates |
     Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } |
     Select-Object -First 1
 if ([string]::IsNullOrWhiteSpace($worker)) {
-    throw "Bundled Parakeet worker is missing next to $ExePath"
+    throw "Bundled Loquara worker is missing next to $ExePath"
 }
 
 & (Join-Path $repository "scripts\setup-engine.ps1") `
@@ -37,9 +37,10 @@ if ([string]::IsNullOrWhiteSpace($worker)) {
 
 Push-Location $repository
 try {
-    & $Python -X utf8 -m engine.download_model --local-only
+    $modelHome = Join-Path $env:APPDATA "io.loquara.desktop\models"
+    & $Python -X utf8 -m engine.download_model --local-only --local-dir $modelHome
     if ($LASTEXITCODE -ne 0) {
-        throw "The exact model revision is incomplete in cache."
+        throw "The exact model revision is incomplete in the Loquara model directory."
     }
 }
 finally {
@@ -54,18 +55,18 @@ try {
         -WindowStyle Hidden `
         -PassThru
     $deadline = [DateTime]::UtcNow.AddSeconds($StartupTimeoutSeconds)
-    $database = Join-Path $env:APPDATA "pl.mow.desktop\mow.sqlite3"
+    $database = Join-Path $env:APPDATA "io.loquara.desktop\loquara.sqlite3"
     do {
         Start-Sleep -Milliseconds 250
         $process.Refresh()
         if ($process.HasExited) {
-            throw "Mow exited during startup (exit $($process.ExitCode))."
+            throw "Loquara exited during startup (exit $($process.ExitCode))."
         }
         $healthy = Test-Path -LiteralPath $database -PathType Leaf
     } while (-not $healthy -and [DateTime]::UtcNow -lt $deadline)
 
     if (-not $healthy) {
-        throw "Mow did not initialize its database within $StartupTimeoutSeconds seconds."
+        throw "Loquara did not initialize its database within $StartupTimeoutSeconds seconds."
     }
     Write-Host "Smoke OK: PID $($process.Id), worker ready, model complete, DB $database"
 }

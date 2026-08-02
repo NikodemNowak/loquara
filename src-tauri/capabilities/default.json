@@ -1,0 +1,16 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "mow-default",
+  "description": "Domyslne uprawnienia okien aplikacji Loquara.",
+  "windows": ["main", "overlay"],
+  "permissions": [
+    "core:default",
+    "core:event:default",
+    "core:app:default",
+    "core:window:default",
+    "core:window:allow-minimize",
+    "core:window:allow-close",
+    "core:window:allow-start-dragging",
+    "core:window:allow-toggle-maximize"
+  ]
+}

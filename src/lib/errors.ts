@@ -1,4 +1,6 @@
-export function normalizeError(error: unknown, fallback = "Nieznany błąd."): string {
+import { translate } from "./i18n/lang";
+
+export function normalizeError(error: unknown, fallback = translate("errors.unknown")): string {
   if (typeof error === "string" && error.trim()) return error;
   if (error instanceof Error && error.message.trim()) return error.message;
   if (error && typeof error === "object") {

@@ -17,7 +17,7 @@ class SmokeScriptContractTests(unittest.TestCase):
         script = repository / "tests" / "smoke.ps1"
         for host in hosts:
             with self.subTest(host=host), tempfile.TemporaryDirectory() as directory:
-                missing = Path(directory) / "missing" / "mow.exe"
+                missing = Path(directory) / "missing" / "loquara.exe"
                 process = subprocess.run(
                     [
                         host,
@@ -39,7 +39,7 @@ class SmokeScriptContractTests(unittest.TestCase):
                     "utf-8", errors="replace"
                 )
                 self.assertNotEqual(process.returncode, 0)
-                self.assertIn("Missing Mow executable", output)
+                self.assertIn("Missing Loquara executable", output)
 
 
 if __name__ == "__main__":

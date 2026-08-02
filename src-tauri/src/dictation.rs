@@ -5,10 +5,13 @@ use crate::storage::{
     HistoryQuery, Mode, Recording, RecordingStatus, Retention, Storage, StorageError,
     VocabularyEntry, postprocess_for_mode,
 };
-use crate::transcription::{ClientError, PythonExecutable, TranscriptionResult, WorkerClient};
+use crate::transcription::{
+    ClientError, PythonExecutable, TranscriptionResult, WorkerClient, no_console,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeSet;
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -86,7 +89,10 @@ impl CoordinatorMachine {
     }
 
     pub fn stopped(&mut self) -> Result<(), CoordinatorError> {
-        if !matches!(self.state, DictationState::Recording { .. }) {
+        if !matches!(
+            self.state,
+            DictationState::Recording { .. } | DictationState::Cancelling { .. }
+        ) {
             return Err(CoordinatorError::InvalidState);
         }
         self.state = transition(self.state.clone(), DictationEvent::Stop);
@@ -154,11 +160,24 @@ impl CoordinatorMachine {
     pub fn cancel(&mut self) -> Result<(), CoordinatorError> {
         if !matches!(
             self.state,
-            DictationState::Recording { .. } | DictationState::Failed { .. }
+            DictationState::Recording { .. }
+                | DictationState::Failed { .. }
+                | DictationState::Cancelling { .. }
         ) {
             return Err(CoordinatorError::InvalidState);
         }
         self.state = transition(self.state.clone(), DictationEvent::Cancel);
+        Ok(())
+    }
+
+    pub fn request_cancel(&mut self) -> Result<(), CoordinatorError> {
+        if !matches!(
+            self.state,
+            DictationState::Recording { .. } | DictationState::Cancelling { .. }
+        ) {
+            return Err(CoordinatorError::InvalidState);
+        }
+        self.state = transition(self.state.clone(), DictationEvent::CancelRequest);
         Ok(())
     }
 
@@ -172,6 +191,22 @@ impl CoordinatorMachine {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThemeChoice {
+    System,
+    Light,
+    Dark,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LanguageChoice {
+    System,
+    Pl,
+    En,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppSettings {
     pub input_device: Option<String>,
@@ -182,14 +217,44 @@ pub struct AppSettings {
     pub launch_on_login: bool,
     #[serde(default = "default_active_mode")]
     pub active_mode: String,
+    #[serde(default = "default_show_overlay")]
+    pub show_overlay: bool,
+    #[serde(default = "default_model")]
+    pub model: String,
+    #[serde(default = "default_streaming")]
+    pub streaming: bool,
+    #[serde(default = "default_theme")]
+    pub theme: ThemeChoice,
+    #[serde(default = "default_language")]
+    pub language: LanguageChoice,
 }
 
 const fn default_launch_on_login() -> bool {
+    false
+}
+
+const fn default_show_overlay() -> bool {
     true
+}
+
+const fn default_streaming() -> bool {
+    false
+}
+
+fn default_model() -> String {
+    MODEL_KEYS[0].to_string()
 }
 
 fn default_active_mode() -> String {
     "clean".into()
+}
+
+const fn default_theme() -> ThemeChoice {
+    ThemeChoice::System
+}
+
+const fn default_language() -> LanguageChoice {
+    LanguageChoice::System
 }
 
 impl Default for AppSettings {
@@ -199,8 +264,13 @@ impl Default for AppSettings {
             shortcut: "Ctrl+Space".into(),
             auto_paste: true,
             retention_days: Some(30),
-            launch_on_login: true,
+            launch_on_login: false,
             active_mode: default_active_mode(),
+            show_overlay: default_show_overlay(),
+            model: default_model(),
+            streaming: default_streaming(),
+            theme: default_theme(),
+            language: default_language(),
         }
     }
 }
@@ -208,7 +278,152 @@ impl Default for AppSettings {
 pub const MODEL_ID: &str = "nvidia/parakeet-tdt-0.6b-v3";
 pub const MODEL_REVISION: &str = "7c35754d166cca382ad1e53e68b01e7c575f3a1d";
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub const MODEL_KEYS: &[&str] = &[
+    "parakeet",
+    "whisper-turbo",
+    "whisper-small",
+    "cohere",
+];
+
+pub fn is_supported_model(key: &str) -> bool {
+    MODEL_KEYS.contains(&key)
+}
+
+pub fn model_revision(key: &str) -> &'static str {
+    match key {
+        "whisper-turbo" => "41f01f3fe87f28c78e2fbf8b568835947dd65ed9",
+        "whisper-small" => "973afd24965f72e36ca33b3055d56a652f456b4d",
+        "cohere" => "d114f701a80b2150943f5dbae71458f4d1fcb37b",
+        _ => MODEL_REVISION,
+    }
+}
+
+pub fn model_id(key: &str) -> &'static str {
+    match key {
+        "whisper-turbo" => "openai/whisper-large-v3-turbo",
+        "whisper-small" => "openai/whisper-small",
+        "cohere" => "AEmotionStudio/cohere-transcribe-03-2026-models",
+        _ => MODEL_ID,
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelDescriptor {
+    pub key: String,
+    pub id: String,
+    pub provider: String,
+    pub source: String,
+    pub revision: String,
+    pub display: String,
+    pub min_vram_gb: f32,
+    pub min_ram_gb: f32,
+    pub languages: String,
+    pub estimated_size_bytes: u64,
+    pub status: ModelStatusState,
+    pub installed_size_bytes: Option<u64>,
+    pub message: Option<String>,
+}
+
+fn estimated_model_size_bytes(key: &str) -> u64 {
+    const MB: u64 = 1_000_000;
+    match key {
+        "whisper-small" => 1_000 * MB,
+        "whisper-turbo" => 1_600 * MB,
+        "cohere" => 4_132 * MB,
+        _ => 2_500 * MB,
+    }
+}
+
+fn snapshot_size_bytes(path: &Path) -> Result<u64, String> {
+    if !path.is_dir() {
+        return Ok(0);
+    }
+    let mut total = 0u64;
+    for entry in std::fs::read_dir(path).map_err(|error| error.to_string())? {
+        let entry = entry.map_err(|error| error.to_string())?;
+        let file_type = entry.file_type().map_err(|error| error.to_string())?;
+        let entry_path = entry.path();
+        if file_type.is_dir() {
+            total = total
+                .checked_add(snapshot_size_bytes(&entry_path)?)
+                .ok_or_else(|| "Rozmiar modelu przekracza limit.".to_string())?;
+        } else if file_type.is_file() || file_type.is_symlink() {
+            let size = std::fs::metadata(&entry_path)
+                .map_err(|error| error.to_string())?
+                .len();
+            total = total
+                .checked_add(size)
+                .ok_or_else(|| "Rozmiar modelu przekracza limit.".to_string())?;
+        }
+    }
+    Ok(total)
+}
+
+pub fn model_descriptors() -> Vec<ModelDescriptor> {
+    let definitions: &[(&str, &str, &str, &str, &str, f32, f32, &str)] = &[
+        (
+            "parakeet",
+            "Parakeet TDT 0.6B v3",
+            "NVIDIA",
+            "local",
+            "auto (PL/EN)",
+            3.0,
+            8.0,
+            "nvidia/parakeet-tdt-0.6b-v3",
+        ),
+        (
+            "whisper-turbo",
+            "Whisper Large v3 Turbo",
+            "OpenAI",
+            "local",
+            "auto (99)",
+            4.0,
+            8.0,
+            "openai/whisper-large-v3-turbo",
+        ),
+        (
+            "whisper-small",
+            "Whisper Small",
+            "OpenAI",
+            "local",
+            "auto (99)",
+            1.5,
+            4.0,
+            "openai/whisper-small",
+        ),
+        (
+            "cohere",
+            "Cohere Transcribe 2B",
+            "Cohere",
+            "local",
+            "pl/en/fr/de/...",
+            5.0,
+            8.0,
+            "AEmotionStudio/cohere-transcribe-03-2026-models",
+        ),
+    ];
+    definitions
+        .iter()
+        .map(|(key, display, provider, source, languages, vram, ram, id)| ModelDescriptor {
+            key: (*key).to_string(),
+            id: (*id).to_string(),
+            provider: (*provider).to_string(),
+            source: (*source).to_string(),
+            revision: model_revision(key).to_string(),
+            display: (*display).to_string(),
+            min_vram_gb: *vram,
+            min_ram_gb: *ram,
+            languages: (*languages).to_string(),
+            estimated_size_bytes: estimated_model_size_bytes(key),
+            status: ModelStatusState::NotInstalled,
+            installed_size_bytes: None,
+            message: None,
+        })
+        .collect()
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelStatusState {
     Ready,
@@ -226,6 +441,35 @@ pub struct ModelStatus {
     pub message: Option<String>,
 }
 
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelDownloadProgress {
+    pub model: String,
+    pub phase: String,
+    pub downloaded_bytes: u64,
+    pub total_bytes: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkerDownloadProgress {
+    event: String,
+    downloaded_bytes: u64,
+    total_bytes: Option<u64>,
+}
+
+fn emit_model_progress(app: &AppHandle, model: &str, phase: &str, downloaded_bytes: u64, total_bytes: Option<u64>) {
+    let _ = app.emit(
+        "models://progress",
+        ModelDownloadProgress {
+            model: model.to_owned(),
+            phase: phase.to_owned(),
+            downloaded_bytes,
+            total_bytes,
+        },
+    );
+}
+
+#[cfg(test)]
 fn model_cache_root(
     explicit_hub: Option<&str>,
     hf_home: Option<&str>,
@@ -237,10 +481,19 @@ fn model_cache_root(
         .unwrap_or_else(|| user_home.join(".cache").join("huggingface").join("hub"))
 }
 
+#[cfg(test)]
 fn model_snapshot_path(hub: &Path) -> PathBuf {
     hub.join("models--nvidia--parakeet-tdt-0.6b-v3")
         .join("snapshots")
         .join(MODEL_REVISION)
+}
+
+#[cfg(test)]
+fn snapshot_path_for(hub: &Path, id: &str, revision: &str) -> PathBuf {
+    let folder = id.replace('/', "--");
+    hub.join(format!("models--{folder}"))
+        .join("snapshots")
+        .join(revision)
 }
 
 fn nonempty_file(path: &Path) -> Result<bool, std::io::Error> {
@@ -304,8 +557,18 @@ fn model_weight_artifacts(snapshot: &Path) -> Result<Vec<String>, String> {
     Ok(vec!["model.safetensors lub pytorch_model.bin".into()])
 }
 
+#[cfg(test)]
 fn model_status_from_hub(hub: &Path) -> ModelStatus {
-    let snapshot = model_snapshot_path(hub);
+    model_status_from_hub_for(hub, MODEL_ID, MODEL_REVISION)
+}
+
+#[cfg(test)]
+fn model_status_from_hub_for(hub: &Path, id: &str, revision: &str) -> ModelStatus {
+    let snapshot = snapshot_path_for(hub, id, revision);
+    model_status_from_snapshot(&snapshot, id, revision)
+}
+
+fn model_status_from_snapshot(snapshot: &Path, id: &str, revision: &str) -> ModelStatus {
     let artifact = |names: &[&str]| -> Result<bool, std::io::Error> {
         for name in names {
             let path = snapshot.join(name);
@@ -383,11 +646,23 @@ fn model_status_from_hub(hub: &Path) -> ModelStatus {
     };
     ModelStatus {
         state,
-        model: MODEL_ID.into(),
-        revision: MODEL_REVISION.into(),
+        model: id.into(),
+        revision: revision.into(),
         device: None,
         message,
     }
+}
+
+fn local_model_snapshot_path(home: &Path, model: &str) -> PathBuf {
+    home.join(model).join(model_revision(model))
+}
+
+fn model_status_from_local(home: &Path, model: &str) -> ModelStatus {
+    model_status_from_snapshot(
+        &local_model_snapshot_path(home, model),
+        model_id(model),
+        model_revision(model),
+    )
 }
 
 fn retention_policy(days: Option<u32>) -> Result<Retention, String> {
@@ -418,6 +693,7 @@ pub fn cleanup_retention(state: &AppState) -> Result<usize, String> {
 pub struct AppSnapshot {
     pub dictation: DictationState,
     pub settings: AppSettings,
+    pub model_loading: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -435,10 +711,95 @@ pub struct AppState {
     pub worker: Arc<Mutex<Option<WorkerClient>>>,
     pub target_window: Arc<Mutex<Option<WindowTarget>>>,
     pub settings: Arc<RwLock<AppSettings>>,
+    pub model_warm: Arc<ModelWarmup>,
     lifecycle: Arc<Mutex<()>>,
     settings_update: Arc<Mutex<()>>,
     python: PythonExecutable,
     worker_path: PathBuf,
+    worker_log: PathBuf,
+    model_home: PathBuf,
+}
+
+/// Tracks model warm-up so transcription never loads the model twice and waits
+/// for the background warm-up to finish before transcribing. Re-warming when
+/// the model changes is supported.
+#[derive(Default)]
+pub struct ModelWarmup {
+    state: Mutex<ModelWarmupState>,
+    changed: std::sync::Condvar,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+enum ModelWarmupState {
+    #[default]
+    Idle,
+    Warming(String),
+    Ready(String),
+    Failed(String),
+}
+
+impl ModelWarmup {
+    pub fn begin_for(&self, model: String) {
+        let mut state = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let needs_start = match &*state {
+            ModelWarmupState::Idle => true,
+            ModelWarmupState::Warming(current) | ModelWarmupState::Ready(current) | ModelWarmupState::Failed(current) => {
+                current != &model
+            }
+        };
+        if needs_start {
+            *state = ModelWarmupState::Warming(model);
+            self.changed.notify_all();
+        }
+    }
+
+    pub fn finish_for(&self, model: String, ready: bool) {
+        let mut state = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if matches!(&*state, ModelWarmupState::Warming(current) if *current == model) {
+            *state = if ready {
+                ModelWarmupState::Ready(model)
+            } else {
+                ModelWarmupState::Failed(model)
+            };
+            self.changed.notify_all();
+        }
+    }
+
+    pub fn is_ready_for(&self, model: &str) -> bool {
+        let state = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        matches!(&*state, ModelWarmupState::Ready(current) if current == model)
+    }
+
+    pub fn is_loading(&self) -> bool {
+        let state = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        matches!(&*state, ModelWarmupState::Warming(_))
+    }
+
+    fn wait_until_ready_for(&self, model: &str, timeout: Duration) -> Result<(), ClientError> {
+        let mut state = self.state.lock().map_err(|_| ClientError::WorkerUnavailable)?;
+        if matches!(&*state, ModelWarmupState::Ready(current) if current == model) {
+            return Ok(());
+        }
+        if matches!(&*state, ModelWarmupState::Failed(current) if current == model) {
+            return Ok(());
+        }
+        let (guard, wait_result) = self
+            .changed
+            .wait_timeout_while(state, timeout, |state| {
+                matches!(state, ModelWarmupState::Warming(current) if current == model)
+            })
+            .map_err(|_| ClientError::WorkerUnavailable)?;
+        state = guard;
+        if wait_result.timed_out()
+            && matches!(&*state, ModelWarmupState::Warming(current) if current == model)
+        {
+            return Err(ClientError::Timeout {
+                request_id: "warm-up".into(),
+                timeout_ms: timeout.as_millis().try_into().unwrap_or(u64::MAX),
+            });
+        }
+        Ok(())
+    }
 }
 
 pub trait TerminalStatusWriter {
@@ -654,6 +1015,8 @@ impl AppState {
         storage: Storage,
         python: impl Into<PythonExecutable>,
         worker_path: impl Into<PathBuf>,
+        worker_log: impl Into<PathBuf>,
+        model_home: impl Into<PathBuf>,
     ) -> Self {
         let settings = storage
             .get_setting::<AppSettings>("app")
@@ -667,10 +1030,13 @@ impl AppState {
             worker: Arc::new(Mutex::new(None)),
             target_window: Arc::new(Mutex::new(None)),
             settings: Arc::new(RwLock::new(settings)),
+            model_warm: Arc::new(ModelWarmup::default()),
             lifecycle: Arc::new(Mutex::new(())),
             settings_update: Arc::new(Mutex::new(())),
             python: python.into(),
             worker_path: worker_path.into(),
+            worker_log: worker_log.into(),
+            model_home: model_home.into(),
         }
     }
 
@@ -686,8 +1052,33 @@ impl AppState {
                 .read()
                 .map_err(|_| "settings lock poisoned")?
                 .clone(),
+            model_loading: self.model_warm.is_loading(),
         })
     }
+
+    fn show_overlay(&self) -> bool {
+        self.settings
+            .read()
+            .map(|settings| settings.show_overlay)
+            .unwrap_or(true)
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct OverlayPosition {
+    pub x: i32,
+    pub y: i32,
+}
+
+/// Remembered overlay position, so the user can move the pill like in
+/// Superwhisper and it stays where they left it.
+fn overlay_position(state: &AppState) -> Option<(i32, i32)> {
+    state
+        .storage
+        .get_setting::<OverlayPosition>("overlay_position")
+        .ok()
+        .flatten()
+        .map(|position| (position.x, position.y))
 }
 
 struct TauriShortcutSettings<'a> {
@@ -745,6 +1136,59 @@ fn epoch_ms() -> i64 {
         .unwrap_or(i64::MAX)
 }
 
+pub fn warm_up_model(app: &AppHandle, state: &AppState) {
+    let warm = state.model_warm.clone();
+    let worker = state.worker.clone();
+    let python = state.python.clone();
+    let worker_path = state.worker_path.clone();
+    let worker_log = state.worker_log.clone();
+    let model_home = state.model_home.clone();
+    let model = state
+        .settings
+        .read()
+        .map(|settings| settings.model.clone())
+        .unwrap_or_else(|_| default_model());
+    // Model loading must never turn into an implicit network download. The
+    // explicit model action owns installation; warm-up only uses a complete
+    // local snapshot.
+    if model_status_from_local(&state.model_home, &model).state != ModelStatusState::Ready {
+        return;
+    }
+    if warm.is_ready_for(&model) {
+        return;
+    }
+    let warm_model = model.clone();
+    warm.begin_for(model.clone());
+    emit_state(app, state);
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    let worker_slot = worker.clone();
+    std::thread::spawn(move || {
+        let result = (|| -> Result<(), ClientError> {
+            let mut client = WorkerClient::spawn_with_model_home(
+                python,
+                worker_path,
+                Duration::from_secs(240),
+                Some(&worker_log),
+                Some(&model_home),
+            )?;
+            client.load(Some(warm_model.clone()))?;
+            *worker_slot
+                .lock()
+                .map_err(|_| ClientError::WorkerUnavailable)? = Some(client);
+            Ok(())
+        })();
+        let _ = sender.send(result);
+    });
+    let emit_app = app.clone();
+    let emit_state_after = state.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let result = receiver.recv_timeout(Duration::from_secs(300));
+        let ready = matches!(result, Ok(Ok(())));
+        warm.finish_for(model, ready);
+        emit_state(&emit_app, &emit_state_after);
+    });
+}
+
 fn emit_state(app: &AppHandle, state: &AppState) {
     if let Ok(snapshot) = state.snapshot() {
         let _ = app.emit("dictation://state", snapshot);
@@ -754,6 +1198,15 @@ fn emit_state(app: &AppHandle, state: &AppState) {
 #[tauri::command]
 pub fn get_app_snapshot(state: State<'_, AppState>) -> Result<AppSnapshot, String> {
     state.snapshot()
+}
+
+pub fn set_input_device(state: &AppState, device: String) {
+    let mut settings = state
+        .settings
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    settings.input_device = (!device.is_empty()).then_some(device);
+    let _ = state.storage.set_setting("app", &*settings);
 }
 
 #[tauri::command]
@@ -768,6 +1221,18 @@ pub fn start_recording_inner(app: &AppHandle, state: &AppState) -> Result<AppSna
     let _lifecycle = lifecycle_guard(&state.lifecycle).map_err(|error| error.to_string())?;
     if !matches!(state.snapshot()?.dictation, DictationState::Idle) {
         return Err(CoordinatorError::InvalidState.to_string());
+    }
+    let selected_model = state
+        .settings
+        .read()
+        .map_err(|_| "settings lock poisoned")?
+        .model
+        .clone();
+    let model_status = model_status_from_local(&state.model_home, &selected_model);
+    if model_status.state != ModelStatusState::Ready {
+        return Err(model_status
+            .message
+            .unwrap_or_else(|| "Najpierw pobierz wybrany model.".into()));
     }
     let mut windows = SystemWindows;
     let target = windows.foreground_window();
@@ -807,7 +1272,11 @@ pub fn start_recording_inner(app: &AppHandle, state: &AppState) -> Result<AppSna
         .map_err(|_| "coordinator lock poisoned")?
         .started(started.id, audio_path)
         .map_err(|error| error.to_string())?;
-    platform::show_overlay_without_focus(app).map_err(|error| error.to_string())?;
+    if state.show_overlay() {
+        platform::show_overlay_without_focus(app, overlay_position(&state))
+            .map_err(|error| error.to_string())?;
+    }
+    crate::sound::play_recording_started();
     emit_state(app, state);
     state.snapshot()
 }
@@ -815,6 +1284,23 @@ pub fn start_recording_inner(app: &AppHandle, state: &AppState) -> Result<AppSna
 #[tauri::command]
 pub fn start_recording(app: AppHandle, state: State<'_, AppState>) -> Result<AppSnapshot, String> {
     start_recording_inner(&app, &state)
+}
+
+#[tauri::command]
+pub fn hide_overlay(app: AppHandle) {
+    platform::hide_overlay(&app);
+}
+
+#[tauri::command]
+pub fn save_overlay_position(
+    x: i32,
+    y: i32,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    state
+        .storage
+        .set_setting("overlay_position", &OverlayPosition { x, y })
+        .map_err(|error| error.to_string())
 }
 
 pub async fn stop_recording_inner(app: AppHandle, state: AppState) -> Result<AppSnapshot, String> {
@@ -833,6 +1319,7 @@ pub async fn stop_recording_inner(app: AppHandle, state: AppState) -> Result<App
             return Err(error);
         }
     };
+    crate::sound::play_recording_stopped();
     emit_state(&app, &state);
     let snapshot = state.snapshot()?;
     let background_app = app.clone();
@@ -852,6 +1339,10 @@ pub async fn stop_recording_inner(app: AppHandle, state: AppState) -> Result<App
 fn stop_recording_committed(state: &AppState) -> Result<CompletedRecording, String> {
     let (recording_id, audio_path_string) = match state.snapshot()?.dictation {
         DictationState::Recording {
+            recording_id,
+            audio_path,
+        }
+        | DictationState::Cancelling {
             recording_id,
             audio_path,
         } => (recording_id, audio_path),
@@ -944,15 +1435,35 @@ async fn transcribe_recording(
     let worker = state.worker.clone();
     let python = state.python.clone();
     let worker_path = state.worker_path.clone();
+    let worker_log = state.worker_log.clone();
+    let model_home = state.model_home.clone();
     let audio_for_worker = audio_path.clone();
+    let warm = state.model_warm.clone();
+    let model = state
+        .settings
+        .read()
+        .map(|settings| settings.model.clone())
+        .unwrap_or_else(|_| default_model());
     let outcome = tauri::async_runtime::spawn_blocking(move || {
-        let existing = worker
+        warm.wait_until_ready_for(&model, Duration::from_secs(240))?;
+        let mut existing = worker
             .lock()
             .map_err(|_| ClientError::WorkerUnavailable)?
             .take();
+        if let Some(client) = existing.as_ref() {
+            if client.model().is_some_and(|loaded| loaded != model) {
+                existing = None;
+            }
+        }
         let mut client = match existing {
             Some(client) => client,
-            None => WorkerClient::spawn(python, worker_path, Duration::from_secs(120))?,
+            None => WorkerClient::spawn_with_model_home(
+                python,
+                worker_path,
+                Duration::from_secs(120),
+                Some(&worker_log),
+                Some(&model_home),
+            )?,
         };
         let result = client.transcribe(audio_for_worker, None);
         let must_respawn = matches!(
@@ -1027,6 +1538,7 @@ fn finish_success(
         },
     );
     if durable.is_ok() {
+        crate::sound::play_transcription_ready();
         platform::hide_overlay(app);
     } else {
         if let Err(error) = durable {
@@ -1077,6 +1589,10 @@ pub fn cancel_recording_inner(app: &AppHandle, state: &AppState) -> Result<AppSn
         DictationState::Recording {
             recording_id,
             audio_path,
+        }
+        | DictationState::Cancelling {
+            recording_id,
+            audio_path,
         } => (recording_id, audio_path),
         _ => return Err(CoordinatorError::InvalidState.to_string()),
     };
@@ -1124,8 +1640,50 @@ pub fn cancel_recording_inner(app: &AppHandle, state: &AppState) -> Result<AppSn
         .cancel()
         .map_err(|error| error.to_string())?;
     platform::hide_overlay(app);
+    platform::restore_foreground_to(
+        app,
+        state.target_window.lock().ok().and_then(|target| *target),
+    );
     emit_state(app, state);
     state.snapshot()
+}
+
+#[tauri::command]
+pub fn request_cancel(app: AppHandle, state: State<'_, AppState>) -> Result<AppSnapshot, String> {
+    request_cancel_inner(&app, &state)
+}
+
+pub fn request_cancel_inner(app: &AppHandle, state: &AppState) -> Result<AppSnapshot, String> {
+    let _lifecycle = lifecycle_guard(&state.lifecycle).map_err(|error| error.to_string())?;
+    match state.snapshot()?.dictation {
+        DictationState::Recording { .. } => {
+            state
+                .machine
+                .lock()
+                .map_err(|_| "coordinator lock poisoned")?
+                .request_cancel()
+                .map_err(|error| error.to_string())?;
+            platform::show_overlay_with_focus(app, overlay_position(state))
+                .map_err(|error| error.to_string())?;
+            emit_state(app, state);
+            state.snapshot()
+        }
+        DictationState::Cancelling { .. } => {
+            state
+                .machine
+                .lock()
+                .map_err(|_| "coordinator lock poisoned")?
+                .request_cancel()
+                .map_err(|error| error.to_string())?;
+            platform::restore_foreground_to(
+                app,
+                state.target_window.lock().ok().and_then(|target| *target),
+            );
+            emit_state(app, state);
+            state.snapshot()
+        }
+        _ => state.snapshot(),
+    }
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -1152,6 +1710,18 @@ pub fn retry_transcription(
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "recording not found".to_owned())?;
         let audio_path = retry_audio_path(&recording).map_err(|error| error.to_string())?;
+        let selected_model = state
+            .settings
+            .read()
+            .map_err(|_| "settings lock poisoned")?
+            .model
+            .clone();
+        if let Some(message) = (model_status_from_local(&state.model_home, &selected_model).state
+            != ModelStatusState::Ready)
+            .then(|| format!("Wybrany model nie jest gotowy. Pobierz go przed ponowieniem: {selected_model}."))
+        {
+            return Err(message);
+        }
         match state.storage.mark_retrying(&recording_id) {
             Ok(true) => {}
             Ok(false) => return Err("recording disappeared before retry".into()),
@@ -1229,7 +1799,7 @@ pub async fn toggle_recording(app: AppHandle, state: AppState) -> Result<(), Str
         DictationState::Idle => {
             start_recording_inner(&app, &state)?;
         }
-        DictationState::Recording { .. } => {
+        DictationState::Recording { .. } | DictationState::Cancelling { .. } => {
             stop_recording_inner(app, state).await?;
         }
         DictationState::Failed { .. } => {
@@ -1260,6 +1830,106 @@ pub fn list_history(
 #[tauri::command(rename_all = "camelCase")]
 pub fn delete_history(recording_id: String, state: State<'_, AppState>) -> Result<bool, AppError> {
     delete_history_safely(&state.machine, state.storage.as_ref(), &recording_id)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn play_recording(
+    recording_id: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let recording = state
+        .storage
+        .get_recording(&recording_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "recording not found".to_owned())?;
+    let Some(audio_path) = recording.audio_path else {
+        return Err("nagranie nie ma zapisanego audio".into());
+    };
+    let path = PathBuf::from(&audio_path);
+    if !path.is_file() {
+        return Err(format!("brak pliku audio: {}", path.display()));
+    }
+    if path.extension().and_then(|extension| extension.to_str()) != Some("wav") {
+        return Err("obsługiwane są tylko lokalne pliki WAV".into());
+    }
+    tauri::async_runtime::spawn_blocking(move || crate::sound::play_file(&path))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn correct_transcript(
+    recording_id: String,
+    text: String,
+    state: State<'_, AppState>,
+) -> Result<usize, String> {
+    let recording = state
+        .storage
+        .get_recording(&recording_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "recording not found".to_owned())?;
+    let previous = recording.text.unwrap_or_default();
+    let learned = learn_vocabulary(&previous, &text, |heard, replacement| {
+        state
+            .storage
+            .add_vocabulary(heard, replacement)
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    })?;
+    state
+        .storage
+        .update_status(&recording_id, RecordingStatus::Completed, Some(&text), None, None, None)
+        .map_err(|error| error.to_string())?;
+    Ok(learned)
+}
+
+fn learn_vocabulary(
+    previous: &str,
+    corrected: &str,
+    mut add: impl FnMut(&str, &str) -> Result<(), String>,
+) -> Result<usize, String> {
+    let previous_words = tokenize_words(previous);
+    let corrected_words = tokenize_words(corrected);
+    let mut learned = 0;
+    for corrected_word in &corrected_words {
+        let lower = corrected_word.to_lowercase();
+        if lower.chars().all(|c| c.is_ascii_alphanumeric()) && lower.len() > 2 {
+            let matches_previous = previous_words.iter().any(|previous_word| {
+                previous_word.to_lowercase() == lower
+                    || levenshtein_words(previous_word, corrected_word) <= 1
+            });
+            if !matches_previous {
+                add(&lower, corrected_word)?;
+                learned += 1;
+            }
+        }
+    }
+    Ok(learned)
+}
+
+fn tokenize_words(text: &str) -> Vec<String> {
+    text.split(|c: char| !c.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+fn levenshtein_words(left: &str, right: &str) -> usize {
+    let left = left.chars().collect::<Vec<_>>();
+    let right = right.chars().collect::<Vec<_>>();
+    let mut previous = (0..=right.len()).collect::<Vec<_>>();
+    let mut current = vec![0; right.len() + 1];
+    for (i, lc) in left.iter().enumerate() {
+        current[0] = i + 1;
+        for (j, rc) in right.iter().enumerate() {
+            let cost = if lc == rc { 0 } else { 1 };
+            current[j + 1] = (previous[j + 1] + 1)
+                .min(current[j] + 1)
+                .min(previous[j] + cost);
+        }
+        std::mem::swap(&mut previous, &mut current);
+    }
+    previous[right.len()]
 }
 
 fn delete_history_safely(
@@ -1449,24 +2119,221 @@ pub fn get_settings(state: State<'_, AppState>) -> Result<AppSettings, String> {
         .map_err(|_| "settings lock poisoned".into())
 }
 
+/// Returns the primary OS UI language subtag, lowercase ("pl" or "en"),
+/// falling back to "en" when the OS language is unknown or unsupported.
+fn platform_ui_language() -> String {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Globalization::GetUserDefaultUILanguage;
+        let langid = unsafe { GetUserDefaultUILanguage() };
+        let primary = langid & 0x3FF;
+        return match primary {
+            0x15 => "pl".to_string(), // LANG_POLISH
+            0x09 => "en".to_string(), // LANG_ENGLISH
+            _ => "en".to_string(),
+        };
+    }
+    #[cfg(not(windows))]
+    {
+        let locale = std::env::var("LC_ALL")
+            .or_else(|_| std::env::var("LANG"))
+            .unwrap_or_default();
+        let language = locale
+            .split('.')
+            .next()
+            .unwrap_or("")
+            .split('_')
+            .next()
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        return match language.as_str() {
+            "pl" => "pl".to_string(),
+            "en" => "en".to_string(),
+            _ => "en".to_string(),
+        };
+    }
+}
+
 #[tauri::command]
-pub fn get_model_status() -> ModelStatus {
-    let explicit_hub = std::env::var("HUGGINGFACE_HUB_CACHE").ok();
-    let hf_home = std::env::var("HF_HOME").ok();
-    let user_home = std::env::var_os("USERPROFILE")
-        .or_else(|| std::env::var_os("HOME"))
-        .map(PathBuf::from);
-    let Some(user_home) = user_home else {
+pub fn system_locale() -> Result<String, String> {
+    Ok(platform_ui_language())
+}
+
+/// Resolves the OS UI language to a static subtag ("pl" or "en"), sharing the
+/// exact same detection logic as the `system_locale` command.
+pub fn system_lang() -> &'static str {
+    match platform_ui_language().as_str() {
+        "pl" => "pl",
+        _ => "en",
+    }
+}
+
+#[tauri::command]
+pub fn list_models(state: State<'_, AppState>) -> Vec<ModelDescriptor> {
+    model_descriptors()
+        .into_iter()
+        .map(|mut descriptor| {
+            let status = model_status_from_local(&state.model_home, &descriptor.key);
+            let snapshot = local_model_snapshot_path(&state.model_home, &descriptor.key);
+            descriptor.status = status.state;
+            descriptor.message = status.message;
+            descriptor.installed_size_bytes = snapshot_size_bytes(&snapshot)
+                .ok()
+                .filter(|size| *size > 0);
+            descriptor
+        })
+        .collect()
+}
+
+#[tauri::command]
+pub async fn download_model(
+    model: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    if !is_supported_model(&model) {
+        return Err(format!("Nieznany model: {model}."));
+    }
+    let python = state.python.clone();
+    let model_home = state.model_home.clone();
+    let engine_dir = state
+        .worker_path
+        .parent()
+        .ok_or_else(|| "Nie można ustalić katalogu silnika.".to_string())?
+        .to_path_buf();
+    let script = engine_dir.join("download_model.py");
+    if !script.is_file() {
+        return Err(format!(
+            "Nie znaleziono skryptu pobierania: {}",
+            script.display()
+        ));
+    }
+    emit_model_progress(&app, &model, "preparing", 0, None);
+    let verification_model = model.clone();
+    let verification_home = model_home.clone();
+    let progress_app = app.clone();
+    let progress_model = model.clone();
+    let output = tauri::async_runtime::spawn_blocking(move || {
+        let mut command = std::process::Command::new(&python.program);
+        no_console(
+            command
+                .args(&python.args)
+                .arg("-X")
+                .arg("utf8")
+                .arg(&script)
+                .arg("--model")
+                .arg(&model)
+                .arg("--local-dir")
+                .arg(&model_home)
+                .current_dir(&engine_dir),
+        );
+        command.stdout(std::process::Stdio::piped());
+        command.stderr(std::process::Stdio::piped());
+        let mut child = command.spawn().map_err(|error| error.to_string())?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| "Nie można odczytać postępu pobierania.".to_string())?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| "Nie można odczytać błędu pobierania.".to_string())?;
+        let stderr_thread = std::thread::spawn(move || {
+            let mut output = String::new();
+            let mut reader = BufReader::new(stderr);
+            let _ = reader.read_to_string(&mut output);
+            output
+        });
+        let reader = BufReader::new(stdout);
+        for line in reader.lines().map_while(Result::ok) {
+            let Ok(progress) = serde_json::from_str::<WorkerDownloadProgress>(&line) else {
+                continue;
+            };
+            if progress.event == "progress" {
+                emit_model_progress(
+                    &progress_app,
+                    &progress_model,
+                    "downloading",
+                    progress.downloaded_bytes,
+                    progress.total_bytes,
+                );
+            }
+        }
+        let status = child.wait().map_err(|error| error.to_string())?;
+        let stderr = stderr_thread
+            .join()
+            .map_err(|_| "Nie można odczytać błędu pobierania.".to_string())?;
+        Ok::<_, String>((status, stderr))
+    })
+    .await
+    .map_err(|error| error.to_string())??;
+    let (status, stderr) = output;
+    if !status.success() {
+        return if stderr.contains("gated repo")
+            || stderr.contains("GatedRepoError")
+            || stderr.contains("401")
+        {
+            Err("Model jest ograniczony (gated) na Hugging Face. "
+                .to_string()
+                + "Zaloguj się przez `huggingface-cli login`, zaakceptuj warunki "
+                + "na stronie modelu i spróbuj ponownie.")
+        } else {
+            Err(stderr.lines().last().unwrap_or(&stderr).trim().to_owned())
+        };
+    }
+    emit_model_progress(&app, &verification_model, "validating", 0, None);
+    let status = model_status_from_local(&verification_home, &verification_model);
+    if status.state == ModelStatusState::Ready {
+        Ok(())
+    } else {
+        Err(status
+            .message
+            .unwrap_or_else(|| "Pobieranie zakończyło się niepełnym modelem.".into()))
+    }
+}
+
+#[tauri::command]
+pub fn delete_model(model: String, state: State<'_, AppState>) -> Result<(), String> {
+    if !is_supported_model(&model) {
+        return Err(format!("Nieznany model: {model}."));
+    }
+    if !matches!(state.snapshot()?.dictation, DictationState::Idle) {
+        return Err("Zatrzymaj dyktowanie przed usunięciem modelu.".into());
+    }
+    let active_model = state
+        .settings
+        .read()
+        .map_err(|_| "settings lock poisoned")?
+        .model
+        .clone();
+    if active_model == model {
+        return Err("Najpierw wybierz inny model, aby usunąć aktualnie używany.".into());
+    }
+    let cache = state.model_home.join(&model);
+    match std::fs::remove_dir_all(&cache) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("Nie udało się usunąć modelu: {error}")),
+    }
+}
+
+#[tauri::command]
+pub fn get_model_status(state: State<'_, AppState>) -> ModelStatus {
+    let model = state
+        .settings
+        .read()
+        .map(|settings| settings.model.clone())
+        .unwrap_or_else(|_| default_model());
+    if !is_supported_model(&model) {
         return ModelStatus {
             state: ModelStatusState::Error,
-            model: MODEL_ID.into(),
-            revision: MODEL_REVISION.into(),
+            model: model.clone(),
+            revision: String::new(),
             device: None,
-            message: Some("Nie znaleziono katalogu użytkownika.".into()),
+            message: Some(format!("Nieznany model: {model}.")),
         };
-    };
-    let hub = model_cache_root(explicit_hub.as_deref(), hf_home.as_deref(), &user_home);
-    model_status_from_hub(&hub)
+    }
+    model_status_from_local(&state.model_home, &model)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -1476,6 +2343,9 @@ pub fn update_settings(
     state: State<'_, AppState>,
 ) -> Result<SettingsUpdateResult, String> {
     let retention = retention_policy(settings.retention_days)?;
+    if !is_supported_model(&settings.model) {
+        return Err(format!("Nieznany model: {}.", settings.model));
+    }
     let _update_guard = state
         .settings_update
         .lock()
@@ -1492,6 +2362,7 @@ pub fn update_settings(
         storage: state.storage.as_ref(),
         retention,
     };
+    let old_language = live.language.clone();
     let result = apply_settings_change(
         &mut shortcut_effect,
         &mut autostart_effect,
@@ -1499,10 +2370,37 @@ pub fn update_settings(
         &mut live,
         settings,
     )?;
+    let language_changed = old_language != live.language;
+    let model_changed = {
+        let current = state
+            .settings
+            .read()
+            .map_err(|_| "settings lock poisoned")?
+            .model
+            .clone();
+        current != live.model
+    };
     *state
         .settings
         .write()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = live;
+    if model_changed {
+        let _ = state
+            .worker
+            .lock()
+            .map_err(|_| "worker lock poisoned")?
+            .take();
+        warm_up_model(&app, &state);
+    }
+    if language_changed {
+        let settings_guard = state
+            .settings
+            .read()
+            .map_err(|_| "settings lock poisoned")?;
+        let locale = crate::resolved_language(&settings_guard).to_owned();
+        crate::rebuild_tray_menu(&app, &state, &locale);
+    }
+    emit_state(&app, &state);
     Ok(result)
 }
 
@@ -1769,6 +2667,56 @@ mod tests {
     }
 
     #[test]
+    fn request_cancel_arms_and_dismisses_the_confirm_prompt() {
+        let mut machine = CoordinatorMachine::default();
+        machine.started("one", "one.wav").unwrap();
+
+        machine.request_cancel().unwrap();
+        assert_eq!(
+            machine.snapshot(),
+            DictationState::Cancelling {
+                recording_id: "one".into(),
+                audio_path: "one.wav".into(),
+            }
+        );
+
+        machine.request_cancel().unwrap();
+        assert_eq!(
+            machine.snapshot(),
+            DictationState::Recording {
+                recording_id: "one".into(),
+                audio_path: "one.wav".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn cancelling_prompt_can_confirm_cancel_or_finalize() {
+        let mut machine = CoordinatorMachine::default();
+        machine.started("one", "one.wav").unwrap();
+        machine.request_cancel().unwrap();
+
+        machine.cancel().unwrap();
+        assert_eq!(machine.snapshot(), DictationState::Idle);
+    }
+
+    #[test]
+    fn cancelling_prompt_can_finalize_instead_of_cancelling() {
+        let mut machine = CoordinatorMachine::default();
+        machine.started("one", "one.wav").unwrap();
+        machine.request_cancel().unwrap();
+
+        machine.stopped().unwrap();
+        assert_eq!(
+            machine.snapshot(),
+            DictationState::Processing {
+                recording_id: "one".into(),
+                audio_path: "one.wav".into(),
+            }
+        );
+    }
+
+    #[test]
     fn failed_transcription_is_retryable_with_the_same_audio() {
         let recovery = RecoveryRecording {
             recording_id: "one".into(),
@@ -1809,25 +2757,47 @@ mod tests {
     }
 
     #[test]
-    fn settings_default_to_launching_on_login() {
-        assert!(AppSettings::default().launch_on_login);
+    fn settings_default_to_not_launching_on_login() {
+        assert!(!AppSettings::default().launch_on_login);
     }
 
     #[test]
-    fn settings_from_older_versions_default_to_clean_mode() {
+    fn settings_from_older_versions_default_to_clean_mode_and_opt_out_of_login() {
         let settings: AppSettings = serde_json::from_value(serde_json::json!({
             "inputDevice": null,
             "shortcut": "Ctrl+Space",
             "autoPaste": true,
-            "retentionDays": 30,
-            "launchOnLogin": true
+            "retentionDays": 30
         }))
         .unwrap();
 
         assert_eq!(settings.active_mode, "clean");
+        assert!(!settings.launch_on_login);
         assert_eq!(
             serde_json::to_value(settings).unwrap()["activeMode"],
             serde_json::json!("clean")
+        );
+    }
+
+    #[test]
+    fn settings_from_older_versions_default_to_system_theme_and_language() {
+        let settings: AppSettings = serde_json::from_value(serde_json::json!({
+            "inputDevice": null,
+            "shortcut": "Ctrl+Space",
+            "autoPaste": true,
+            "retentionDays": 30
+        }))
+        .unwrap();
+
+        assert_eq!(settings.theme, ThemeChoice::System);
+        assert_eq!(settings.language, LanguageChoice::System);
+        assert_eq!(
+            serde_json::to_value(&settings).unwrap()["theme"],
+            serde_json::json!("system")
+        );
+        assert_eq!(
+            serde_json::to_value(&settings).unwrap()["language"],
+            serde_json::json!("system")
         );
     }
 
@@ -2420,5 +3390,108 @@ mod tests {
         assert_eq!(autostart.enabled, new.launch_on_login);
         assert_eq!(store.saved, new);
         assert_eq!(live, new);
+    }
+
+    #[test]
+    fn model_warmup_waits_for_background_ready() {
+        let warm = std::sync::Arc::new(ModelWarmup::default());
+        warm.begin_for("parakeet".into());
+        let guard = warm.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(30));
+            guard.finish_for("parakeet".into(), true);
+        });
+
+        warm.wait_until_ready_for("parakeet", Duration::from_secs(2))
+            .unwrap();
+        assert!(warm.is_ready_for("parakeet"));
+    }
+
+    #[test]
+    fn model_warmup_marks_failure_and_does_not_block_transcription() {
+        let warm = ModelWarmup::default();
+        warm.begin_for("parakeet".into());
+        warm.finish_for("parakeet".into(), false);
+
+        warm.wait_until_ready_for("parakeet", Duration::from_secs(2))
+            .unwrap();
+        assert!(!warm.is_ready_for("parakeet"));
+    }
+
+    #[test]
+    fn model_warmup_already_ready_returns_immediately() {
+        let warm = ModelWarmup::default();
+        warm.begin_for("parakeet".into());
+        warm.finish_for("parakeet".into(), true);
+
+        warm.wait_until_ready_for("parakeet", Duration::from_millis(1))
+            .unwrap();
+        assert!(warm.is_ready_for("parakeet"));
+    }
+
+    #[test]
+    fn model_warmup_times_out_while_still_warming() {
+        let warm = ModelWarmup::default();
+        warm.begin_for("parakeet".into());
+
+        let error = warm
+            .wait_until_ready_for("parakeet", Duration::from_millis(20))
+            .unwrap_err();
+
+        assert!(matches!(error, ClientError::Timeout { .. }));
+    }
+
+    #[test]
+    fn model_warmup_rewarms_when_model_changes() {
+        let warm = std::sync::Arc::new(ModelWarmup::default());
+        warm.begin_for("parakeet".into());
+        warm.finish_for("parakeet".into(), true);
+        assert!(warm.is_ready_for("parakeet"));
+
+        warm.begin_for("whisper-turbo".into());
+        let guard = warm.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            guard.finish_for("whisper-turbo".into(), true);
+        });
+
+        assert!(!warm.is_ready_for("whisper-turbo"));
+        warm.wait_until_ready_for("whisper-turbo", Duration::from_secs(2))
+            .unwrap();
+        assert!(warm.is_ready_for("whisper-turbo"));
+    }
+
+    #[test]
+    fn learn_vocabulary_adds_only_new_words_as_replacements() {
+        let mut learned: Vec<(String, String)> = Vec::new();
+        let count = learn_vocabulary(
+            "uruchom parakeet i zobacz wynik",
+            "uruchom Parakeet i zobacz rezultat",
+            |heard, replacement| {
+                learned.push((heard.to_owned(), replacement.to_owned()));
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(count, 1);
+        assert_eq!(learned, vec![("rezultat".to_owned(), "rezultat".to_owned())]);
+    }
+
+    #[test]
+    fn learn_vocabulary_ignores_identical_and_short_words() {
+        let mut learned: Vec<(String, String)> = Vec::new();
+        let count = learn_vocabulary(
+            "idzmy do domu",
+            "idzmy do domu teraz",
+            |heard, replacement| {
+                learned.push((heard.to_owned(), replacement.to_owned()));
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(count, 1);
+        assert_eq!(learned, vec![("teraz".to_owned(), "teraz".to_owned())]);
     }
 }

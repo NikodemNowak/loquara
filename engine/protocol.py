@@ -18,12 +18,78 @@ SAMPLE_RATE = 16_000
 
 
 @dataclass(frozen=True)
+class ModelSpec:
+    key: str
+    id: str
+    revision: str | None
+    kind: str  # "pipeline" | "cohere"
+    display: str
+    min_vram_gb: float
+    min_ram_gb: float
+    languages: str
+
+
+MODELS: dict[str, ModelSpec] = {
+    "parakeet": ModelSpec(
+        key="parakeet",
+        id="nvidia/parakeet-tdt-0.6b-v3",
+        revision="7c35754d166cca382ad1e53e68b01e7c575f3a1d",
+        kind="pipeline",
+        display="Parakeet TDT 0.6B v3",
+        min_vram_gb=3.0,
+        min_ram_gb=8.0,
+        languages="auto (PL/EN)",
+    ),
+    "whisper-turbo": ModelSpec(
+        key="whisper-turbo",
+        id="openai/whisper-large-v3-turbo",
+        revision="41f01f3fe87f28c78e2fbf8b568835947dd65ed9",
+        kind="pipeline",
+        display="Whisper Large v3 Turbo",
+        min_vram_gb=4.0,
+        min_ram_gb=8.0,
+        languages="auto (99)",
+    ),
+    "whisper-small": ModelSpec(
+        key="whisper-small",
+        id="openai/whisper-small",
+        revision="973afd24965f72e36ca33b3055d56a652f456b4d",
+        kind="pipeline",
+        display="Whisper Small",
+        min_vram_gb=1.5,
+        min_ram_gb=4.0,
+        languages="auto (99)",
+    ),
+    "cohere": ModelSpec(
+        key="cohere",
+        id="AEmotionStudio/cohere-transcribe-03-2026-models",
+        revision="d114f701a80b2150943f5dbae71458f4d1fcb37b",
+        kind="cohere",
+        display="Cohere Transcribe 2B",
+        min_vram_gb=5.0,
+        min_ram_gb=8.0,
+        languages="pl/en/fr/de/...",
+    ),
+}
+
+DEFAULT_MODEL_KEY = "parakeet"
+
+
+def model_spec(key: str | None) -> ModelSpec:
+    return MODELS.get(key or "", MODELS[DEFAULT_MODEL_KEY])
+
+
+@dataclass(frozen=True)
 class EngineInfo:
     model: str
     device: str
 
 
 class TranscriptionEngine(Protocol):
+    def set_model(self, spec: ModelSpec) -> None: ...
+
+    def kind(self) -> str: ...
+
     def load(self) -> EngineInfo: ...
 
     def transcribe(
@@ -93,7 +159,15 @@ def handle_line(line: str, engine: TranscriptionEngine) -> dict[str, Any]:
         return _success(request_id, {"status": "ready"})
 
     if command == "load":
+        model_key = request.get("model")
+        if model_key is not None and (not isinstance(model_key, str) or not model_key):
+            return _error(
+                request_id,
+                "invalid_request",
+                "model must be a non-empty string when provided",
+            )
         try:
+            engine.set_model(model_spec(model_key))
             info = engine.load()
         except Exception as error:  # The boundary must keep the process alive.
             return _error(request_id, "model_load_failed", str(error), True)
@@ -125,13 +199,13 @@ def handle_line(line: str, engine: TranscriptionEngine) -> dict[str, Any]:
                 "invalid_request",
                 "language must be a non-empty string when provided",
             )
-        if language is not None:
+        if language is not None and engine.kind() == "pipeline":
             return _error(
                 request_id,
                 "unsupported_language_hint",
                 (
-                    "language hints are not supported; "
-                    "Parakeet detects language automatically"
+                    "language hints are not supported for this model; "
+                    "Parakeet and Whisper detect language automatically"
                 ),
             )
 
@@ -144,7 +218,12 @@ def handle_line(line: str, engine: TranscriptionEngine) -> dict[str, Any]:
 
         try:
             info = engine.load()
-            text = engine.transcribe(audio, SAMPLE_RATE, language)
+            # ASR models often invent sentences for silence. Avoid showing
+            # hallucinated text when the microphone captured no speech.
+            if _is_effectively_silent(audio):
+                text = ""
+            else:
+                text = engine.transcribe(audio, SAMPLE_RATE, language)
         except Exception as error:  # The boundary must keep the process alive.
             return _error(request_id, "transcription_failed", str(error), True)
 
@@ -160,6 +239,14 @@ def handle_line(line: str, engine: TranscriptionEngine) -> dict[str, Any]:
         "unknown_command",
         f"unknown command: {command}",
     )
+
+
+def _is_effectively_silent(audio: NDArray[np.float32]) -> bool:
+    if audio.size == 0:
+        return True
+    peak = float(np.max(np.abs(audio)))
+    rms = float(np.sqrt(np.mean(np.square(audio))))
+    return peak < 0.02 and rms < 0.003
 
 
 def _decode_pcm(frames: bytes, sample_width: int) -> NDArray[np.float32]:

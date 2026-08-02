@@ -1,13 +1,21 @@
 import { useEffect, useState } from "react";
 
-import { Check, Mic } from "../../components/Icons";
-import { applyTheme, initialTheme } from "../../app/theme";
+import { Check, Cpu, Languages, Mic, Palette, SlidersHorizontal, Trash2 } from "../../components/Icons";
+import { BrandLogo } from "../../components/BrandLogo";
+import { applyTheme } from "../../app/theme";
 import type { ToastKind } from "../../components/Toast";
 import type { AppAdapter } from "../../lib/tauri";
-import type { AppSettings, InputDeviceInfo, ModelStatus, ThemeChoice } from "../../lib/types";
+import type { AppSettings, InputDeviceInfo, ModelDescriptor, ModelDownloadProgress, ModelStatus } from "../../lib/types";
 import { normalizeError } from "../../lib/errors";
+import { useI18n } from "../../lib/i18n";
 
 const shortcutPattern = /^(?:(?:Ctrl|Alt|Shift|Meta)\+)+(?:[A-Z0-9]|Space|Enter|F(?:[1-9]|1[0-2]))$/i;
+
+function ProviderMark({ provider }: { provider: string }) {
+  return <span className={`provider-mark provider-mark--${provider.toLowerCase()}`} aria-label={provider} title={provider}>
+    <BrandLogo provider={provider} />
+  </span>;
+}
 
 export function SettingsPage({
   adapter,
@@ -20,30 +28,42 @@ export function SettingsPage({
   onSettingsChange?: (settings: AppSettings) => void;
   onToast: (message: string, kind: ToastKind) => void;
 }) {
+  const { t } = useI18n();
   const [settings, setSettings] = useState(initialSettings);
   const [devices, setDevices] = useState<InputDeviceInfo[]>([]);
   const [deviceError, setDeviceError] = useState("");
   const [modelStatus, setModelStatus] = useState<ModelStatus>();
-  const [theme, setTheme] = useState<ThemeChoice>(initialTheme);
+  const [models, setModels] = useState<ModelDescriptor[]>([]);
+  const [systemMemory, setSystemMemory] = useState<{ vramGb: number; ramGb: number; cpuCores: number }>({ vramGb: 0, ramGb: 0, cpuCores: 0 });
   const [shortcutError, setShortcutError] = useState("");
   const [saving, setSaving] = useState(false);
+  const [downloading, setDownloading] = useState("");
+  const [deleting, setDeleting] = useState("");
+  const [downloadProgress, setDownloadProgress] = useState<ModelDownloadProgress>();
+
+  const formatBytes = (bytes: number | null | undefined) => {
+    if (!bytes) return t("settings.models.notDownloadedBytes");
+    const units = ["B", "KB", "MB", "GB", "TB"];
+    let value = bytes;
+    let unit = 0;
+    while (value >= 1000 && unit < units.length - 1) {
+      value /= 1000;
+      unit += 1;
+    }
+    return `${value >= 10 || unit === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[unit]}`;
+  };
 
   useEffect(() => setSettings(initialSettings), [initialSettings]);
-  const loadDevices = async () => {
-    setDeviceError("");
-    try {
-      setDevices(await adapter.listInputDevices());
-    } catch (error) {
-      setDeviceError(`Nie udało się wczytać mikrofonów: ${normalizeError(error)}`);
-    }
-  };
   useEffect(() => {
     let active = true;
     void adapter.listInputDevices()
       .then((loaded) => { if (active) setDevices(loaded); })
       .catch((error) => {
-        if (active) setDeviceError(`Nie udało się wczytać mikrofonów: ${normalizeError(error)}`);
+        if (active) setDeviceError(t("settings.mic.error", { error: normalizeError(error) }));
       });
+    void adapter.listModels()
+      .then((loaded) => { if (active) setModels(loaded); })
+      .catch(() => {});
     void adapter.getModelStatus()
       .then((status) => { if (active) setModelStatus(status); })
       .catch((error) => {
@@ -55,16 +75,38 @@ export function SettingsPage({
           message: normalizeError(error),
         });
       });
+    void (async () => {
+      const ramGb = (navigator as unknown as { deviceMemory?: number }).deviceMemory ?? 0;
+      const vramGb = 0;
+      if (active) setSystemMemory({ vramGb, ramGb, cpuCores: navigator.hardwareConcurrency ?? 0 });
+    })();
     return () => { active = false; };
+  }, [adapter, settings.model, t]);
+  useEffect(() => {
+    let active = true;
+    let unlisten: (() => void) | undefined;
+    void adapter.onModelProgress((progress) => {
+      if (active) setDownloadProgress(progress);
+    }).then((dispose) => {
+      if (active) unlisten = dispose;
+      else dispose();
+    });
+    return () => {
+      active = false;
+      unlisten?.();
+    };
   }, [adapter]);
   useEffect(() => {
-    applyTheme(theme);
-    if (theme !== "system" || !window.matchMedia) return;
+    applyTheme(initialSettings.theme);
+  }, [initialSettings.theme]);
+  useEffect(() => {
+    applyTheme(settings.theme);
+    if (settings.theme !== "system" || !window.matchMedia) return;
     const media = window.matchMedia("(prefers-color-scheme: dark)");
     const update = () => applyTheme("system");
     media.addEventListener?.("change", update);
     return () => media.removeEventListener?.("change", update);
-  }, [theme]);
+  }, [settings.theme]);
 
   const save = async (next: AppSettings) => {
     const previous = settings;
@@ -78,7 +120,7 @@ export function SettingsPage({
       if (result.warning) onToast(result.warning, "info");
     } catch (error) {
       setSettings(previous);
-      onToast(`Nie zapisano zmiany: ${normalizeError(error)}`, "error");
+      onToast(t("settings.saveError", { error: normalizeError(error) }), "error");
     } finally {
       setSaving(false);
     }
@@ -86,39 +128,125 @@ export function SettingsPage({
 
   const changeShortcut = (shortcut: string) => {
     setSettings((current) => ({ ...current, shortcut }));
-    setShortcutError(shortcutPattern.test(shortcut) ? "" : "Użyj modyfikatora i klawisza, np. Ctrl+Space.");
+    setShortcutError(shortcutPattern.test(shortcut) ? "" : t("settings.shortcut.error"));
   };
+
+  const download = async (key: string) => {
+    setDownloading(key);
+    setDownloadProgress({ model: key, phase: "preparing", downloadedBytes: 0, totalBytes: null });
+    try {
+      await adapter.downloadModel(key);
+      const loaded = await adapter.listModels();
+      setModels(loaded);
+      const status = await adapter.getModelStatus();
+      setModelStatus(status);
+      onToast(t("settings.models.downloadedToast", { model: models.find((model) => model.key === key)?.display ?? key }), "success");
+    } catch (error) {
+      onToast(t("settings.models.downloadError", { error: normalizeError(error) }), "error");
+    } finally {
+      setDownloading("");
+      setDownloadProgress(undefined);
+    }
+  };
+
+  const remove = async (model: ModelDescriptor) => {
+    if (!window.confirm(t("settings.models.removeConfirm", { model: model.display }))) return;
+    setDeleting(model.key);
+    try {
+      await adapter.deleteModel(model.key);
+      setModels(await adapter.listModels());
+      onToast(t("settings.models.removedToast", { model: model.display }), "success");
+    } catch (error) {
+      onToast(t("settings.models.removeError", { error: normalizeError(error) }), "error");
+    } finally {
+      setDeleting("");
+    }
+  };
+
+  const selectedModel = models.find((model) => model.key === settings.model);
+  const selectedState = modelStatus?.state ?? selectedModel?.status;
+  const selectedStatusLabel = !models.length
+    ? t("settings.models.checking")
+    : selectedState === "ready"
+      ? t("common.ready")
+      : selectedState === "error"
+        ? t("common.error")
+        : t("settings.models.notInstalled");
 
   return (
     <section className="page settings-page">
-      <header className="page-header"><div><p className="eyebrow">Dopasuj Mów</p><h1>Ustawienia</h1><p>Sprzęt, skrót, zachowanie i wygląd.</p></div></header>
+       <header className="page-header"><div><p className="eyebrow">Loquara</p><h1>{t("settings.title")}</h1><p>{t("settings.subtitle")}</p></div></header>
       <div className="settings-layout">
         <div className="settings-column">
           <section className="settings-group">
-            <div className="group-heading"><Mic size={18} /><div><h2>Nagrywanie</h2><p>Źródło dźwięku i skrót globalny</p></div></div>
-            <label className="setting-row"><span><strong>Mikrofon</strong><small>{deviceError || "Urządzenie używane do dyktowania"}</small>{deviceError && <button type="button" className="inline-retry" aria-label="Spróbuj ponownie" onClick={() => void loadDevices()}>Spróbuj ponownie</button>}</span><select disabled={saving || Boolean(deviceError)} value={settings.inputDevice ?? ""} onChange={(event) => void save({ ...settings, inputDevice: event.target.value || null })}><option value="">Domyślny systemowy</option>{devices.map((device) => <option value={device.id} key={device.id}>{device.name}</option>)}</select></label>
-            <label className="setting-row"><span><strong>Skrót klawiszowy</strong><small>{shortcutError || "Działa w każdej aplikacji"}</small></span><input disabled={saving} className={shortcutError ? "invalid" : ""} value={settings.shortcut} onChange={(event) => changeShortcut(event.target.value)} onBlur={() => !shortcutError && void save(settings)} aria-invalid={Boolean(shortcutError)} /></label>
+            <div className="group-heading"><Mic size={18} /><div><h2>{t("settings.recording.title")}</h2><p>{t("settings.recording.subtitle")}</p></div></div>
+            <label className="setting-row"><span><strong>{t("settings.mic.label")}</strong><small>{deviceError || t("settings.mic.description")}</small></span><select disabled={saving || Boolean(deviceError)} value={settings.inputDevice ?? ""} onChange={(event) => void save({ ...settings, inputDevice: event.target.value || null })}><option value="">{t("settings.mic.default")}</option>{devices.map((device) => <option value={device.id} key={device.id}>{device.name}</option>)}</select></label>
+            <label className="setting-row"><span><strong>{t("settings.shortcut.label")}</strong><small>{shortcutError || t("settings.shortcut.description")}</small></span><input disabled={saving} className={shortcutError ? "invalid" : ""} value={settings.shortcut} onChange={(event) => changeShortcut(event.target.value)} onBlur={() => !shortcutError && void save(settings)} aria-invalid={Boolean(shortcutError)} /></label>
           </section>
           <section className="settings-group">
-            <div className="group-heading"><h2>Zachowanie</h2></div>
-            <label className="setting-row"><span><strong>Wklejaj automatycznie</strong><small>Wstaw tekst do aktywnego okna</small></span><input disabled={saving} type="checkbox" checked={settings.autoPaste} aria-label="Wklejaj automatycznie" onChange={(event) => void save({ ...settings, autoPaste: event.target.checked })} /></label>
-            <label className="setting-row"><span><strong>Uruchamiaj z systemem</strong><small>Mów będzie gotowe w zasobniku</small></span><input disabled={saving} type="checkbox" checked={settings.launchOnLogin} onChange={(event) => void save({ ...settings, launchOnLogin: event.target.checked })} /></label>
-            <label className="setting-row"><span><strong>Przechowuj nagrania</strong><small>Automatyczne porządkowanie audio</small></span><select disabled={saving} value={settings.retentionDays ?? "forever"} onChange={(event) => void save({ ...settings, retentionDays: event.target.value === "forever" ? null : Number(event.target.value) as 1 | 7 | 30 })}><option value="1">1 dzień</option><option value="7">7 dni</option><option value="30">30 dni</option><option value="forever">Bezterminowo</option></select></label>
+            <div className="group-heading"><SlidersHorizontal size={18} /><div><h2>{t("settings.behavior.title")}</h2></div></div>
+            <label className="setting-row"><span><strong>{t("settings.autoPaste.label")}</strong><small>{t("settings.autoPaste.description")}</small></span><input disabled={saving} type="checkbox" checked={settings.autoPaste} aria-label={t("settings.autoPaste.label")} onChange={(event) => void save({ ...settings, autoPaste: event.target.checked })} /></label>
+            <label className="setting-row"><span><strong>{t("settings.showOverlay.label")}</strong><small>{t("settings.showOverlay.description")}</small></span><input disabled={saving} type="checkbox" checked={settings.showOverlay} aria-label={t("settings.showOverlay.label")} onChange={(event) => void save({ ...settings, showOverlay: event.target.checked })} /></label>
+             <label className="setting-row"><span><strong>{t("settings.launchOnLogin.label")}</strong><small>{t("settings.launchOnLogin.description")}</small></span><input disabled={saving} type="checkbox" checked={settings.launchOnLogin} onChange={(event) => void save({ ...settings, launchOnLogin: event.target.checked })} /></label>
+            <label className="setting-row"><span><strong>{t("settings.retention.label")}</strong><small>{t("settings.retention.description")}</small></span><select disabled={saving} value={settings.retentionDays ?? "forever"} onChange={(event) => void save({ ...settings, retentionDays: event.target.value === "forever" ? null : Number(event.target.value) as 1 | 7 | 30 })}><option value="1">{t("settings.retention.1")}</option><option value="7">{t("settings.retention.7")}</option><option value="30">{t("settings.retention.30")}</option><option value="forever">{t("settings.retention.forever")}</option></select></label>
           </section>
         </div>
         <div className="settings-column">
           <section className="settings-group">
-            <div className="group-heading"><h2>Wygląd</h2><p>Motyw interfejsu</p></div>
-            <div className="theme-segment" role="radiogroup" aria-label="Motyw">
-              {([["system", "System"], ["light", "Jasny"], ["dark", "Ciemny"]] as const).map(([value, label]) => <label key={value}><input type="radio" name="theme" checked={theme === value} onChange={() => setTheme(value)} /><span>{label}</span></label>)}
+            <div className="group-heading"><Palette size={18} /><div><h2>{t("settings.appearance.title")}</h2><p>{t("settings.appearance.subtitle")}</p></div></div>
+            <div className="theme-segment" role="radiogroup" aria-label={t("settings.theme.label")}>
+              {([["system", "settings.theme.system"], ["light", "settings.theme.light"], ["dark", "settings.theme.dark"]] as const).map(([value, label]) => <label key={value}><input type="radio" name="theme" checked={settings.theme === value} onChange={() => { applyTheme(value); void save({ ...settings, theme: value }); }} /><span>{t(label)}</span></label>)}
             </div>
           </section>
-          <section className="model-card" aria-busy={!modelStatus}>
-            <div className="model-card__top"><div><span className="model-kicker">Model lokalny</span><h2>NVIDIA Parakeet 0.6B v3</h2></div><span className={`ready-badge ready-badge--${modelStatus?.state ?? "checking"}`}>{modelStatus?.state === "ready" && <Check size={13} />}{!modelStatus ? "Sprawdzam…" : modelStatus.state === "ready" ? "Gotowy" : modelStatus.state === "not_installed" ? "Do pobrania" : "Błąd"}</span></div>
-            <p>{modelStatus?.state !== "ready" && modelStatus?.message ? modelStatus.message : "Szybka transkrypcja po polsku bez wysyłania dźwięku do chmury."}</p>
-            <div className="model-meta"><span>Urządzenie <strong>{modelStatus?.device ?? "ustalane przy starcie"}</strong></span><span>Dane <strong>tylko lokalnie</strong></span></div>
+          <section className="settings-group">
+            <div className="group-heading"><Languages size={18} /><div><h2>{t("settings.general.title")}</h2><p>{t("settings.general.subtitle")}</p></div></div>
+            <div className="theme-segment" role="radiogroup" aria-label={t("settings.language.label")}>
+              {([["system", "settings.language.system"], ["pl", "settings.language.pl"], ["en", "settings.language.en"]] as const).map(([value, label]) => <label key={value}><input type="radio" name="language" checked={settings.language === value} onChange={() => void save({ ...settings, language: value })} /><span>{t(label)}</span></label>)}
+            </div>
           </section>
-          <aside className="privacy-note"><strong>Twoje słowa zostają u Ciebie</strong><p>Audio, transkrypcje i słownik są przechowywane wyłącznie na tym komputerze.</p></aside>
+           <section className="model-card model-library" aria-busy={!models.length}>
+             <div className="model-card__top"><div><span className="model-kicker"><Cpu size={11} /> {t("settings.models.kicker")}</span><h2>{t("settings.models.heading")}</h2></div><span className={`ready-badge ready-badge--${selectedState ?? "checking"}`}>{selectedState === "ready" && <Check size={13} />}{selectedStatusLabel}</span></div>
+             <p className="model-card__intro">{t("settings.models.intro")}{downloadProgress ? <strong className="model-progress-label"> {downloadProgress.phase === "preparing" ? t("settings.models.preparingFiles") : downloadProgress.phase === "validating" ? t("settings.models.validating") : t("settings.models.downloading")}</strong> : null}</p>
+             <div className="model-library__legend"><span>{t("settings.models.legend.model")}</span><span>{t("settings.models.legend.source")}</span><span>{t("settings.models.legend.size")}</span></div>
+             <div className="model-options" role="radiogroup" aria-label={t("settings.models.kicker")}>
+               {models.map((model) => {
+                 const lacksRam = systemMemory.ramGb > 0 && model.minRamGb > systemMemory.ramGb;
+                 const disabled = lacksRam;
+                 const selected = settings.model === model.key;
+                 const isDownloading = downloading === model.key;
+                 const progress = isDownloading && downloadProgress?.model === model.key ? downloadProgress : undefined;
+                 const progressPercent = progress?.totalBytes && progress.totalBytes > 0
+                   ? Math.min(100, Math.round((progress.downloadedBytes / progress.totalBytes) * 100))
+                   : null;
+                 const isDeleting = deleting === model.key;
+                 const installed = model.status === "ready";
+                 return (
+                   <label key={model.key} className={`model-option ${selected ? "model-option--selected" : ""} ${disabled ? "model-option--disabled" : ""}`}>
+                    <input
+                      type="radio"
+                      name="model"
+                      value={model.key}
+                      checked={selected}
+                      disabled={disabled}
+                      onChange={() => void save({ ...settings, model: model.key })}
+                    />
+                     <span className="model-option__identity"><ProviderMark provider={model.provider} /><span className="model-option__name"><strong>{model.display}</strong><small>{model.provider} · {model.languages}</small></span></span>
+                     <span className="model-option__meta">
+                       <span className={`model-source model-source--${model.source}`}><i aria-hidden="true" />{model.source === "cloud" ? t("settings.models.source.cloud") : t("settings.models.source.local")}</span>
+                       <span className={`model-option__status model-option__status--${model.status}`}><i aria-hidden="true" />{model.status === "ready" ? t("settings.models.status.downloaded") : model.status === "error" ? t("common.error") : t("settings.models.status.notDownloaded")}</span>
+                       <span className="model-option__size">{installed ? formatBytes(model.installedSizeBytes) : `~${formatBytes(model.estimatedSizeBytes)}`}</span>
+                        {!installed && !disabled ? <button type="button" className={`model-download ${isDownloading ? "model-download--active" : ""}`} disabled={Boolean(downloading) || Boolean(deleting)} onClick={(event) => { event.preventDefault(); void download(model.key); }} aria-label={t("settings.models.downloadAria", { model: model.display })}>{isDownloading ? progress?.phase === "validating" ? t("settings.models.checking") : progressPercent === null ? t("settings.models.preparingShort") : `${progressPercent}%` : t("settings.models.download")}</button> : null}
+                       {installed && !selected ? <button type="button" className="model-remove" disabled={Boolean(downloading) || Boolean(deleting)} onClick={(event) => { event.preventDefault(); void remove(model); }} aria-label={t("settings.models.removeAria", { model: model.display })} title={t("settings.models.removeTitle")}>{isDeleting ? "…" : <Trash2 size={14} />}</button> : null}
+                     </span>
+                     {progress ? <span className="model-download-progress" aria-label={progressPercent === null ? t("settings.models.progress.preparing") : t("settings.models.progress.downloaded", { percent: progressPercent })}><span style={{ width: `${progressPercent ?? 4}%` }} /></span> : null}
+                   </label>
+                 );
+               })}
+             </div>
+             <div className="model-meta"><span>{t("settings.models.active")} <strong>{selectedModel?.display ?? t("settings.models.selecting")}</strong></span><span>{t("settings.models.requires")} <strong>{selectedModel ? `${selectedModel.minVramGb} GB VRAM · ${selectedModel.minRamGb} GB RAM` : t("settings.models.detecting")}</strong></span><span>{t("settings.models.thisComputer")} <strong>{systemMemory.cpuCores ? t("settings.models.cores", { cores: systemMemory.cpuCores }) : ""}{systemMemory.ramGb ? `${systemMemory.ramGb} GB RAM` : t("settings.models.ramUnknown")}</strong></span></div>
+             {(modelStatus?.message ?? selectedModel?.message) && selectedState !== "ready" ? <p className="model-card__message">{modelStatus?.message ?? selectedModel?.message}</p> : null}
+           </section>
+           <p className="privacy-line"><strong>Offline by default</strong><span>{t("settings.privacy.body")}</span></p>
         </div>
       </div>
     </section>

@@ -1,23 +1,24 @@
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, test, vi } from "vitest";
 
 import { App } from "./App";
 import { adapterStub, snapshot } from "../test/fixtures";
+import { renderWithI18n } from "../test/renderWithI18n";
 import type { AppSnapshot } from "../lib/types";
+
+function renderApp(adapter = adapterStub()) {
+  return renderWithI18n(<App adapter={adapter} />);
+}
 
 describe("główna nawigacja", () => {
   test("przechodzi klawiaturą między wszystkimi sekcjami", async () => {
     const user = userEvent.setup();
-    render(<App adapter={adapterStub()} />);
+    renderApp();
 
-    expect(await screen.findByRole("heading", { name: /dzień dobry/i })).toBeVisible();
+    expect(await screen.findByRole("heading", { name: /dyktowanie/i })).toBeVisible();
     await user.click(screen.getByRole("button", { name: "Historia" }));
     expect(await screen.findByRole("heading", { name: "Historia" })).toBeVisible();
-    await user.click(screen.getByRole("button", { name: "Słownik" }));
-    expect(await screen.findByRole("heading", { name: "Słownik" })).toBeVisible();
-    await user.click(screen.getByRole("button", { name: "Tryby" }));
-    expect(await screen.findByRole("heading", { name: "Tryby" })).toBeVisible();
     await user.click(screen.getByRole("button", { name: "Ustawienia" }));
     expect(await screen.findByRole("heading", { name: "Ustawienia" })).toBeVisible();
   });
@@ -32,7 +33,7 @@ describe("główna nawigacja", () => {
       onError: () => new Promise((resolve) => { resolveError = resolve; }),
     });
 
-    const view = render(<App adapter={adapter} />);
+    const view = renderApp(adapter);
     view.unmount();
     resolveState(unlistenState);
     resolveError(unlistenError);
@@ -57,7 +58,7 @@ describe("główna nawigacja", () => {
         return () => undefined;
       },
     });
-    render(<App adapter={adapter} />);
+    renderApp(adapter);
     await waitFor(() => expect(emitState).toBeTypeOf("function"));
 
     act(() => emitState({
@@ -68,5 +69,18 @@ describe("główna nawigacja", () => {
 
     expect(await screen.findByRole("button", { name: /Zatrzymaj nagrywanie/ })).toBeVisible();
     expect(getAppSnapshot).toHaveBeenCalledOnce();
+  });
+
+  test("renderuje UI po angielsku i ustawia atrybut lang dokumentu", async () => {
+    const adapter = adapterStub({
+      getAppSnapshot: async () => ({
+        ...snapshot,
+        settings: { ...snapshot.settings, language: "en" },
+      }),
+    });
+    renderWithI18n(<App adapter={adapter} />, { language: "en" });
+
+    expect(await screen.findByRole("heading", { name: "Dictation" })).toBeVisible();
+    expect(document.documentElement.lang).toBe("en");
   });
 });

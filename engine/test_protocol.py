@@ -18,14 +18,36 @@ from engine.protocol import (
     MODEL_ID,
     EngineInfo,
     handle_line,
+    model_spec,
     read_wav_mono_16khz,
 )
+
+
+class ModelSpecTests(unittest.TestCase):
+    def test_cohere_model_points_at_the_ungated_mirror(self):
+        cohere = model_spec("cohere")
+
+        self.assertEqual(cohere.kind, "cohere")
+        self.assertEqual(cohere.id, "AEmotionStudio/cohere-transcribe-03-2026-models")
+        self.assertEqual(cohere.revision, "d114f701a80b2150943f5dbae71458f4d1fcb37b")
+        self.assertNotIn("cohere-8bit", model_spec("parakeet").key)
+
+    def test_default_model_is_parakeet(self):
+        self.assertEqual(model_spec(None).key, "parakeet")
 
 
 class FakeEngine:
     def __init__(self):
         self.load_calls = 0
         self.transcribe_calls = []
+        self.set_model_calls = []
+        self.kind_value = "pipeline"
+
+    def set_model(self, spec):
+        self.set_model_calls.append(spec.key)
+
+    def kind(self):
+        return self.kind_value
 
     def load(self):
         self.load_calls += 1
@@ -109,8 +131,8 @@ class ProtocolTests(unittest.TestCase):
             {
                 "code": "unsupported_language_hint",
                 "message": (
-                    "language hints are not supported; "
-                    "Parakeet detects language automatically"
+                    "language hints are not supported for this model; "
+                    "Parakeet and Whisper detect language automatically"
                 ),
                 "retryable": False,
             },
@@ -129,6 +151,20 @@ class ProtocolTests(unittest.TestCase):
             )
 
         self.assertNotIn("language", response["result"])
+
+    def test_transcribe_does_not_ask_asr_to_invent_text_for_silence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            wav_path = Path(directory) / "silence.wav"
+            write_wav(wav_path, 2, 1, 16_000, struct.pack("<16000h", *([0] * 16000)))
+
+            response = handle_line(
+                request("transcribe", audio_path=str(wav_path)),
+                self.engine,
+            )
+
+        self.assertTrue(response["ok"])
+        self.assertEqual(response["result"]["text"], "")
+        self.assertEqual(self.engine.transcribe_calls, [])
 
     def test_invalid_json_returns_error_and_does_not_raise(self):
         response = handle_line("{broken", self.engine)
@@ -172,7 +208,8 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(MODEL_ID, "nvidia/parakeet-tdt-0.6b-v3")
 
     def test_default_loader_passes_exact_model_revision_without_downloading(self):
-        from engine.parakeet_worker import load_transformers_runtime
+        from engine.parakeet_worker import load_pipeline_runtime
+        from engine.protocol import model_spec
 
         calls = []
 
@@ -190,7 +227,7 @@ class ProtocolTests(unittest.TestCase):
             sys.modules,
             {"torch": fake_torch, "transformers": fake_transformers},
         ):
-            runtime = load_transformers_runtime(MODEL_ID)
+            runtime = load_pipeline_runtime(model_spec("parakeet"))
 
         self.assertEqual(runtime.model, MODEL_ID)
         self.assertEqual(
@@ -219,6 +256,9 @@ class ProtocolTests(unittest.TestCase):
                 "huggingface_hub==1.24.0",
                 "soxr==1.1.0",
                 "librosa==0.11.0",
+                "accelerate==1.14.0",
+                "sentencepiece==0.2.2",
+                "bitsandbytes==0.50.0",
             },
         )
         self.assertFalse(
@@ -570,6 +610,44 @@ class WorkerProcessTests(unittest.TestCase):
                 worker_pid = int(pid_path.read_text(encoding="ascii"))
                 with self.assertRaises(OSError):
                     os.kill(worker_pid, 0)
+
+    def test_setup_uses_mow_python_when_path_has_no_python(self):
+        repository = Path(__file__).resolve().parent.parent
+        script = repository / "scripts" / "setup-engine.ps1"
+        hosts = list(
+            dict.fromkeys(
+                host
+                for executable in ("pwsh", "powershell.exe")
+                if (host := shutil.which(executable)) is not None
+            )
+        )
+        self.assertTrue(hosts)
+        environment = os.environ.copy()
+        environment["PATH"] = ""
+        environment["MOW_PYTHON"] = sys.executable
+
+        for host in hosts:
+            with self.subTest(host=host):
+                process = subprocess.run(
+                    [
+                        host,
+                        "-NoProfile",
+                        "-ExecutionPolicy",
+                        "Bypass",
+                        "-File",
+                        str(script),
+                        "-SkipInstall",
+                    ],
+                    text=True,
+                    capture_output=True,
+                    cwd=repository,
+                    env=environment,
+                    timeout=30,
+                    check=False,
+                )
+
+                self.assertEqual(process.returncode, 0, process.stderr)
+                self.assertIn("Parakeet worker ping: ready", process.stdout)
 
 
 if __name__ == "__main__":

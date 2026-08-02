@@ -1,27 +1,38 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 
-import { BookOpen, Home, Mic, Settings, SlidersHorizontal, Clock3 } from "../components/Icons";
+import { Home, Minus, Settings, X, Clock3 } from "../components/Icons";
+import { Logo } from "../components/Logo";
 import { ToastRegion, type ToastKind, type ToastMessage } from "../components/Toast";
 import { TodayPage } from "../features/today/TodayPage";
 import { HistoryPage } from "../features/history/HistoryPage";
-import { VocabularyPage } from "../features/vocabulary/VocabularyPage";
-import { ModesPage } from "../features/modes/ModesPage";
 import { SettingsPage } from "../features/settings/SettingsPage";
 import { getAdapter, type AppAdapter } from "../lib/tauri";
+import { useI18n, type TranslationKey } from "../lib/i18n";
+import { applyTheme } from "./theme";
 import { useAppModel } from "./useAppModel";
 
-type PageId = "today" | "history" | "vocabulary" | "modes" | "settings";
+type PageId = "today" | "history" | "settings";
 
 const navigation = [
-  ["today", "Dzisiaj", Home],
-  ["history", "Historia", Clock3],
-  ["vocabulary", "Słownik", BookOpen],
-  ["modes", "Tryby", SlidersHorizontal],
-  ["settings", "Ustawienia", Settings],
+  ["today", Home],
+  ["history", Clock3],
+  ["settings", Settings],
 ] as const;
+
+const navLabels: Record<PageId, TranslationKey> = {
+  today: "nav.today",
+  history: "nav.history",
+  settings: "nav.settings",
+};
+
+function isTauriWindow(): boolean {
+  return "__TAURI_INTERNALS__" in window;
+}
 
 export function App({ adapter: adapterProp }: { adapter?: AppAdapter }) {
   const adapter = useMemo(() => adapterProp ?? getAdapter(), [adapterProp]);
+  const { t, applyPreference } = useI18n();
   const [page, setPage] = useState<PageId>("today");
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
   const toast = useCallback((text: string, kind: ToastKind = "error") => {
@@ -30,41 +41,57 @@ export function App({ adapter: adapterProp }: { adapter?: AppAdapter }) {
     window.setTimeout(() => setToasts((items) => items.filter((item) => item.id !== id)), 5000);
   }, []);
   const { snapshot, setSnapshot, history, refreshHistory, loading } = useAppModel(adapter, toast);
+  useEffect(() => {
+    applyTheme(snapshot.settings.theme);
+  }, [snapshot.settings.theme]);
+  useEffect(() => {
+    applyPreference(snapshot.settings.language);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [snapshot.settings.language]);
+  const minimize = useCallback(() => {
+    if (isTauriWindow()) void getCurrentWindow().minimize();
+  }, []);
+  const close = useCallback(() => {
+    if (isTauriWindow()) void getCurrentWindow().close();
+  }, []);
 
   let content;
   if (loading) {
-    content = <div className="page page-skeleton" aria-label="Wczytywanie"><span /><span /><span /></div>;
+    content = <div className="page page-skeleton" aria-label={t("app.loading")}><span /><span /><span /></div>;
   } else if (page === "today") {
-    content = <TodayPage adapter={adapter} snapshot={snapshot} recordings={history} onSnapshot={setSnapshot} onHistory={() => setPage("history")} onToast={toast} />;
+    content = <TodayPage adapter={adapter} snapshot={snapshot} recordings={history} onSnapshot={setSnapshot} onHistory={() => setPage("history")} onSettings={() => setPage("settings")} onToast={toast} />;
   } else if (page === "history") {
     content = <HistoryPage adapter={adapter} recordings={history} onRefresh={refreshHistory} onToast={toast} />;
-  } else if (page === "vocabulary") {
-    content = <VocabularyPage adapter={adapter} onToast={toast} />;
-  } else if (page === "modes") {
-    content = <ModesPage adapter={adapter} settings={snapshot.settings} onSettingsChange={(settings) => setSnapshot((current) => ({ ...current, settings }))} onToast={toast} />;
   } else {
     content = <SettingsPage adapter={adapter} initialSettings={snapshot.settings} onSettingsChange={(settings) => setSnapshot((current) => ({ ...current, settings }))} onToast={toast} />;
   }
 
   return (
     <main className="app-shell">
-      <header className="app-topbar">
-        <span className="wordmark-icon"><Mic size={17} /></span>
-        <strong>Mów</strong>
-        <span className="topbar-context">{navigation.find(([id]) => id === page)?.[1]}</span>
-      </header>
-      <aside className="sidebar">
-        <nav aria-label="Główna nawigacja">
-          {navigation.map(([id, label, Icon]) => (
-            <button key={id} className={page === id ? "nav-item nav-item--active" : "nav-item"} aria-current={page === id ? "page" : undefined} onClick={() => setPage(id)}>
-              <Icon size={18} strokeWidth={1.8} /><span>{label}</span>
-            </button>
-          ))}
+      <aside className="rail" aria-label={t("nav.rail")} data-tauri-drag-region>
+        <span className="rail-logo" title="Loquara"><Logo /></span>
+        <nav className="rail-nav">
+          {navigation.map(([id, Icon]) => {
+            const label = t(navLabels[id]);
+            return (
+              <button
+                key={id}
+                className={page === id ? "rail-btn rail-btn--active" : "rail-btn"}
+                aria-current={page === id ? "page" : undefined}
+                aria-label={label}
+                title={label}
+                onClick={() => setPage(id)}
+              >
+                <Icon size={20} strokeWidth={1.8} />
+                <span className="rail-btn__label">{label}</span>
+              </button>
+            );
+          })}
         </nav>
-        <footer className="sidebar-status">
-          <span className="status-dot" />
-          <div><strong>Gotowy</strong><small>Lokalnie</small></div>
-        </footer>
+        <div className="rail-window-controls">
+          <button className="rail-btn rail-btn--control" aria-label={t("win.minimize")} title={t("win.minimize")} onClick={minimize}><Minus size={16} /></button>
+          <button className="rail-btn rail-btn--control rail-btn--close" aria-label={t("win.close")} title={t("win.close")} onClick={close}><X size={16} /></button>
+        </div>
       </aside>
       <div className="app-content">{content}</div>
       <ToastRegion items={toasts} onDismiss={(id) => setToasts((items) => items.filter((item) => item.id !== id))} />

@@ -1,16 +1,17 @@
 [package]
-name = "mow"
+name = "loquara"
 version = "0.1.0"
-description = "Lokalna aplikacja do dyktowania na Windows"
+description = "Lokalna aplikacja do dyktowania"
 edition = "2024"
 rust-version = "1.95"
 build = "build.rs"
 
 [lib]
-name = "mow_lib"
+name = "loquara_lib"
 crate-type = ["lib", "cdylib", "staticlib"]
 
 [dependencies]
+arboard = "3"
 cpal = "0.16"
 hound = "3.5"
 regex = "1.11"
@@ -26,6 +27,8 @@ thiserror = "2"
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.60", features = [
     "Win32_Foundation",
+    "Win32_Globalization",
+    "Win32_Media_Audio",
     "Win32_System_DataExchange",
     "Win32_System_Memory",
     "Win32_System_Ole",

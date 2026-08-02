@@ -2,42 +2,56 @@
   color-scheme: light;
   font-family: "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
   font-synthesis: none;
-  --bg: #f6f7f9;
+  --bg: #f4f6f8;
   --surface: #ffffff;
   --surface-raised: #ffffff;
-  --surface-subtle: #f0f2f5;
-  --surface-hover: #e9edf3;
-  --text: #171a20;
-  --muted: #626a76;
-  --faint: #8b929c;
-  --border: #d9dee6;
-  --border-strong: #c4cad4;
-  --accent: #155dcc;
-  --accent-hover: #0e4faf;
-  --accent-soft: #e8f0fc;
-  --danger: #d63d26;
-  --danger-soft: #fff0ed;
-  --success: #28805d;
-  --shadow: 0 14px 36px rgba(26, 35, 50, 0.10);
+  --surface-subtle: #edf1f5;
+  --surface-hover: #e6ebf0;
+  --text: #18212b;
+  --muted: #687585;
+  --faint: #9aa6b3;
+  --border: #dce3ea;
+  --border-strong: #c3ced9;
+  --accent: #2f6fe4;
+  --accent-hover: #245fc9;
+  --accent-soft: #eaf1ff;
+  --danger: #c74436;
+  --danger-soft: #fceceb;
+  --success: #27845b;
+  --shadow: 0 1px 2px rgba(24, 33, 43, 0.04), 0 12px 28px rgba(24, 33, 43, 0.07);
 }
 
 :root[data-theme="dark"] {
   color-scheme: dark;
-  --bg: #111419;
-  --surface: #181c22;
-  --surface-raised: #1d2229;
-  --surface-subtle: #22272f;
-  --surface-hover: #292f38;
-  --text: #f2f4f7;
-  --muted: #a7aeba;
-  --faint: #777f8b;
-  --border: #30363f;
-  --border-strong: #434a55;
-  --accent: #4b8de8;
-  --accent-hover: #6ba2ef;
-  --accent-soft: #1c2d48;
-  --danger: #f05b43;
-  --danger-soft: #38201d;
-  --success: #5fb88f;
-  --shadow: 0 18px 50px rgba(0, 0, 0, 0.32);
+  --bg: #121519;
+  --surface: #191d22;
+  --surface-raised: #20252c;
+  --surface-subtle: #232930;
+  --surface-hover: #2a313a;
+  --text: #f4f7fb;
+  --muted: #a3adba;
+  --faint: #747f8d;
+  --border: #303741;
+  --border-strong: #46515f;
+  --accent: #78a9ff;
+  --accent-hover: #96bcff;
+  --accent-soft: #1d304d;
+  --danger: #ff7965;
+  --danger-soft: #40231f;
+  --success: #70d0a0;
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.42), 0 18px 42px rgba(0, 0, 0, 0.3);
 }
+
+/* Deterministic, theme-aware scrollbars (no more OS-style bars). */
+:root { scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent; }
+*::-webkit-scrollbar { width: 10px; height: 10px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb {
+  background-color: var(--border-strong);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+*::-webkit-scrollbar-thumb:hover { background-color: var(--faint); }
+*::-webkit-scrollbar-corner { background: transparent; }
+::selection { background: color-mix(in srgb, var(--accent) 28%, transparent); }

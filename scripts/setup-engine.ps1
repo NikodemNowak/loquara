@@ -1,11 +1,19 @@
 param(
-    [string]$Python = "python",
+    [string]$Python = "",
     [switch]$SkipInstall,
     [string]$WorkerPath = "",
     [int]$PingTimeoutSeconds = 10
 )
 
 $ErrorActionPreference = "Stop"
+if ([string]::IsNullOrWhiteSpace($Python)) {
+    if (-not [string]::IsNullOrWhiteSpace($env:MOW_PYTHON)) {
+        $Python = $env:MOW_PYTHON
+    }
+    else {
+        $Python = "python"
+    }
+}
 $repository = Split-Path -Parent $PSScriptRoot
 $requirements = Join-Path $repository "engine\requirements.txt"
 if ([string]::IsNullOrWhiteSpace($WorkerPath)) {

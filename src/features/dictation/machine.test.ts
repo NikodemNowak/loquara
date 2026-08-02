@@ -84,6 +84,42 @@ describe("dictation state machine", () => {
     );
   });
 
+  test("arms and dismisses the cancel confirmation prompt", () => {
+    const recordingState: DictationState = {
+      status: "recording",
+      ...recording,
+    };
+
+    expect(transition(recordingState, { type: "cancel_request" })).toEqual({
+      status: "cancelling",
+      ...recording,
+    });
+
+    const cancellingState: DictationState = {
+      status: "cancelling",
+      ...recording,
+    };
+    expect(transition(cancellingState, { type: "cancel_request" })).toEqual({
+      status: "recording",
+      ...recording,
+    });
+  });
+
+  test("confirms cancel or finalizes from the cancelling prompt", () => {
+    const cancellingState: DictationState = {
+      status: "cancelling",
+      ...recording,
+    };
+
+    expect(transition(cancellingState, { type: "cancel" })).toBe(
+      initialDictationState,
+    );
+    expect(transition(cancellingState, { type: "stop" })).toEqual({
+      status: "processing",
+      ...recording,
+    });
+  });
+
   test("ignores events that are invalid for the current state", () => {
     const recordingState: DictationState = {
       status: "recording",

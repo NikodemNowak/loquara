@@ -3,7 +3,23 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Mów</title>
+    <title>Loquara</title>
+    <script>
+      (function () {
+        var stored = localStorage.getItem("mow-theme");
+        var theme;
+        if (stored === "light" || stored === "dark") {
+          theme = stored;
+        } else {
+          theme =
+            window.matchMedia &&
+            window.matchMedia("(prefers-color-scheme: dark)").matches
+              ? "dark"
+              : "light";
+        }
+        document.documentElement.dataset.theme = theme;
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

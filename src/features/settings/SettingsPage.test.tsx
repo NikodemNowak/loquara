@@ -1,13 +1,14 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, test, vi } from "vitest";
 
 import { SettingsPage } from "./SettingsPage";
 import { adapterStub, settings } from "../../test/fixtures";
+import { renderWithI18n } from "../../test/renderWithI18n";
 
 describe("ustawienia", () => {
   test("stosuje wybrany motyw na dokumencie", async () => {
-    render(<SettingsPage adapter={adapterStub()} initialSettings={settings} onToast={() => undefined} />);
+    renderWithI18n(<SettingsPage adapter={adapterStub()} initialSettings={settings} onToast={() => undefined} />);
     await userEvent.click(screen.getByRole("radio", { name: "Ciemny" }));
     expect(document.documentElement).toHaveAttribute("data-theme", "dark");
   });
@@ -15,7 +16,7 @@ describe("ustawienia", () => {
   test("cofa nieudaną zmianę i pokazuje komunikat", async () => {
     const onToast = vi.fn();
     const updateSettings = vi.fn(async () => { throw new Error("Brak uprawnień"); });
-    render(<SettingsPage adapter={adapterStub({ updateSettings })} initialSettings={settings} onToast={onToast} />);
+    renderWithI18n(<SettingsPage adapter={adapterStub({ updateSettings })} initialSettings={settings} onToast={onToast} />);
     const toggle = screen.getByRole("checkbox", { name: "Wklejaj automatycznie" });
     await userEvent.click(toggle);
     expect(toggle).toBeChecked();
@@ -31,7 +32,7 @@ describe("ustawienia", () => {
     const getSettings = vi.fn(async () => ({ ...persisted }));
     const onSettingsChange = vi.fn();
     const adapter = adapterStub({ updateSettings, getSettings });
-    const first = render(
+    const first = renderWithI18n(
       <SettingsPage
         adapter={adapter}
         initialSettings={settings}
@@ -55,7 +56,7 @@ describe("ustawienia", () => {
     }));
 
     first.unmount();
-    render(
+    renderWithI18n(
       <SettingsPage
         adapter={adapter}
         initialSettings={persisted}
@@ -72,7 +73,7 @@ describe("ustawienia", () => {
     ["not_installed", "Do pobrania"],
     ["error", "Błąd"],
   ] as const)("pokazuje prawdziwy status modelu %s", async (state, label) => {
-    render(<SettingsPage
+    renderWithI18n(<SettingsPage
       adapter={adapterStub({
         getModelStatus: async () => ({
           state,
@@ -93,18 +94,14 @@ describe("ustawienia", () => {
     }
   });
 
-  test("pokazuje błąd listy mikrofonów i pozwala ponowić", async () => {
-    const listInputDevices = vi.fn()
-      .mockRejectedValueOnce(new Error("Brak dostępu"))
-      .mockResolvedValueOnce([]);
-    render(<SettingsPage
+  test("pokazuje błąd listy mikrofonów", async () => {
+    const listInputDevices = vi.fn().mockRejectedValueOnce(new Error("Brak dostępu"));
+    renderWithI18n(<SettingsPage
       adapter={adapterStub({ listInputDevices })}
       initialSettings={settings}
       onSettingsChange={() => undefined}
       onToast={() => undefined}
     />);
     expect(await screen.findByText(/Nie udało się wczytać mikrofonów/)).toBeVisible();
-    await userEvent.click(screen.getByRole("button", { name: "Spróbuj ponownie" }));
-    await waitFor(() => expect(listInputDevices).toHaveBeenCalledTimes(2));
   });
 });

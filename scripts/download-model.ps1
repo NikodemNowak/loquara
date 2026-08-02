@@ -1,11 +1,13 @@
 param(
     [string]$Python = $(if ($env:MOW_PYTHON) { $env:MOW_PYTHON } else { "python" }),
-    [switch]$LocalOnly
+    [switch]$LocalOnly,
+    [string]$ModelHome = $(Join-Path $env:APPDATA "io.loquara.desktop\models")
 )
 
 $ErrorActionPreference = "Stop"
 $repository = Split-Path -Parent $PSScriptRoot
 $arguments = @("-X", "utf8", "-m", "engine.download_model")
+$arguments += @("--local-dir", $ModelHome)
 if ($LocalOnly) {
     $arguments += "--local-only"
 }

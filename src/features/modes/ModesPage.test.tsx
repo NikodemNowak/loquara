@@ -1,15 +1,16 @@
-import { render, screen } from "@testing-library/react";
+import { screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, test, vi } from "vitest";
 
 import { ModesPage } from "./ModesPage";
 import { adapterStub } from "../../test/fixtures";
 import { settings } from "../../test/fixtures";
+import { renderWithI18n } from "../../test/renderWithI18n";
 
 describe("tryby", () => {
   test("chroni wbudowany tryb i zapisuje własny", async () => {
     const user = userEvent.setup();
-    render(<ModesPage adapter={adapterStub()} settings={settings} onSettingsChange={() => undefined} onToast={() => undefined} />);
+    renderWithI18n(<ModesPage adapter={adapterStub()} settings={settings} onSettingsChange={() => undefined} onToast={() => undefined} />);
     await user.click(await screen.findByRole("button", { name: /Czysty/ }));
     expect(screen.getByRole("button", { name: "Usuń tryb" })).toBeDisabled();
     await user.click(screen.getByRole("button", { name: "Nowy tryb" }));
@@ -31,7 +32,7 @@ describe("tryby", () => {
       isDefault: true, createdAt: 2,
     };
     const onSettingsChange = vi.fn();
-    render(<ModesPage
+    renderWithI18n(<ModesPage
       adapter={adapterStub({
         listModes: async () => [code, custom],
         updateSettings,
@@ -55,7 +56,7 @@ describe("tryby", () => {
       .mockRejectedValueOnce(new Error("Baza zajęta"))
       .mockResolvedValueOnce([]);
     const onToast = vi.fn();
-    render(<ModesPage
+    renderWithI18n(<ModesPage
       adapter={adapterStub({ listModes })}
       settings={settings}
       onSettingsChange={() => undefined}
@@ -75,7 +76,7 @@ describe("tryby", () => {
       id: "disabled-custom", name: "Wyłączony", description: "Wyłączony", prompt: "case: lower",
       enabled: false, isDefault: false, createdAt: 2,
     };
-    render(
+    renderWithI18n(
       <ModesPage
         adapter={adapterStub({ listModes: async () => [active, disabled] })}
         settings={{ ...settings, activeMode: active.id }}
@@ -91,7 +92,7 @@ describe("tryby", () => {
   });
 
   test("opisuje wyłącznie obsługiwany lokalny DSL", async () => {
-    render(<ModesPage adapter={adapterStub()} settings={settings} onSettingsChange={() => undefined} onToast={() => undefined} />);
+    renderWithI18n(<ModesPage adapter={adapterStub()} settings={settings} onSettingsChange={() => undefined} onToast={() => undefined} />);
 
     await screen.findByLabelText("Instrukcja");
     expect(screen.getByText(/case: lower\|upper\|sentence/i)).toBeVisible();

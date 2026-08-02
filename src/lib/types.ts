@@ -6,6 +6,7 @@ export interface RecoveryRecording {
 export type DictationState =
   | { status: "idle" }
   | ({ status: "recording" } & RecoveryRecording)
+  | ({ status: "cancelling" } & RecoveryRecording)
   | ({ status: "processing" } & RecoveryRecording)
   | ({ status: "pasting"; transcript: string } & RecoveryRecording)
   | { status: "failed"; recovery: RecoveryRecording; error: string };
@@ -17,7 +18,8 @@ export type DictationEvent =
   | { type: "transcription_failed"; error: string }
   | { type: "paste_completed" }
   | { type: "retry" }
-  | { type: "cancel" };
+  | { type: "cancel" }
+  | { type: "cancel_request" };
 
 export interface AppSettings {
   inputDevice: string | null;
@@ -26,6 +28,11 @@ export interface AppSettings {
   retentionDays: 1 | 7 | 30 | null;
   launchOnLogin: boolean;
   activeMode: string;
+  showOverlay: boolean;
+  model: string;
+  streaming: boolean;
+  theme: ThemeChoice;
+  language: LanguageChoice;
 }
 
 export interface ModelStatus {
@@ -33,6 +40,29 @@ export interface ModelStatus {
   model: string;
   revision: string;
   device: string | null;
+  message: string | null;
+}
+
+export interface ModelDownloadProgress {
+  model: string;
+  phase: "preparing" | "downloading" | "validating";
+  downloadedBytes: number;
+  totalBytes: number | null;
+}
+
+export interface ModelDescriptor {
+  key: string;
+  id: string;
+  provider: string;
+  source: "local" | "cloud";
+  revision: string;
+  display: string;
+  minVramGb: number;
+  minRamGb: number;
+  languages: string;
+  estimatedSizeBytes: number;
+  status: ModelStatus["state"];
+  installedSizeBytes: number | null;
   message: string | null;
 }
 
@@ -44,6 +74,7 @@ export interface PlatformError {
 export interface AppSnapshot {
   dictation: DictationState;
   settings: AppSettings;
+  modelLoading: boolean;
 }
 
 export interface SettingsUpdateResult {
@@ -98,3 +129,5 @@ export interface Mode {
 }
 
 export type ThemeChoice = "system" | "light" | "dark";
+
+export type LanguageChoice = "system" | "pl" | "en";

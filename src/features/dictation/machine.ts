@@ -25,6 +25,29 @@ export function transition(
           audioPath: state.audioPath,
         };
       }
+      if (event.type === "cancel_request") {
+        return {
+          status: "cancelling",
+          recordingId: state.recordingId,
+          audioPath: state.audioPath,
+        };
+      }
+      return event.type === "cancel" ? initialDictationState : state;
+    case "cancelling":
+      if (event.type === "cancel_request") {
+        return {
+          status: "recording",
+          recordingId: state.recordingId,
+          audioPath: state.audioPath,
+        };
+      }
+      if (event.type === "stop") {
+        return {
+          status: "processing",
+          recordingId: state.recordingId,
+          audioPath: state.audioPath,
+        };
+      }
       return event.type === "cancel" ? initialDictationState : state;
     case "processing":
       if (event.type === "transcription_succeeded") {

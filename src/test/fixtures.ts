@@ -50,11 +50,17 @@ export const settings: AppSettings = {
   retentionDays: 30,
   launchOnLogin: true,
   activeMode: "clean",
+  showOverlay: true,
+  model: "parakeet",
+  streaming: true,
+  theme: "system",
+  language: "system",
 };
 
 export const snapshot: AppSnapshot = {
   dictation: { status: "idle" },
   settings,
+  modelLoading: false,
 };
 
 export function adapterStub(overrides: Partial<AppAdapter> = {}): AppAdapter {
@@ -70,6 +76,7 @@ export function adapterStub(overrides: Partial<AppAdapter> = {}): AppAdapter {
       createdAt: 1,
     },
   ];
+  let currentSettings = { ...settings };
   return {
     getAppSnapshot: async () => snapshot,
     listInputDevices: async () => [
@@ -78,10 +85,15 @@ export function adapterStub(overrides: Partial<AppAdapter> = {}): AppAdapter {
     startRecording: async () => snapshot,
     stopRecording: async () => snapshot,
     cancelRecording: async () => snapshot,
+    requestCancel: async () => snapshot,
+    hideOverlay: async () => undefined,
+    saveOverlayPosition: async () => undefined,
     retryTranscription: async () => snapshot,
     pasteTranscript: async () => undefined,
     listHistory: async () => recordings,
     deleteHistory: async () => true,
+    playRecording: async () => undefined,
+    correctTranscript: async () => 0,
     listVocabulary: async () => vocabulary,
     addVocabulary: async (heard, replacement) => {
       const item = { id: vocabulary.length + 1, heard, replacement };
@@ -104,7 +116,7 @@ export function adapterStub(overrides: Partial<AppAdapter> = {}): AppAdapter {
       if (index >= 0) modes.splice(index, 1);
       return index >= 0;
     },
-    getSettings: async () => settings,
+    getSettings: async () => currentSettings,
     getModelStatus: async () => ({
       state: "ready",
       model: "nvidia/parakeet-tdt-0.6b-v3",
@@ -112,10 +124,22 @@ export function adapterStub(overrides: Partial<AppAdapter> = {}): AppAdapter {
       device: null,
       message: null,
     }),
-    updateSettings: async (next) => ({ settings: next, warning: null }),
+    listModels: async () => [
+      { key: "parakeet", id: "nvidia/parakeet-tdt-0.6b-v3", provider: "NVIDIA", source: "local", revision: "7c35754d166cca382ad1e53e68b01e7c575f3a1d", display: "Parakeet TDT 0.6B v3", minVramGb: 3, minRamGb: 8, languages: "auto (PL/EN)", estimatedSizeBytes: 2_500_000_000, status: "ready", installedSizeBytes: 2_500_000_000, message: null },
+      { key: "whisper-turbo", id: "openai/whisper-large-v3-turbo", provider: "OpenAI", source: "local", revision: "41f01f3fe87f28c78e2fbf8b568835947dd65ed9", display: "Whisper Large v3 Turbo", minVramGb: 4, minRamGb: 8, languages: "auto (99)", estimatedSizeBytes: 1_600_000_000, status: "not_installed", installedSizeBytes: null, message: null },
+      { key: "whisper-small", id: "openai/whisper-small", provider: "OpenAI", source: "local", revision: "973afd24965f72e36ca33b3055d56a652f456b4d", display: "Whisper Small", minVramGb: 1.5, minRamGb: 4, languages: "auto (99)", estimatedSizeBytes: 1_000_000_000, status: "not_installed", installedSizeBytes: null, message: null },
+      { key: "cohere", id: "AEmotionStudio/cohere-transcribe-03-2026-models", provider: "Cohere", source: "local", revision: "d114f701a80b2150943f5dbae71458f4d1fcb37b", display: "Cohere Transcribe 2B", minVramGb: 5, minRamGb: 8, languages: "pl/en/fr/de/...", estimatedSizeBytes: 4_132_000_000, status: "not_installed", installedSizeBytes: null, message: null },
+    ],
+    downloadModel: async () => undefined,
+    deleteModel: async () => undefined,
+    updateSettings: async (next) => {
+      currentSettings = { ...next };
+      return { settings: currentSettings, warning: null };
+    },
     updateSettingValue: async () => undefined,
     onState: async () => () => undefined,
     onLevel: async () => () => undefined,
+    onModelProgress: async () => () => undefined,
     onError: async () => () => undefined,
     ...overrides,
   };

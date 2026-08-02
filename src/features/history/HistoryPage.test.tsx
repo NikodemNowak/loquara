@@ -1,9 +1,15 @@
-import { render, screen, within } from "@testing-library/react";
+import { screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, test, vi } from "vitest";
 
 import { HistoryPage } from "./HistoryPage";
 import { adapterStub, recordings, snapshot } from "../../test/fixtures";
+
+import { renderWithI18n } from "../../test/renderWithI18n";
+
+function renderPage(adapter = adapterStub(), onToast = () => undefined) {
+  return renderWithI18n(<HistoryPage adapter={adapter} recordings={recordings} onRefresh={async () => undefined} onToast={onToast} />);
+}
 
 describe("historia", () => {
   test("wyszukuje, wybiera i uruchamia akcje dla nagrania", async () => {
@@ -11,7 +17,7 @@ describe("historia", () => {
     const pasteTranscript = vi.fn(async () => undefined);
     const retryTranscription = vi.fn(async () => snapshot);
     const adapter = adapterStub({ pasteTranscript, retryTranscription });
-    render(<HistoryPage adapter={adapter} recordings={recordings} onRefresh={async () => undefined} onToast={() => undefined} />);
+    renderPage(adapter);
 
     await user.type(screen.getByRole("searchbox"), "podsumowanie");
     expect(screen.getByRole("button", { name: /Przygotuj proszę/ })).toBeVisible();
@@ -29,7 +35,7 @@ describe("historia", () => {
   });
 
   test("blokuje usuwanie aktywnego nagrania", async () => {
-    render(<HistoryPage adapter={adapterStub()} recordings={recordings} onRefresh={async () => undefined} onToast={() => undefined} />);
+    renderPage();
     await userEvent.click(screen.getByRole("button", { name: /Aktywne nagranie/ }));
     expect(within(screen.getByRole("complementary")).getByRole("button", { name: "Usuń" })).toBeDisabled();
   });
@@ -39,7 +45,7 @@ describe("historia", () => {
     const adapter = adapterStub({
       pasteTranscript: vi.fn(async () => { throw new Error("Schowek niedostępny"); }),
     });
-    render(<HistoryPage adapter={adapter} recordings={recordings} onRefresh={async () => undefined} onToast={onToast} />);
+    renderPage(adapter, onToast);
 
     await userEvent.click(screen.getByRole("button", { name: /Przygotuj proszę/ }));
     const inspector = screen.getByRole("complementary", { name: "Szczegóły nagrania" });
@@ -58,7 +64,7 @@ describe("historia", () => {
       value: { writeText },
     });
     const onToast = vi.fn();
-    render(<HistoryPage adapter={adapterStub()} recordings={recordings} onRefresh={async () => undefined} onToast={onToast} />);
+    renderPage(adapterStub(), onToast);
 
     await userEvent.click(screen.getByRole("button", { name: /Przygotuj proszę/ }));
     await userEvent.click(screen.getByRole("button", { name: "Kopiuj" }));

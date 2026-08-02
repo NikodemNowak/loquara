@@ -8,12 +8,24 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::ffi::{OsStr, OsString};
 use std::fmt;
+use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread;
 use std::time::Duration;
+
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+pub(crate) fn no_console(command: &mut Command) -> &mut Command {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    command
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PythonExecutable {
@@ -71,17 +83,19 @@ pub fn select_python_executable(
 
 pub fn resolve_python_executable() -> Result<PythonExecutable, std::io::Error> {
     let configured = std::env::var_os("MOW_PYTHON");
-    select_python_executable(configured.as_deref(), |candidate| {
-        Command::new(&candidate.program)
-            .args(&candidate.args)
-            .arg("--version")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .is_ok_and(|status| status.success())
-    })
-    .ok_or_else(|| {
+        select_python_executable(configured.as_deref(), |candidate| {
+        let mut command = Command::new(&candidate.program);
+        no_console(
+            command
+                .args(&candidate.args)
+                .arg("--version")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+        )
+        .status()
+        .is_ok_and(|status| status.success())
+    })    .ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::NotFound,
             "nie znaleziono Pythona (MOW_PYTHON, python ani py -3.13)",
@@ -100,7 +114,10 @@ pub struct WorkerRequest {
 #[serde(tag = "command", rename_all = "snake_case")]
 enum WorkerCommand {
     Ping,
-    Load,
+    Load {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+    },
     Transcribe {
         audio_path: PathBuf,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -116,10 +133,10 @@ impl WorkerRequest {
         }
     }
 
-    pub fn load(request_id: impl Into<String>) -> Self {
+    pub fn load(request_id: impl Into<String>, model: Option<String>) -> Self {
         Self {
             request_id: request_id.into(),
-            command: WorkerCommand::Load,
+            command: WorkerCommand::Load { model },
         }
     }
 
@@ -268,6 +285,7 @@ pub struct WorkerClient {
     responses: Option<Receiver<Result<String, String>>>,
     timeout: Duration,
     next_request_id: u64,
+    model: Option<String>,
 }
 
 impl WorkerClient {
@@ -275,6 +293,17 @@ impl WorkerClient {
         python: impl Into<PythonExecutable>,
         worker_path: impl AsRef<Path>,
         timeout: Duration,
+        stderr_log: Option<&Path>,
+    ) -> Result<Self, ClientError> {
+        Self::spawn_with_model_home(python, worker_path, timeout, stderr_log, None)
+    }
+
+    pub fn spawn_with_model_home(
+        python: impl Into<PythonExecutable>,
+        worker_path: impl AsRef<Path>,
+        timeout: Duration,
+        stderr_log: Option<&Path>,
+        model_home: Option<&Path>,
     ) -> Result<Self, ClientError> {
         let worker_path = worker_path.as_ref();
         if !worker_path.is_file() {
@@ -282,16 +311,37 @@ impl WorkerClient {
         }
 
         let python = python.into();
+        let stderr = match stderr_log {
+            Some(log_path) => {
+                let log = OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(log_path)
+                    .map_err(|error| {
+                        ClientError::Spawn(format!(
+                            "failed to open worker log {}: {error}",
+                            log_path.display()
+                        ))
+                    })?;
+                Stdio::from(log)
+            }
+            None => Stdio::null(),
+        };
         let mut command = Command::new(&python.program);
-        command
-            .args(&python.args)
-            .arg("-X")
-            .arg("utf8")
-            .arg("-u")
-            .arg(worker_path)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit());
+        no_console(
+            command
+                .args(&python.args)
+                .arg("-X")
+                .arg("utf8")
+                .arg("-u")
+                .arg(worker_path)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(stderr),
+        );
+        if let Some(model_home) = model_home {
+            command.env("LOQUARA_MODEL_HOME", model_home);
+        }
 
         let mut child = command
             .spawn()
@@ -330,7 +380,12 @@ impl WorkerClient {
             responses: Some(responses),
             timeout,
             next_request_id: 1,
+            model: None,
         })
+    }
+
+    pub fn model(&self) -> Option<&str> {
+        self.model.as_deref()
     }
 
     pub fn ping(&mut self) -> Result<PingResult, ClientError> {
@@ -338,9 +393,13 @@ impl WorkerClient {
         self.send(WorkerRequest::ping(request_id))
     }
 
-    pub fn load(&mut self) -> Result<LoadResult, ClientError> {
+    pub fn load(&mut self, model: Option<String>) -> Result<LoadResult, ClientError> {
         let request_id = self.allocate_request_id();
-        self.send(WorkerRequest::load(request_id))
+        let result = self.send(WorkerRequest::load(request_id, model.clone()));
+        if result.is_ok() {
+            self.model = model;
+        }
+        result
     }
 
     pub fn transcribe(
@@ -594,7 +653,7 @@ mod tests {
     fn maps_missing_worker_before_spawning_python() {
         let path = missing_path("missing-worker");
 
-        let error = match WorkerClient::spawn(python(), &path, Duration::from_secs(1)) {
+        let error = match WorkerClient::spawn(python(), &path, Duration::from_secs(1), None) {
             Ok(_) => panic!("missing worker must fail"),
             Err(error) => error,
         };
@@ -617,7 +676,7 @@ mod tests {
             "timeout-worker",
             "import sys, time\nfor line in sys.stdin:\n    time.sleep(1)\n",
         );
-        let mut client = WorkerClient::spawn(python(), &path, Duration::from_millis(20)).unwrap();
+        let mut client = WorkerClient::spawn(python(), &path, Duration::from_millis(20), None).unwrap();
 
         let error = client.ping().unwrap_err();
 
@@ -630,7 +689,7 @@ mod tests {
     #[test]
     fn maps_worker_crash() {
         let path = fake_worker("crash-worker", "raise SystemExit(7)\n");
-        let mut client = WorkerClient::spawn(python(), &path, Duration::from_secs(2)).unwrap();
+        let mut client = WorkerClient::spawn(python(), &path, Duration::from_secs(2), None).unwrap();
 
         let error = client.ping().unwrap_err();
 
@@ -666,7 +725,7 @@ for line in sys.stdin:
         let audio_path = missing_path("zażółć-gęślą-jaźń").with_extension("wav");
         fs::write(&audio_path, b"not a real wav").unwrap();
         let request = WorkerRequest::transcribe("żądanie-ąęłóśźż", &audio_path, None).unwrap();
-        let mut client = WorkerClient::spawn(python(), &worker, Duration::from_secs(2)).unwrap();
+        let mut client = WorkerClient::spawn(python(), &worker, Duration::from_secs(2), None).unwrap();
 
         let error = client.send::<TranscriptionResult>(request).unwrap_err();
 

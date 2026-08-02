@@ -3,20 +3,27 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { AppAdapter } from "../lib/tauri";
 import type { AppSettings, AppSnapshot, Recording } from "../lib/types";
 import { normalizeError } from "../lib/errors";
+import { translate } from "../lib/i18n/lang";
 
 const fallbackSettings: AppSettings = {
   inputDevice: null,
   shortcut: "Ctrl+Space",
   autoPaste: true,
   retentionDays: 30,
-  launchOnLogin: true,
+  launchOnLogin: false,
   activeMode: "clean",
+  showOverlay: true,
+  model: "parakeet",
+  streaming: true,
+  theme: "system",
+  language: "system",
 };
 
 export function useAppModel(adapter: AppAdapter, onError: (message: string) => void) {
   const [snapshot, setSnapshot] = useState<AppSnapshot>({
     dictation: { status: "idle" },
     settings: fallbackSettings,
+    modelLoading: false,
   });
   const [history, setHistory] = useState<Recording[]>([]);
   const [loading, setLoading] = useState(true);
@@ -26,7 +33,7 @@ export function useAppModel(adapter: AppAdapter, onError: (message: string) => v
     try {
       setHistory(await adapter.listHistory({}));
     } catch (error) {
-      onError(`Nie udało się wczytać historii: ${normalizeError(error)}`);
+      onError(translate("useAppModel.loadHistoryError", { error: normalizeError(error) }));
     }
   }, [adapter, onError]);
 
@@ -47,7 +54,7 @@ export function useAppModel(adapter: AppAdapter, onError: (message: string) => v
         }
         setHistory(nextHistory);
       })
-      .catch((error) => onError(`Nie udało się uruchomić widoku: ${normalizeError(error)}`))
+      .catch((error) => onError(translate("useAppModel.initError", { error: normalizeError(error) })))
       .finally(() => active && setLoading(false));
     adapter.onState((next) => {
       if (!active) return;

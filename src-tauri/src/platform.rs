@@ -191,9 +191,21 @@ pub fn sync_autostart<R: Runtime>(
     app: &AppHandle<R>,
     launch_on_login: bool,
 ) -> Result<(), PlatformError> {
-    let result = match autostart_policy(launch_on_login) {
-        AutostartAction::Enable => app.autolaunch().enable(),
-        AutostartAction::Disable => app.autolaunch().disable(),
+    let manager = app.autolaunch();
+    let enabled = manager
+        .is_enabled()
+        .map_err(|error| PlatformError::Other(error.to_string()))?;
+    let should_enable = matches!(
+        autostart_policy(launch_on_login),
+        AutostartAction::Enable
+    );
+    if enabled == should_enable {
+        return Ok(());
+    }
+    let result = if should_enable {
+        manager.enable()
+    } else {
+        manager.disable()
     };
     result.map_err(|error| PlatformError::Other(error.to_string()))
 }
@@ -299,11 +311,32 @@ pub fn show_main<R: Runtime>(app: &AppHandle<R>) -> Result<(), PlatformError> {
 
 pub fn hide_overlay<R: Runtime>(app: &AppHandle<R>) {
     if let Some(window) = app.get_webview_window("overlay") {
+        #[cfg(windows)]
+        {
+            use windows_sys::Win32::UI::WindowsAndMessaging::{SW_HIDE, ShowWindow};
+            if let Ok(hwnd) = window.hwnd() {
+                unsafe {
+                    ShowWindow(hwnd.0, SW_HIDE);
+                }
+                return;
+            }
+        }
         let _ = window.hide();
     }
 }
 
-pub fn show_overlay_without_focus<R: Runtime>(app: &AppHandle<R>) -> Result<(), PlatformError> {
+fn overlay_origin(
+    work: PhysicalRect,
+    size: PhysicalWindowSize,
+    position: Option<(i32, i32)>,
+) -> (i32, i32) {
+    position.unwrap_or_else(|| bottom_center_position(work, size))
+}
+
+pub fn show_overlay_without_focus<R: Runtime>(
+    app: &AppHandle<R>,
+    position: Option<(i32, i32)>,
+) -> Result<(), PlatformError> {
     let window = app
         .get_webview_window("overlay")
         .ok_or_else(|| PlatformError::Other("overlay window is missing".into()))?;
@@ -313,12 +346,13 @@ pub fn show_overlay_without_focus<R: Runtime>(app: &AppHandle<R>) -> Result<(), 
         let size = window
             .outer_size()
             .map_err(|error| PlatformError::Other(error.to_string()))?;
-        let (x, y) = bottom_center_position(
+        let (x, y) = overlay_origin(
             windows_work_area()?,
             PhysicalWindowSize {
                 width: size.width,
                 height: size.height,
             },
+            position,
         );
         window
             .set_position(PhysicalPosition::new(x, y))
@@ -361,112 +395,176 @@ fn windows_work_area() -> Result<PhysicalRect, PlatformError> {
     })
 }
 
-#[cfg(windows)]
+pub fn show_overlay_with_focus<R: Runtime>(
+    app: &AppHandle<R>,
+    position: Option<(i32, i32)>,
+) -> Result<(), PlatformError> {
+    let window = app
+        .get_webview_window("overlay")
+        .ok_or_else(|| PlatformError::Other("overlay window is missing".into()))?;
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            SW_SHOW, SetForegroundWindow, ShowWindow,
+        };
+        let size = window
+            .outer_size()
+            .map_err(|error| PlatformError::Other(error.to_string()))?;
+        let (x, y) = overlay_origin(
+            windows_work_area()?,
+            PhysicalWindowSize {
+                width: size.width,
+                height: size.height,
+            },
+            position,
+        );
+        window
+            .set_position(PhysicalPosition::new(x, y))
+            .map_err(|error| PlatformError::Other(error.to_string()))?;
+        let hwnd = window
+            .hwnd()
+            .map_err(|error| PlatformError::Other(error.to_string()))?;
+        unsafe {
+            ShowWindow(hwnd.0, SW_SHOW);
+            SetForegroundWindow(hwnd.0);
+        }
+        // SetForegroundWindow can be refused by the OS; Tauri's set_focus is
+        // a best-effort fallback so the DOM receives the keydown.
+        let _ = window.set_focus();
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    window
+        .show()
+        .and_then(|()| window.set_focus())
+        .map_err(|error| PlatformError::Other(error.to_string()))
+}
+
+pub fn restore_foreground_to<R: Runtime>(_app: &AppHandle<R>, target: Option<WindowTarget>) {
+    if let Some(target) = target {
+        let mut windows = SystemWindows;
+        let _ = windows.restore_foreground(target);
+    }
+}
+
 pub struct SystemWindows;
 
-#[cfg(windows)]
 impl WindowsApi for SystemWindows {
     fn foreground_window(&mut self) -> Option<WindowTarget> {
-        let hwnd = unsafe { windows_sys::Win32::UI::WindowsAndMessaging::GetForegroundWindow() };
-        (!hwnd.is_null()).then_some(WindowTarget(hwnd as isize))
+        #[cfg(windows)]
+        {
+            let hwnd = unsafe { windows_sys::Win32::UI::WindowsAndMessaging::GetForegroundWindow() };
+            return (!hwnd.is_null()).then_some(WindowTarget(hwnd as isize));
+        }
+        #[cfg(not(windows))]
+        {
+            None
+        }
     }
 
     fn restore_foreground(&mut self, target: WindowTarget) -> Result<(), PlatformError> {
-        use windows_sys::Win32::UI::WindowsAndMessaging::{
-            SW_RESTORE, SetForegroundWindow, ShowWindow,
-        };
-        let hwnd = target.0 as windows_sys::Win32::Foundation::HWND;
-        unsafe {
-            ShowWindow(hwnd, SW_RESTORE);
-            if SetForegroundWindow(hwnd) == 0 {
-                return Err(PlatformError::FocusFailed(
-                    "Windows refused to restore the target foreground window".into(),
-                ));
+        #[cfg(windows)]
+        {
+            use windows_sys::Win32::UI::WindowsAndMessaging::{
+                SW_RESTORE, SetForegroundWindow, ShowWindow,
+            };
+            let hwnd = target.0 as windows_sys::Win32::Foundation::HWND;
+            unsafe {
+                ShowWindow(hwnd, SW_RESTORE);
+                if SetForegroundWindow(hwnd) == 0 {
+                    return Err(PlatformError::FocusFailed(
+                        "Windows refused to restore the target foreground window".into(),
+                    ));
+                }
             }
         }
         Ok(())
     }
 
     fn write_clipboard(&mut self, text: &str) -> Result<(), PlatformError> {
-        use std::ptr;
-        use windows_sys::Win32::Foundation::GlobalFree;
-        use windows_sys::Win32::System::DataExchange::{
-            CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
-        };
-        use windows_sys::Win32::System::Memory::{
-            GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock,
-        };
-        use windows_sys::Win32::System::Ole::CF_UNICODETEXT;
-        let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
-        unsafe {
-            if OpenClipboard(ptr::null_mut()) == 0 {
-                return Err(PlatformError::ClipboardWrite("OpenClipboard".into()));
-            }
-            if EmptyClipboard() == 0 {
-                CloseClipboard();
-                return Err(PlatformError::ClipboardWrite("EmptyClipboard".into()));
-            }
-            let allocation = GlobalAlloc(GMEM_MOVEABLE, wide.len() * size_of::<u16>());
-            if allocation.is_null() {
-                CloseClipboard();
-                return Err(PlatformError::ClipboardWrite("GlobalAlloc".into()));
-            }
-            let destination = GlobalLock(allocation).cast::<u16>();
-            if destination.is_null() {
-                GlobalFree(allocation);
-                CloseClipboard();
-                return Err(PlatformError::ClipboardWrite("GlobalLock".into()));
-            }
-            ptr::copy_nonoverlapping(wide.as_ptr(), destination, wide.len());
-            GlobalUnlock(allocation);
-            if SetClipboardData(u32::from(CF_UNICODETEXT), allocation).is_null() {
-                GlobalFree(allocation);
-                CloseClipboard();
-                return Err(PlatformError::ClipboardWrite("SetClipboardData".into()));
-            }
-            CloseClipboard();
-        }
-        Ok(())
+        let mut clipboard = arboard::Clipboard::new()
+            .map_err(|error| PlatformError::ClipboardWrite(error.to_string()))?;
+        clipboard
+            .set_text(text.to_owned())
+            .map_err(|error| PlatformError::ClipboardWrite(error.to_string()))
     }
 
     fn send_ctrl_v(&mut self) -> Result<(), PlatformError> {
-        use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-            INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput, VK_CONTROL,
-        };
-        fn key_input(key: u16, flags: u32) -> INPUT {
-            INPUT {
-                r#type: INPUT_KEYBOARD,
-                Anonymous: INPUT_0 {
-                    ki: KEYBDINPUT {
-                        wVk: key,
-                        wScan: 0,
-                        dwFlags: flags,
-                        time: 0,
-                        dwExtraInfo: 0,
+        #[cfg(windows)]
+        {
+            use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+                INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput, VK_CONTROL,
+            };
+            fn key_input(key: u16, flags: u32) -> INPUT {
+                INPUT {
+                    r#type: INPUT_KEYBOARD,
+                    Anonymous: INPUT_0 {
+                        ki: KEYBDINPUT {
+                            wVk: key,
+                            wScan: 0,
+                            dwFlags: flags,
+                            time: 0,
+                            dwExtraInfo: 0,
+                        },
                     },
-                },
+                }
             }
+            let inputs = [
+                key_input(VK_CONTROL, 0),
+                key_input(u16::from(b'V'), 0),
+                key_input(u16::from(b'V'), KEYEVENTF_KEYUP),
+                key_input(VK_CONTROL, KEYEVENTF_KEYUP),
+            ];
+            let sent = unsafe {
+                SendInput(
+                    inputs.len().try_into().unwrap_or(u32::MAX),
+                    inputs.as_ptr(),
+                    size_of::<INPUT>().try_into().unwrap_or(i32::MAX),
+                )
+            };
+            if sent != inputs.len() as u32 {
+                return Err(PlatformError::PasteFailed(format!(
+                    "SendInput accepted {sent}/{} events",
+                    inputs.len()
+                )));
+            }
+            Ok(())
         }
-        let inputs = [
-            key_input(VK_CONTROL, 0),
-            key_input(u16::from(b'V'), 0),
-            key_input(u16::from(b'V'), KEYEVENTF_KEYUP),
-            key_input(VK_CONTROL, KEYEVENTF_KEYUP),
-        ];
-        let sent = unsafe {
-            SendInput(
-                inputs.len().try_into().unwrap_or(u32::MAX),
-                inputs.as_ptr(),
-                size_of::<INPUT>().try_into().unwrap_or(i32::MAX),
-            )
-        };
-        if sent != inputs.len() as u32 {
-            return Err(PlatformError::PasteFailed(format!(
-                "SendInput accepted {sent}/{} events",
-                inputs.len()
-            )));
+        #[cfg(target_os = "macos")]
+        {
+            let output = std::process::Command::new("osascript")
+                .args([
+                    "-e",
+                    r#"tell application "System Events" to keystroke "v" using command down"#,
+                ])
+                .output()
+                .map_err(|error| PlatformError::PasteFailed(error.to_string()))?;
+            if !output.status.success() {
+                return Err(PlatformError::PasteFailed(
+                    String::from_utf8_lossy(&output.stderr).into_owned(),
+                ));
+            }
+            Ok(())
         }
-        Ok(())
+        #[cfg(all(unix, not(target_os = "macos")))]
+        {
+            let output = std::process::Command::new("xdotool")
+                .args(["key", "--clearmodifiers", "ctrl+v"])
+                .output()
+                .map_err(|error| PlatformError::PasteFailed(error.to_string()))?;
+            if !output.status.success() {
+                return Err(PlatformError::PasteFailed(
+                    String::from_utf8_lossy(&output.stderr).into_owned(),
+                ));
+            }
+            Ok(())
+        }
+        #[cfg(not(any(windows, target_os = "macos", all(unix, not(target_os = "macos")))))]
+        {
+            Err(PlatformError::PasteFailed(
+                "paste injection is not implemented on this platform".into(),
+            ))
+        }
     }
 }
 
