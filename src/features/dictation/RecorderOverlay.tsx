@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 
-import { Check, RotateCcw, Square, X } from "../../components/Icons";
+import { Check, Mic, RotateCcw, Square, X } from "../../components/Icons";
 import type { AppAdapter } from "../../lib/tauri";
 import type { AppSnapshot } from "../../lib/types";
 import { normalizeError } from "../../lib/errors";
@@ -10,11 +10,10 @@ function timeLabel(seconds: number) {
   return `${String(Math.floor(seconds / 60)).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
 }
 
-const WAVE_BARS = 16;
-const WAVE_WIDTH = 96;
-const WAVE_HEIGHT = 28;
+const WAVE_BARS = 24;
+const WAVE_HEIGHT = 30;
 
-function LiveWaveform({ level }: { level: number }) {
+function LiveWaveform({ level, mode = "live" }: { level: number; mode?: "live" | "thinking" }) {
   const { t } = useI18n();
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const levelRef = useRef(level);
@@ -25,37 +24,41 @@ function LiveWaveform({ level }: { level: number }) {
     if (!canvas) return;
     const context = canvas.getContext("2d");
     if (!context) return;
+    const cssWidth = canvas.clientWidth || 110;
     const dpr = window.devicePixelRatio || 1;
-    canvas.width = WAVE_WIDTH * dpr;
+    canvas.width = cssWidth * dpr;
     canvas.height = WAVE_HEIGHT * dpr;
     context.scale(dpr, dpr);
     const gap = 3;
-    const barWidth = (WAVE_WIDTH - gap * (WAVE_BARS - 1)) / WAVE_BARS;
-    const seeds = Array.from({ length: WAVE_BARS }, (_, index) => ({
-      phase: index * 1.71,
-      speed: 2.2 + ((index * 37) % 9) / 4,
-      shape: 0.45 + ((index * 53) % 11) / 16,
-    }));
+    const barWidth = Math.max(2.5, (cssWidth - gap * (WAVE_BARS - 1)) / WAVE_BARS);
+    const envelopes = new Array<number>(WAVE_BARS).fill(0);
+    const phases = Array.from({ length: WAVE_BARS }, (_, index) => index * 1.37);
     const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    let smoothed = 0;
     let raf = 0;
 
     const draw = (now: number) => {
-      const target = Math.max(0, Math.min(1, levelRef.current));
-      smoothed += (target - smoothed) * 0.16;
       const time = reduceMotion ? 0 : now / 1000;
-      context.clearRect(0, 0, WAVE_WIDTH, WAVE_HEIGHT);
-      context.fillStyle = "#e8ecf4";
+      const target = Math.max(0, Math.min(1, levelRef.current));
+      context.clearRect(0, 0, cssWidth, WAVE_HEIGHT);
+      context.fillStyle = "#eef2f8";
       for (let index = 0; index < WAVE_BARS; index += 1) {
-        const seed = seeds[index];
-        const wave = 0.5 + 0.5 * Math.sin(time * seed.speed * 1.6 + seed.phase);
-        const energy = 0.14 + smoothed * 0.86;
-        const barHeight = Math.min(WAVE_HEIGHT, 3 + (WAVE_HEIGHT - 6) * energy * (seed.shape * 0.55 + wave * 0.45));
+        let energy: number;
+        if (mode === "thinking") {
+          const center = (Math.sin(time * 1.6) * 0.5 + 0.5) * (WAVE_BARS - 1);
+          const dist = Math.abs(index - center);
+          energy = 0.12 + 0.75 * Math.exp(-(dist * dist) / 8);
+        } else {
+          const wave = 0.5 + 0.5 * Math.sin(time * (2.4 + (index % 5) * 0.35) + phases[index]);
+          const centerBias = 1 - Math.abs(index - (WAVE_BARS - 1) / 2) / WAVE_BARS;
+          energy = 0.08 + target * (0.25 + 0.75 * wave) * (0.45 + centerBias);
+        }
+        envelopes[index] += (energy - envelopes[index]) * 0.2;
+        const height = Math.min(WAVE_HEIGHT, 4 + (WAVE_HEIGHT - 4) * Math.min(1, envelopes[index]));
         const x = index * (barWidth + gap);
-        const y = (WAVE_HEIGHT - barHeight) / 2;
-        context.globalAlpha = 0.55 + 0.45 * (barHeight / WAVE_HEIGHT);
+        const y = (WAVE_HEIGHT - height) / 2;
+        context.globalAlpha = 0.45 + 0.55 * (height / WAVE_HEIGHT);
         context.beginPath();
-        context.roundRect(x, y, barWidth, barHeight, barWidth / 2);
+        context.roundRect(x, y, barWidth, height, barWidth / 2);
         context.fill();
       }
       context.globalAlpha = 1;
@@ -63,18 +66,12 @@ function LiveWaveform({ level }: { level: number }) {
     };
     raf = requestAnimationFrame(draw);
     return () => cancelAnimationFrame(raf);
-  }, []);
+  }, [mode]);
 
-  return (
-    <canvas
-      ref={canvasRef}
-      className="live-waveform"
-      style={{ width: WAVE_WIDTH, height: WAVE_HEIGHT }}
-      aria-label={t("overlay.micLevel")}
-      data-level={level.toFixed(2)}
-    />
-  );
+  return <canvas ref={canvasRef} className="live-waveform" aria-label={t("overlay.micLevel")} data-level={level.toFixed(2)} />;
 }
+
+const DRAG_IGNORE = "button, input, a, select, textarea, [role='button']";
 
 export function RecorderOverlay({ adapter }: { adapter: AppAdapter }) {
   const { t } = useI18n();
@@ -144,7 +141,6 @@ export function RecorderOverlay({ adapter }: { adapter: AppAdapter }) {
       disposeListeners();
     };
   }, [adapter, initAttempt]);
-
   useEffect(() => {
     setSeconds(0);
     if (snapshot?.dictation.status !== "recording") return;
@@ -220,17 +216,26 @@ export function RecorderOverlay({ adapter }: { adapter: AppAdapter }) {
     }
   };
 
+  const startDrag = (event: React.MouseEvent) => {
+    if (event.button !== 0) return;
+    if ((event.target as HTMLElement).closest(DRAG_IGNORE)) return;
+    if (!("__TAURI_INTERNALS__" in window)) return;
+    void import("@tauri-apps/api/window").then(({ getCurrentWindow }) => {
+      void getCurrentWindow().startDragging();
+    });
+  };
+
   const state = snapshot?.dictation;
 
   return (
-    <main className={`recorder-overlay recorder-overlay--${initError ? "init-error" : state?.status ?? "initializing"}`} aria-live="polite" data-tauri-drag-region>
+    <main className={`recorder-overlay recorder-overlay--${initError ? "init-error" : state?.status ?? "initializing"}`} aria-live="polite" data-tauri-drag-region onMouseDown={startDrag}>
       {initError ? <>
         <span className="failure-mark" aria-hidden="true">!</span>
         <div className="overlay-failure-copy" role="alert">
           <strong>{t("overlay.initError.title")}</strong>
           <span>{initError}</span>
         </div>
-        <button data-tauri-drag-region="false" className="text-button danger-text" aria-label={t("overlay.initError.retryAria")} onClick={() => setInitAttempt((attempt) => attempt + 1)}>
+        <button disabled={pending} className="text-button danger-text" aria-label={t("overlay.initError.retryAria")} onClick={() => setInitAttempt((attempt) => attempt + 1)}>
           <RotateCcw size={14} /> {t("common.retry")}
         </button>
       </> : !state && <div className="overlay-content overlay-content--boot">
@@ -238,29 +243,29 @@ export function RecorderOverlay({ adapter }: { adapter: AppAdapter }) {
         <strong>{t("overlay.boot")}</strong>
       </div>}
       {!initError && state?.status === "recording" && <div className="overlay-content overlay-content--recording">
-        <span className="record-dot" aria-hidden="true" />
+        <span className="overlay-mic" aria-hidden="true"><Mic size={15} /></span>
         <time className="overlay-timer">{timeLabel(seconds)}</time>
         <LiveWaveform level={level} />
-        <button data-tauri-drag-region="false" disabled={pending} className="overlay-action overlay-action--stop" aria-label={t("today.cta.stop")} onClick={() => void action(() => adapter.stopRecording())}>
+        <button disabled={pending} className="overlay-action overlay-action--stop" aria-label={t("today.cta.stop")} onClick={() => void action(() => adapter.stopRecording())}>
           <Square size={11} fill="currentColor" />
         </button>
-        <button data-tauri-drag-region="false" disabled={pending} className="overlay-cancel" aria-label={t("overlay.cancelRecording")} title={t("overlay.cancelTitle")} onClick={() => void action(() => adapter.requestCancel())}>
+        <button disabled={pending} className="overlay-cancel" aria-label={t("overlay.cancelRecording")} title={t("overlay.cancelTitle")} onClick={() => void action(() => adapter.requestCancel())}>
           <X size={15} />
         </button>
       </div>}
       {!initError && state?.status === "cancelling" && <div className="overlay-content overlay-content--cancelling">
         <span className="overlay-danger-mark" aria-hidden="true">!</span>
         <div className="overlay-copy"><strong>{t("overlay.cancelling.title")}</strong><small>{t("overlay.cancelling.hint")}</small></div>
-        <button data-tauri-drag-region="false" disabled={pending} className="overlay-action overlay-action--confirm" aria-label={t("overlay.cancelling.confirmAria")} title={t("overlay.cancelling.confirmTitle")} onClick={() => void action(() => adapter.cancelRecording())}>
+        <button disabled={pending} className="overlay-action overlay-action--confirm" aria-label={t("overlay.cancelling.confirmAria")} title={t("overlay.cancelling.confirmTitle")} onClick={() => void action(() => adapter.cancelRecording())}>
           <Check size={13} />
         </button>
-        <button data-tauri-drag-region="false" disabled={pending} className="overlay-action overlay-action--back" aria-label={t("overlay.cancelling.backAria")} title={t("overlay.cancelling.backTitle")} onClick={() => void action(() => adapter.requestCancel())}>
+        <button disabled={pending} className="overlay-action overlay-action--back" aria-label={t("overlay.cancelling.backAria")} title={t("overlay.cancelling.backTitle")} onClick={() => void action(() => adapter.requestCancel())}>
           <X size={13} />
         </button>
       </div>}
       {!initError && state?.status === "processing" && <div className="overlay-content overlay-content--processing">
-        <span className="overlay-processing-mark"><span className="spinner" aria-hidden="true" /></span>
         <div className="overlay-copy"><strong>{snapshot?.modelLoading ? t("today.cta.loadingModel") : t("common.processing")}</strong><small>{snapshot?.modelLoading ? t("overlay.processing.firstRun") : t("overlay.processing.subtitle")}</small></div>
+        <LiveWaveform level={0} mode="thinking" />
       </div>}
       {!initError && state?.status === "pasting" && <div className="overlay-content overlay-content--complete">
         <span className="overlay-complete-mark"><Check size={15} /></span>
@@ -269,7 +274,7 @@ export function RecorderOverlay({ adapter }: { adapter: AppAdapter }) {
       {!initError && state?.status === "failed" && <div className="overlay-content overlay-content--failed">
         <span className="failure-mark" aria-hidden="true">!</span>
         <div className="overlay-copy overlay-failure-copy"><strong>{t("overlay.failed.title")}</strong><small>{t("today.cta.retryDetail")}</small></div>
-        <button data-tauri-drag-region="false" disabled={pending} className="text-button danger-text" aria-label={t("overlay.failed.retryAria")} onClick={() => void action(() => adapter.retryTranscription(state.recovery.recordingId))}>
+        <button disabled={pending} className="text-button danger-text" aria-label={t("overlay.failed.retryAria")} onClick={() => void action(() => adapter.retryTranscription(state.recovery.recordingId))}>
           <RotateCcw size={14} /> {t("common.retry")}
         </button>
       </div>}

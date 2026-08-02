@@ -23,7 +23,7 @@
         "title": "Loquara — dyktowanie",
         "url": "index.html?window=overlay",
          "width": 340,
-         "height": 76,
+         "height": 64,
         "decorations": false,
         "resizable": false,
         "alwaysOnTop": true,

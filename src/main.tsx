@@ -19,9 +19,6 @@ if (!root) {
 
 const isOverlay = new URLSearchParams(window.location.search).get("window") === "overlay";
 document.body.classList.toggle("overlay-window", isOverlay);
-if (isOverlay) {
-  document.body.setAttribute("data-tauri-drag-region", "");
-}
 applyTheme(initialTheme());
 
 createRoot(root).render(
