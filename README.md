@@ -1,6 +1,6 @@
 # Loquara
 
-Loquara is a local, open-source dictation app for Windows (macOS and Linux builds included). Hold a global shortcut, speak, and get a transcription from an NVIDIA Parakeet model running on your GPU — optionally pasted straight into the active app.
+Loquara is a local, open-source dictation app for Windows (Linux builds run in CI; macOS is not yet supported). Hold a global shortcut, speak, and get a transcription from a local Whisper, Parakeet, or Cohere model running on your GPU — optionally pasted straight into the active app.
 
 ## Highlights
 
@@ -20,7 +20,7 @@ The React UI runs in Tauri. Rust captures audio, stores SQLite, and handles shor
 
 ## Requirements
 
-- Windows 10/11 x64, macOS, or Linux (x64);
+- Windows 10/11 x64 (primary) or Linux x64 (via CI);
 - Node.js, `pnpm`, and a Rust toolchain matching `rust-version` (for building);
 - Python 3.10+ (tested with 3.13);
 - PyTorch with CUDA installed separately, matching your NVIDIA driver;

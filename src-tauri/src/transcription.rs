@@ -689,7 +689,9 @@ mod tests {
     #[test]
     fn maps_worker_crash() {
         let path = fake_worker("crash-worker", "raise SystemExit(7)\n");
-        let mut client = WorkerClient::spawn(python(), &path, Duration::from_secs(2), None).unwrap();
+        // Generous timeout: on CI the Python interpreter can take a while to
+        // start, so the crash detection must not race the spawn.
+        let mut client = WorkerClient::spawn(python(), &path, Duration::from_secs(60), None).unwrap();
 
         let error = client.ping().unwrap_err();
 
@@ -725,7 +727,8 @@ for line in sys.stdin:
         let audio_path = missing_path("zażółć-gęślą-jaźń").with_extension("wav");
         fs::write(&audio_path, b"not a real wav").unwrap();
         let request = WorkerRequest::transcribe("żądanie-ąęłóśźż", &audio_path, None).unwrap();
-        let mut client = WorkerClient::spawn(python(), &worker, Duration::from_secs(2), None).unwrap();
+        // Generous timeout for slow CI Python startup.
+        let mut client = WorkerClient::spawn(python(), &worker, Duration::from_secs(60), None).unwrap();
 
         let error = client.send::<TranscriptionResult>(request).unwrap_err();
 
