@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 
-import { Check, Cpu, Languages, Mic, Palette, SlidersHorizontal, Trash2 } from "../../components/Icons";
+import { Check, Cpu, FolderOpen, Languages, Mic, Palette, SlidersHorizontal, Trash2 } from "../../components/Icons";
 import { BrandLogo } from "../../components/BrandLogo";
+import { ConfirmDialog } from "../../components/ConfirmDialog";
 import { ShortcutCapture } from "./ShortcutCapture";
 import { applyTheme } from "../../app/theme";
 import type { ToastKind } from "../../components/Toast";
@@ -37,6 +38,7 @@ export function SettingsPage({
   const [saving, setSaving] = useState(false);
   const [downloading, setDownloading] = useState("");
   const [deleting, setDeleting] = useState("");
+  const [pendingDelete, setPendingDelete] = useState<ModelDescriptor>();
   const [downloadProgress, setDownloadProgress] = useState<ModelDownloadProgress>();
 
   const formatBytes = (bytes: number | null | undefined) => {
@@ -144,7 +146,6 @@ export function SettingsPage({
   };
 
   const remove = async (model: ModelDescriptor) => {
-    if (!window.confirm(t("settings.models.removeConfirm", { model: model.display }))) return;
     setDeleting(model.key);
     try {
       await adapter.deleteModel(model.key);
@@ -183,6 +184,8 @@ export function SettingsPage({
             <label className="setting-row"><span><strong>{t("settings.showOverlay.label")}</strong><small>{t("settings.showOverlay.description")}</small></span><input disabled={saving} type="checkbox" checked={settings.showOverlay} aria-label={t("settings.showOverlay.label")} onChange={(event) => void save({ ...settings, showOverlay: event.target.checked })} /></label>
              <label className="setting-row"><span><strong>{t("settings.launchOnLogin.label")}</strong><small>{t("settings.launchOnLogin.description")}</small></span><input disabled={saving} type="checkbox" checked={settings.launchOnLogin} onChange={(event) => void save({ ...settings, launchOnLogin: event.target.checked })} /></label>
             <label className="setting-row"><span><strong>{t("settings.retention.label")}</strong><small>{t("settings.retention.description")}</small></span><select disabled={saving} value={settings.retentionDays ?? "forever"} onChange={(event) => void save({ ...settings, retentionDays: event.target.value === "forever" ? null : Number(event.target.value) as 1 | 7 | 30 })}><option value="1">{t("settings.retention.1")}</option><option value="7">{t("settings.retention.7")}</option><option value="30">{t("settings.retention.30")}</option><option value="forever">{t("settings.retention.forever")}</option></select></label>
+            <label className="setting-row"><span><strong>{t("settings.dictationLanguage.label")}</strong><small>{t("settings.dictationLanguage.description")}</small></span><select disabled={saving} value={settings.dictationLanguage} onChange={(event) => void save({ ...settings, dictationLanguage: event.target.value })}><option value="auto">{t("settings.dictationLanguage.auto")}</option><option value="pl">{t("settings.dictationLanguage.pl")}</option><option value="en">{t("settings.dictationLanguage.en")}</option></select></label>
+            <label className="setting-row"><span><strong>{t("settings.modelKeepAlive.label")}</strong><small>{t("settings.modelKeepAlive.description")}</small></span><select disabled={saving} value={String(settings.modelKeepAliveSecs)} onChange={(event) => void save({ ...settings, modelKeepAliveSecs: Number(event.target.value) })}><option value="0">{t("settings.modelKeepAlive.always")}</option><option value="60">{t("settings.modelKeepAlive.min1")}</option><option value="180">{t("settings.modelKeepAlive.min3")}</option><option value="300">{t("settings.modelKeepAlive.min5")}</option><option value="600">{t("settings.modelKeepAlive.min10")}</option></select></label>
           </section>
         </div>
         <div className="settings-column">
@@ -231,18 +234,33 @@ export function SettingsPage({
                        {selected ? <span className="model-option__check" aria-hidden="true"><Check size={15} /></span> : null}
                        <span className={`model-option__status model-option__status--${model.status}`}><i aria-hidden="true" />{model.source === "cloud" ? `${t("settings.models.source.cloud")} · ` : ""}{model.status === "ready" ? t("settings.models.status.downloaded") : model.status === "error" ? t("common.error") : t("settings.models.status.notDownloaded")}</span>
                         {!installed && !disabled ? <button type="button" className={`model-download ${isDownloading ? "model-download--active" : ""}`} disabled={Boolean(downloading) || Boolean(deleting)} onClick={(event) => { event.preventDefault(); void download(model.key); }} aria-label={t("settings.models.downloadAria", { model: model.display })}>{isDownloading ? progress?.phase === "validating" ? t("settings.models.checking") : progressPercent === null ? t("settings.models.preparingShort") : `${progressPercent}%` : t("settings.models.download")}</button> : null}
-                       {installed && !selected ? <button type="button" className="model-remove" disabled={Boolean(downloading) || Boolean(deleting)} onClick={(event) => { event.preventDefault(); void remove(model); }} aria-label={t("settings.models.removeAria", { model: model.display })} title={t("settings.models.removeTitle")}>{isDeleting ? "…" : <Trash2 size={14} />}</button> : null}
+                        {installed && !selected ? <button type="button" className="model-remove" disabled={Boolean(downloading) || Boolean(deleting)} onClick={(event) => { event.preventDefault(); setPendingDelete(model); }} aria-label={t("settings.models.removeAria", { model: model.display })} title={t("settings.models.removeTitle")}>{isDeleting ? "…" : <Trash2 size={14} />}</button> : null}
                      </span>
                      {progress ? <span className="model-download-progress" aria-label={progressPercent === null ? t("settings.models.progress.preparing") : t("settings.models.progress.downloaded", { percent: progressPercent })}><span style={{ width: `${progressPercent ?? 4}%` }} /></span> : null}
                    </label>
                  );
                })}
              </div>
-             <div className="model-meta"><span>{t("settings.models.active")} <strong>{selectedModel?.display ?? t("settings.models.selecting")}</strong></span><span>{t("settings.models.requires")} <strong>{selectedModel ? `${selectedModel.minVramGb} GB VRAM · ${selectedModel.minRamGb} GB RAM` : t("settings.models.detecting")}</strong></span><span>{t("settings.models.thisComputer")} <strong>{systemMemory.cpuCores ? t("settings.models.cores", { cores: systemMemory.cpuCores }) : ""}{systemMemory.ramGb ? `${systemMemory.ramGb} GB RAM` : t("settings.models.ramUnknown")}</strong></span></div>
+              <div className="model-meta"><span>{t("settings.models.active")} <strong>{selectedModel?.display ?? t("settings.models.selecting")}</strong></span><span>{t("settings.models.requires")} <strong>{selectedModel ? `${selectedModel.minVramGb} GB VRAM · ${selectedModel.minRamGb} GB RAM` : t("settings.models.detecting")}</strong></span><span>{t("settings.models.thisComputer")} <strong>{systemMemory.cpuCores ? t("settings.models.cores", { cores: systemMemory.cpuCores }) : ""}{systemMemory.ramGb ? `${systemMemory.ramGb} GB RAM` : t("settings.models.ramUnknown")}</strong></span></div>
+              {selectedModel?.status === "ready" ? <button type="button" className="model-folder-button" onClick={() => void adapter.openModelFolder(selectedModel.key)} aria-label={t("settings.models.openFolderAria", { model: selectedModel.display })} title={t("settings.models.openFolderAria", { model: selectedModel.display })}><FolderOpen size={13} /> {t("settings.models.openFolder")}</button> : null}
              {(modelStatus?.message ?? selectedModel?.message) && selectedState !== "ready" ? <p className="model-card__message">{modelStatus?.message ?? selectedModel?.message}</p> : null}
-           </section>
-           <p className="privacy-line"><strong>Offline by default</strong><span>{t("settings.privacy.body")}</span></p>
-      </div>
+            </section>
+            <p className="privacy-line"><strong>Offline by default</strong><span>{t("settings.privacy.body")}</span></p>
+       </div>
+       <ConfirmDialog
+         open={Boolean(pendingDelete)}
+         title={t("settings.models.removeConfirm", { model: pendingDelete?.display ?? "" })}
+         message={t("settings.models.removeConfirmMessage", { model: pendingDelete?.display ?? "", size: pendingDelete ? formatBytes(pendingDelete.installedSizeBytes ?? pendingDelete.estimatedSizeBytes) : "" })}
+         confirmLabel={t("common.delete")}
+         cancelLabel={t("common.cancel")}
+         danger
+         busy={Boolean(deleting)}
+         onCancel={() => setPendingDelete(undefined)}
+         onConfirm={() => {
+           if (pendingDelete) void remove(pendingDelete);
+           setPendingDelete(undefined);
+         }}
+       />
     </section>
   );
 }

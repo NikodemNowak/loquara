@@ -44,6 +44,9 @@ class TransformersRuntime:
     recognizer: RecognitionPipeline
     model: str
     device: str
+    chunk_length_s: float | None = None
+    stride_length_s: float | None = None
+    whisper: bool = False
 
     def transcribe(
         self,
@@ -52,9 +55,17 @@ class TransformersRuntime:
         language: str | None,
     ) -> str:
         kwargs: dict[str, Any] = {"raw": audio, "sampling_rate": sample_rate}
-        if language is not None:
+        if language is not None and self.whisper:
+            # Whisper accepts an explicit language and skips detection.
             kwargs["language"] = language
-        output = self.recognizer(kwargs)
+        call_kwargs: dict[str, Any] = {}
+        if self.chunk_length_s:
+            # Chunk long audio so Whisper never hits the >30 s mel-feature
+            # limit (which forces timestamp generation and fails without
+            # return_timestamps=True).
+            call_kwargs["chunk_length_s"] = self.chunk_length_s
+            call_kwargs["stride_length_s"] = self.stride_length_s
+        output = self.recognizer(kwargs, **call_kwargs)
         if not isinstance(output, dict) or not isinstance(
             output.get("text"),
             str,
@@ -112,10 +123,14 @@ def load_pipeline_runtime(spec: ModelSpec) -> TransformersRuntime:
     if spec.revision:
         kwargs["revision"] = spec.revision
     recognizer = pipeline("automatic-speech-recognition", **kwargs)
+    is_whisper = "whisper" in spec.id.lower()
     return TransformersRuntime(
         recognizer=recognizer,
         model=spec.id,
         device=device,
+        chunk_length_s=30.0 if is_whisper else None,
+        stride_length_s=5.0 if is_whisper else None,
+        whisper=is_whisper,
     )
 
 

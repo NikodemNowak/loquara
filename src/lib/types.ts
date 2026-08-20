@@ -33,6 +33,8 @@ export interface AppSettings {
   streaming: boolean;
   theme: ThemeChoice;
   language: LanguageChoice;
+  dictationLanguage: string;
+  modelKeepAliveSecs: number;
 }
 
 export interface ModelStatus {
@@ -75,6 +77,7 @@ export interface AppSnapshot {
   dictation: DictationState;
   settings: AppSettings;
   modelLoading: boolean;
+  recordingStartedAt?: number | null;
 }
 
 export interface SettingsUpdateResult {

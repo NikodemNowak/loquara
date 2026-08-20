@@ -10,6 +10,12 @@
     "frontendDist": "../dist"
   },
   "app": {
+    "security": {
+      "assetProtocol": {
+        "enable": true,
+        "scope": ["$APPDATA/recordings/**"]
+      }
+    },
     "windows": [
       {
         "label": "main",
@@ -22,8 +28,8 @@
         "label": "overlay",
         "title": "Loquara — dyktowanie",
         "url": "index.html?window=overlay",
-         "width": 340,
-         "height": 64,
+         "width": 118,
+         "height": 32,
         "decorations": false,
         "resizable": false,
         "alwaysOnTop": true,

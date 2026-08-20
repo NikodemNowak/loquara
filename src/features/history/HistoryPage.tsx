@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
 
-import { Copy, Play, RotateCcw, Search, Trash2 } from "../../components/Icons";
+import { Copy, FolderOpen, RotateCcw, Search, Trash2 } from "../../components/Icons";
 import { EmptyState } from "../../components/EmptyState";
+import { AudioPlayer } from "../../components/AudioPlayer";
+import { ConfirmDialog } from "../../components/ConfirmDialog";
 import { Waveform } from "../../components/Waveform";
 import type { AppAdapter } from "../../lib/tauri";
 import type { Recording, RecordingStatus } from "../../lib/types";
@@ -37,6 +39,7 @@ export function HistoryPage({
   const [filter, setFilter] = useState<RecordingStatus | "all">("all");
   const [selectedId, setSelectedId] = useState(recordings[0]?.id);
   const [draft, setDraft] = useState("");
+  const [pendingClear, setPendingClear] = useState(false);
   const { busy, pendingKey, run } = useAsyncAction(onToast);
   const labels: Record<RecordingStatus, string> = {
     completed: t("history.status.completed"),
@@ -52,6 +55,7 @@ export function HistoryPage({
     return matchesStatus && haystack.includes(normalized);
   }), [filter, normalized, recordings]);
   const selected = filtered.find((item) => item.id === selectedId) ?? filtered[0];
+  const failedCount = recordings.filter((item) => item.status === "failed").length;
 
   useEffect(() => {
     if (!selectedId && recordings[0]) setSelectedId(recordings[0].id);
@@ -86,6 +90,24 @@ export function HistoryPage({
           <option value="failed">{t("history.filter.failed")}</option>
           <option value="recording">{t("history.filter.recording")}</option>
         </select>
+        <button
+          className="history-folder-button"
+          onClick={() => void action("folder", () => adapter.openRecordingsFolder())}
+          aria-label={t("history.action.openFolder")}
+          title={t("history.action.openFolder")}
+        >
+          <FolderOpen size={15} />{t("history.action.openFolder")}
+        </button>
+        {failedCount > 0 && (
+          <button
+            className="history-folder-button history-folder-button--danger"
+            onClick={() => setPendingClear(true)}
+            aria-label={t("history.action.clearFailed")}
+            title={t("history.action.clearFailed")}
+          >
+            <Trash2 size={14} />{t("history.action.clearFailed")}
+          </button>
+        )}
       </div>
       <div className="history-workspace">
         <div className="history-list" aria-label={t("history.list.label")}>
@@ -112,7 +134,7 @@ export function HistoryPage({
               <div><dt>{t("history.inspector.model")}</dt><dd>{selected.model ?? "—"}</dd></div>
               <div><dt>{t("history.inspector.audioSaved")}</dt><dd>{selected.audioPath ? t("history.inspector.audioYesLocal") : t("history.inspector.audioNo")}</dd></div>
             </dl>
-            {selected.status === "completed" && <>
+             {selected.status === "completed" && <>
               <div className="transcript-card">
                 <div className="transcript-card__head">
                   <span>{t("history.transcript.title")}</span>
@@ -138,18 +160,53 @@ export function HistoryPage({
               </div>
             </>}
             {selected.error && <p className="error-note">{normalizeError(selected.error)}</p>}
+            {selected.audioPath && (
+              <AudioPlayer
+                adapter={adapter}
+                recording={selected}
+                onReveal={() => void action("reveal", () => adapter.revealRecording(selected.id))}
+              />
+            )}
             <div className="inspector-actions">
               <button disabled={!selected.text || busy} onClick={() => void copy(selected.text ?? "")}><Copy size={15} />{pendingKey === "copy" ? t("history.action.copying") : t("history.action.copy")}</button>
               <button disabled={!selected.text || busy} onClick={() => void action("paste", () => adapter.pasteTranscript(selected.id))}>{pendingKey === "paste" ? t("common.pasting") : t("history.action.paste")}</button>
-              <button disabled={!selected.audioPath || ["recording", "processing"].includes(selected.status) || busy} onClick={() => void action("play", () => adapter.playRecording(selected.id))}><Play size={15} />{pendingKey === "play" ? t("history.action.playing") : t("history.action.play")}</button>
               {selected.status === "failed" && !selected.audioPath
                 ? <span className="retry-unavailable">{t("history.action.retryUnavailable")}</span>
                 : <button disabled={selected.status !== "failed" || !selected.audioPath || busy} onClick={() => void action("retry", () => adapter.retryTranscription(selected.id))}><RotateCcw size={15} />{pendingKey === "retry" ? t("history.action.retrying") : t("common.retry")}</button>}
+              {selected.text && (
+                <button disabled={busy} onClick={() => void action("export", async () => {
+                  const path = await adapter.exportTranscript(selected.id);
+                  onToast(t("history.action.exported", { path }), "success");
+                })}>{pendingKey === "export" ? t("history.action.exporting") : t("history.action.export")}</button>
+              )}
+              {selected.audioPath && (
+                <button disabled={busy} onClick={() => void action("copyPath", async () => {
+                  await navigator.clipboard.writeText(selected.audioPath ?? "");
+                  onToast(t("history.action.copyPathDone"), "success");
+                })}>{t("history.action.copyPath")}</button>
+              )}
               <button className="danger-button" disabled={["recording", "processing"].includes(selected.status) || busy} onClick={() => void action("delete", () => adapter.deleteHistory(selected.id))}><Trash2 size={15} />{pendingKey === "delete" ? t("common.deleting") : t("history.action.delete")}</button>
             </div>
           </> : <EmptyState title={t("history.inspector.emptyTitle")} description={t("history.inspector.emptyDescription")} />}
         </aside>
       </div>
+      <ConfirmDialog
+        open={pendingClear}
+        title={t("history.action.clearFailedConfirm")}
+        message={t("history.action.clearFailedMessage", { count: failedCount })}
+        confirmLabel={t("history.action.clearFailed")}
+        cancelLabel={t("common.cancel")}
+        danger
+        busy={pendingKey === "clearFailed"}
+        onCancel={() => setPendingClear(false)}
+        onConfirm={() => {
+          setPendingClear(false);
+          void action("clearFailed", async () => {
+            const deleted = await adapter.clearFailedRecordings();
+            if (deleted > 0) onToast(t("history.action.clearFailedDone", { count: deleted }), "success");
+          });
+        }}
+      />
     </section>
   );
 }

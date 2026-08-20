@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
-import { Home, Minus, Settings, X, Clock3 } from "../components/Icons";
+import { Home, Minus, Settings, Square, X, Clock3 } from "../components/Icons";
 import { Logo } from "../components/Logo";
 import { ToastRegion, type ToastKind, type ToastMessage } from "../components/Toast";
 import { TodayPage } from "../features/today/TodayPage";
@@ -43,6 +43,11 @@ export function App({ adapter: adapterProp }: { adapter?: AppAdapter }) {
   const { snapshot, setSnapshot, history, refreshHistory, loading } = useAppModel(adapter, toast);
   useEffect(() => {
     applyTheme(snapshot.settings.theme);
+    if (isTauriWindow()) {
+      const dark = snapshot.settings.theme === "dark" ||
+        (snapshot.settings.theme === "system" && window.matchMedia?.("(prefers-color-scheme: dark)").matches);
+      void getCurrentWindow().setTheme(dark ? "dark" : "light");
+    }
   }, [snapshot.settings.theme]);
   useEffect(() => {
     applyPreference(snapshot.settings.language);
@@ -50,6 +55,9 @@ export function App({ adapter: adapterProp }: { adapter?: AppAdapter }) {
   }, [snapshot.settings.language]);
   const minimize = useCallback(() => {
     if (isTauriWindow()) void getCurrentWindow().minimize();
+  }, []);
+  const toggleMaximize = useCallback(() => {
+    if (isTauriWindow()) void getCurrentWindow().toggleMaximize();
   }, []);
   const close = useCallback(() => {
     if (isTauriWindow()) void getCurrentWindow().close();
@@ -68,32 +76,38 @@ export function App({ adapter: adapterProp }: { adapter?: AppAdapter }) {
 
   return (
     <main className="app-shell">
-      <aside className="rail" aria-label={t("nav.rail")} data-tauri-drag-region>
-        <span className="rail-logo" title="Loquara"><Logo /></span>
-        <nav className="rail-nav">
-          {navigation.map(([id, Icon]) => {
-            const label = t(navLabels[id]);
-            return (
-              <button
-                key={id}
-                className={page === id ? "rail-btn rail-btn--active" : "rail-btn"}
-                aria-current={page === id ? "page" : undefined}
-                aria-label={label}
-                title={label}
-                onClick={() => setPage(id)}
-              >
-                <Icon size={20} strokeWidth={1.8} />
-                <span className="rail-btn__label">{label}</span>
-              </button>
-            );
-          })}
-        </nav>
-        <div className="rail-window-controls">
-          <button className="rail-btn rail-btn--control" aria-label={t("win.minimize")} title={t("win.minimize")} onClick={minimize}><Minus size={16} /></button>
-          <button className="rail-btn rail-btn--control rail-btn--close" aria-label={t("win.close")} title={t("win.close")} onClick={close}><X size={16} /></button>
+      <header className="titlebar" data-tauri-drag-region>
+        <span className="titlebar__brand"><Logo size={16} /><span>Loquara</span></span>
+        <div className="titlebar__drag" data-tauri-drag-region />
+        <div className="titlebar__controls">
+          <button className="win-btn" aria-label={t("win.minimize")} title={t("win.minimize")} onClick={minimize}><Minus size={14} /></button>
+          <button className="win-btn" aria-label={t("win.maximize")} title={t("win.maximize")} onClick={toggleMaximize}><Square size={12} /></button>
+          <button className="win-btn win-btn--close" aria-label={t("win.close")} title={t("win.close")} onClick={close}><X size={14} /></button>
         </div>
-      </aside>
-      <div className="app-content"><div className="app-drag" data-tauri-drag-region /><div className="app-scroll">{content}</div></div>
+      </header>
+      <div className="app-body">
+        <aside className="rail" aria-label={t("nav.rail")}>
+          <nav className="rail-nav">
+            {navigation.map(([id, Icon]) => {
+              const label = t(navLabels[id]);
+              return (
+                <button
+                  key={id}
+                  className={page === id ? "rail-btn rail-btn--active" : "rail-btn"}
+                  aria-current={page === id ? "page" : undefined}
+                  aria-label={label}
+                  title={label}
+                  onClick={() => setPage(id)}
+                >
+                  <Icon size={18} strokeWidth={1.8} />
+                  <span className="rail-btn__label">{label}</span>
+                </button>
+              );
+            })}
+          </nav>
+        </aside>
+        <div className="app-content"><div className="app-scroll">{content}</div></div>
+      </div>
       <ToastRegion items={toasts} onDismiss={(id) => setToasts((items) => items.filter((item) => item.id !== id))} />
     </main>
   );

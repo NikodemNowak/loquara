@@ -232,6 +232,7 @@ pub fn run() {
                 .map_err(|error| error.to_string())?;
             dictation::cleanup_retention(&state)?;
             dictation::warm_up_model(app.handle(), &state);
+            dictation::spawn_model_keep_alive_watchdog(&state);
             platform::register_shortcuts(app.handle(), &shortcut)
                 .map_err(|error| error.to_string())?;
 
@@ -318,7 +319,13 @@ pub fn run() {
             dictation::paste_transcript,
             dictation::list_history,
             dictation::delete_history,
+            dictation::export_transcript,
+            dictation::clear_failed_recordings,
             dictation::play_recording,
+            dictation::read_recording_audio,
+            dictation::reveal_recording,
+            dictation::reveal_recordings_dir,
+            dictation::reveal_model_dir,
             dictation::correct_transcript,
             dictation::list_vocabulary,
             dictation::add_vocabulary,

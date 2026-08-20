@@ -109,7 +109,7 @@ class ProtocolTests(unittest.TestCase):
         )
         self.assertEqual(self.engine.load_calls, 1)
 
-    def test_transcribe_rejects_unsupported_language_hint(self):
+    def test_transcribe_forwards_an_explicit_language_hint(self):
         with tempfile.TemporaryDirectory() as directory:
             wav_path = Path(directory) / "speech.wav"
             write_wav(
@@ -125,20 +125,8 @@ class ProtocolTests(unittest.TestCase):
                 self.engine,
             )
 
-        self.assertFalse(response["ok"])
-        self.assertEqual(
-            response["error"],
-            {
-                "code": "unsupported_language_hint",
-                "message": (
-                    "language hints are not supported for this model; "
-                    "Parakeet and Whisper detect language automatically"
-                ),
-                "retryable": False,
-            },
-        )
-        self.assertEqual(self.engine.load_calls, 0)
-        self.assertEqual(self.engine.transcribe_calls, [])
+        self.assertTrue(response["ok"])
+        self.assertEqual(self.engine.transcribe_calls[-1][2], "pl")
 
     def test_transcribe_omits_language_when_not_requested(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -199,15 +199,6 @@ def handle_line(line: str, engine: TranscriptionEngine) -> dict[str, Any]:
                 "invalid_request",
                 "language must be a non-empty string when provided",
             )
-        if language is not None and engine.kind() == "pipeline":
-            return _error(
-                request_id,
-                "unsupported_language_hint",
-                (
-                    "language hints are not supported for this model; "
-                    "Parakeet and Whisper detect language automatically"
-                ),
-            )
 
         try:
             audio = read_wav_mono_16khz(path)

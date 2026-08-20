@@ -455,6 +455,61 @@ pub fn restore_foreground_to<R: Runtime>(_app: &AppHandle<R>, target: Option<Win
     }
 }
 
+/// Reveal `path` in the system file manager (selecting the file/folder).
+///
+/// Used by the history and settings views so the user can find a recording or
+/// a downloaded model on disk. The call resolves once the file manager has
+/// been asked to open; it never blocks on the external process.
+pub fn reveal_path(path: &std::path::Path) -> Result<(), PlatformError> {
+    if !path.exists() {
+        return Err(PlatformError::Other(format!(
+            "ścieżka nie istnieje: {}",
+            path.display()
+        )));
+    }
+    let canonical = std::fs::canonicalize(path).map_err(|error| PlatformError::Other(error.to_string()))?;
+    #[cfg(windows)]
+    {
+        use std::process::Command;
+        // canonicalize() returns a `\\?\` verbatim path which explorer.exe
+        // cannot parse and would open the default folder (Desktop) instead.
+        let raw = canonical.as_os_str().to_string_lossy();
+        let cleaned = raw.strip_prefix(r"\\?\").unwrap_or(&raw);
+        let argument = format!("/select,\"{}\"", cleaned);
+        Command::new("explorer")
+            .arg(argument)
+            .status()
+            .map_err(|error| PlatformError::Other(error.to_string()))?;
+        Ok(())
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .args(["-R", &canonical.display().to_string()])
+            .status()
+            .map_err(|error| PlatformError::Other(error.to_string()))?;
+        Ok(())
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        // xdg-open has no "select" verb, so open the containing directory.
+        let open_dir = if canonical.is_dir() {
+            canonical.clone()
+        } else {
+            canonical.parent().map(std::path::Path::to_path_buf).unwrap_or(canonical.clone())
+        };
+        std::process::Command::new("xdg-open")
+            .arg(open_dir)
+            .status()
+            .map_err(|error| PlatformError::Other(error.to_string()))?;
+        Ok(())
+    }
+    #[cfg(not(any(windows, target_os = "macos", all(unix, not(target_os = "macos")))))]
+    {
+        Err(PlatformError::Other("reveal is not implemented on this platform".into()))
+    }
+}
+
 pub struct SystemWindows;
 
 impl WindowsApi for SystemWindows {

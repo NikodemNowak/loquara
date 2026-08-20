@@ -14,8 +14,8 @@ use std::collections::BTreeSet;
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tauri::{AppHandle, Emitter, State};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tauri::{AppHandle, Emitter, Manager, State};
 use thiserror::Error;
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -227,6 +227,12 @@ pub struct AppSettings {
     pub theme: ThemeChoice,
     #[serde(default = "default_language")]
     pub language: LanguageChoice,
+    #[serde(default = "default_dictation_language")]
+    pub dictation_language: String,
+    /// How many seconds the loaded model stays in memory after the last use.
+    /// 0 means "always" (never unload).
+    #[serde(default)]
+    pub model_keep_alive_secs: u64,
 }
 
 const fn default_launch_on_login() -> bool {
@@ -257,6 +263,10 @@ const fn default_language() -> LanguageChoice {
     LanguageChoice::System
 }
 
+fn default_dictation_language() -> String {
+    "auto".into()
+}
+
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
@@ -271,6 +281,8 @@ impl Default for AppSettings {
             streaming: default_streaming(),
             theme: default_theme(),
             language: default_language(),
+            dictation_language: default_dictation_language(),
+            model_keep_alive_secs: 0,
         }
     }
 }
@@ -694,6 +706,9 @@ pub struct AppSnapshot {
     pub dictation: DictationState,
     pub settings: AppSettings,
     pub model_loading: bool,
+    /// Epoch ms when the active recording started, so the UI can keep an
+    /// accurate elapsed-time counter even across page remounts.
+    pub recording_started_at: Option<i64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -709,6 +724,9 @@ pub struct AppState {
     pub audio: Arc<AudioRecorder>,
     pub storage: Arc<Storage>,
     pub worker: Arc<Mutex<Option<WorkerClient>>>,
+    /// When the idle worker was last placed back in the slot, so a keep-alive
+    /// watchdog can unload the model after a configurable idle timeout.
+    worker_last_used: Arc<Mutex<Instant>>,
     pub target_window: Arc<Mutex<Option<WindowTarget>>>,
     pub settings: Arc<RwLock<AppSettings>>,
     pub model_warm: Arc<ModelWarmup>,
@@ -1028,6 +1046,7 @@ impl AppState {
             audio: Arc::new(audio),
             storage: Arc::new(storage),
             worker: Arc::new(Mutex::new(None)),
+            worker_last_used: Arc::new(Mutex::new(Instant::now())),
             target_window: Arc::new(Mutex::new(None)),
             settings: Arc::new(RwLock::new(settings)),
             model_warm: Arc::new(ModelWarmup::default()),
@@ -1040,19 +1059,42 @@ impl AppState {
         }
     }
 
+    /// Places a freshly loaded/idle worker back into the slot and records that
+    /// it became idle now (used by the keep-alive unloader).
+    fn store_worker(&self, client: WorkerClient) {
+        if let Ok(mut slot) = self.worker.lock() {
+            *slot = Some(client);
+        }
+        if let Ok(mut last_used) = self.worker_last_used.lock() {
+            *last_used = Instant::now();
+        }
+    }
+
     fn snapshot(&self) -> Result<AppSnapshot, String> {
+        let dictation = self
+            .machine
+            .lock()
+            .map_err(|_| "coordinator lock poisoned")?
+            .snapshot();
+        let recording_started_at = match &dictation {
+            DictationState::Recording { recording_id, .. }
+            | DictationState::Cancelling { recording_id, .. } => self
+                .storage
+                .get_recording(recording_id)
+                .ok()
+                .flatten()
+                .map(|recording| recording.created_at),
+            _ => None,
+        };
         Ok(AppSnapshot {
-            dictation: self
-                .machine
-                .lock()
-                .map_err(|_| "coordinator lock poisoned")?
-                .snapshot(),
+            dictation,
             settings: self
                 .settings
                 .read()
                 .map_err(|_| "settings lock poisoned")?
                 .clone(),
             model_loading: self.model_warm.is_loading(),
+            recording_started_at,
         })
     }
 
@@ -1162,6 +1204,7 @@ pub fn warm_up_model(app: &AppHandle, state: &AppState) {
     emit_state(app, state);
     let (sender, receiver) = std::sync::mpsc::sync_channel(1);
     let worker_slot = worker.clone();
+    let worker_last_used = state.worker_last_used.clone();
     std::thread::spawn(move || {
         let result = (|| -> Result<(), ClientError> {
             let mut client = WorkerClient::spawn_with_model_home(
@@ -1172,9 +1215,12 @@ pub fn warm_up_model(app: &AppHandle, state: &AppState) {
                 Some(&model_home),
             )?;
             client.load(Some(warm_model.clone()))?;
-            *worker_slot
-                .lock()
-                .map_err(|_| ClientError::WorkerUnavailable)? = Some(client);
+            if let Ok(mut slot) = worker_slot.lock() {
+                *slot = Some(client);
+            }
+            if let Ok(mut last_used) = worker_last_used.lock() {
+                *last_used = Instant::now();
+            }
             Ok(())
         })();
         let _ = sender.send(result);
@@ -1193,6 +1239,41 @@ fn emit_state(app: &AppHandle, state: &AppState) {
     if let Ok(snapshot) = state.snapshot() {
         let _ = app.emit("dictation://state", snapshot);
     }
+}
+
+/// Watches the idle worker and unloads the model from GPU/RAM after the
+/// configured keep-alive timeout, freeing memory for other apps. With the
+/// default setting (`0` = always) it never unloads.
+pub fn spawn_model_keep_alive_watchdog(state: &AppState) {
+    let state = state.clone();
+    std::thread::spawn(move || loop {
+        let keep = state
+            .settings
+            .read()
+            .map(|settings| settings.model_keep_alive_secs)
+            .unwrap_or(0);
+        if keep > 0 {
+            let idle_elapsed = state
+                .worker_last_used
+                .lock()
+                .map(|last| last.elapsed())
+                .unwrap_or_default();
+            if idle_elapsed >= Duration::from_secs(keep) {
+                let dropped = state
+                    .worker
+                    .lock()
+                    .ok()
+                    .and_then(|mut slot| slot.take())
+                    .is_some();
+                if dropped {
+                    if let Ok(mut last) = state.worker_last_used.lock() {
+                        *last = Instant::now();
+                    }
+                }
+            }
+        }
+        std::thread::sleep(Duration::from_secs(10));
+    });
 }
 
 #[tauri::command]
@@ -1234,6 +1315,9 @@ pub fn start_recording_inner(app: &AppHandle, state: &AppState) -> Result<AppSna
             .message
             .unwrap_or_else(|| "Najpierw pobierz wybrany model.".into()));
     }
+    // Warm the model while the user talks so transcription does not pay the
+    // Python/torch startup cost right after the user stops.
+    warm_up_model(app, state);
     let mut windows = SystemWindows;
     let target = windows.foreground_window();
     let device = state
@@ -1273,7 +1357,10 @@ pub fn start_recording_inner(app: &AppHandle, state: &AppState) -> Result<AppSna
         .started(started.id, audio_path)
         .map_err(|error| error.to_string())?;
     if state.show_overlay() {
-        platform::show_overlay_without_focus(app, overlay_position(&state))
+        // Give the overlay focus so its Esc/Enter controls for cancelling
+        // actually reach the DOM (the pill is where the user interacts while
+        // dictating; focus is restored to the target window afterwards).
+        platform::show_overlay_with_focus(app, overlay_position(&state))
             .map_err(|error| error.to_string())?;
     }
     crate::sound::play_recording_started();
@@ -1451,6 +1538,7 @@ async fn transcribe_recording(
     audio_path: PathBuf,
 ) {
     let worker = state.worker.clone();
+    let worker_last_used = state.worker_last_used.clone();
     let python = state.python.clone();
     let worker_path = state.worker_path.clone();
     let worker_log = state.worker_log.clone();
@@ -1462,6 +1550,12 @@ async fn transcribe_recording(
         .read()
         .map(|settings| settings.model.clone())
         .unwrap_or_else(|_| default_model());
+    let language_hint = state
+        .settings
+        .read()
+        .map(|settings| settings.dictation_language.clone())
+        .unwrap_or_else(|_| default_dictation_language());
+    let language_hint = (language_hint != "auto").then_some(language_hint);
     let outcome = tauri::async_runtime::spawn_blocking(move || {
         warm.wait_until_ready_for(&model, Duration::from_secs(240))?;
         let mut existing = worker
@@ -1483,7 +1577,7 @@ async fn transcribe_recording(
                 Some(&model_home),
             )?,
         };
-        let result = client.transcribe(audio_for_worker, None);
+        let result = client.transcribe(audio_for_worker, language_hint);
         let must_respawn = matches!(
             result,
             Err(ClientError::Timeout { .. }
@@ -1491,7 +1585,12 @@ async fn transcribe_recording(
                 | ClientError::WorkerUnavailable)
         );
         if !must_respawn {
-            *worker.lock().map_err(|_| ClientError::WorkerUnavailable)? = Some(client);
+            if let Ok(mut slot) = worker.lock() {
+                *slot = Some(client);
+            }
+            if let Ok(mut last_used) = worker_last_used.lock() {
+                *last_used = Instant::now();
+            }
         }
         result
     })
@@ -1850,6 +1949,54 @@ pub fn delete_history(recording_id: String, state: State<'_, AppState>) -> Resul
     delete_history_safely(&state.machine, state.storage.as_ref(), &recording_id)
 }
 
+/// Writes a completed transcript to a `.txt` file in the user's Downloads
+/// folder and returns the saved path so the UI can reveal or copy it.
+#[tauri::command(rename_all = "camelCase")]
+pub fn export_transcript(
+    recording_id: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let recording = state
+        .storage
+        .get_recording(&recording_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "recording not found".to_owned())?;
+    let text = recording
+        .text
+        .filter(|text| !text.trim().is_empty())
+        .ok_or_else(|| "This recording has no transcript to export.".to_owned())?;
+    let dir = app
+        .path()
+        .download_dir()
+        .map_err(|error| format!("Could not locate the Downloads folder: {error}"))?;
+    std::fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+    let stem = recording.id.trim_start_matches("recording-");
+    let path = dir.join(format!("{stem}.txt"));
+    std::fs::write(&path, text).map_err(|error| error.to_string())?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
+/// Deletes every failed recording (and its audio) so history stays clean.
+/// Runs one at a time through the same safe deletion path as the UI.
+#[tauri::command(rename_all = "camelCase")]
+pub fn clear_failed_recordings(state: State<'_, AppState>) -> Result<usize, String> {
+    let recordings = state
+        .storage
+        .list_history(&HistoryQuery {
+            search: None,
+            status: Some(RecordingStatus::Failed),
+        })
+        .map_err(|error| error.to_string())?;
+    let mut deleted = 0usize;
+    for recording in recordings {
+        if delete_history_safely(&state.machine, state.storage.as_ref(), &recording.id).map_err(|error| error.to_string())? {
+            deleted += 1;
+        }
+    }
+    Ok(deleted)
+}
+
 #[tauri::command(rename_all = "camelCase")]
 pub async fn play_recording(
     recording_id: String,
@@ -1873,6 +2020,62 @@ pub async fn play_recording(
     tauri::async_runtime::spawn_blocking(move || crate::sound::play_file(&path))
         .await
         .map_err(|error| error.to_string())?
+}
+
+/// Returns the raw WAV bytes for a recording so the UI can play it back with a
+/// seekable, in-app `<audio>` element instead of blocking on the OS player.
+#[tauri::command(rename_all = "camelCase")]
+pub fn read_recording_audio(
+    recording_id: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<u8>, String> {
+    let recording = state
+        .storage
+        .get_recording(&recording_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "recording not found".to_owned())?;
+    let Some(audio_path) = recording.audio_path else {
+        return Err("nagranie nie ma zapisanego audio".into());
+    };
+    let path = PathBuf::from(&audio_path);
+    if !path.is_file() {
+        return Err(format!("brak pliku audio: {}", path.display()));
+    }
+    std::fs::read(&path).map_err(|error| format!("nie udało się odczytać audio: {error}"))
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn reveal_recording(
+    recording_id: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let recording = state
+        .storage
+        .get_recording(&recording_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "recording not found".to_owned())?;
+    let Some(audio_path) = recording.audio_path else {
+        return Err("nagranie nie ma zapisanego audio".into());
+    };
+    let path = PathBuf::from(&audio_path);
+    if !path.is_file() {
+        return Err(format!("brak pliku audio: {}", path.display()));
+    }
+    platform::reveal_path(&path).map_err(|error| error.to_string())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn reveal_recordings_dir(state: State<'_, AppState>) -> Result<(), String> {
+    platform::reveal_path(state.storage.recordings_dir()).map_err(|error| error.to_string())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn reveal_model_dir(model: String, state: State<'_, AppState>) -> Result<(), String> {
+    if !is_supported_model(&model) {
+        return Err(format!("Nieznany model: {model}."));
+    }
+    let path = state.model_home.join(&model);
+    platform::reveal_path(&path).map_err(|error| error.to_string())
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -2302,6 +2505,10 @@ pub async fn download_model(
     emit_model_progress(&app, &verification_model, "validating", 0, None);
     let status = model_status_from_local(&verification_home, &verification_model);
     if status.state == ModelStatusState::Ready {
+        // Begin loading the freshly downloaded model in the background so the
+        // first transcription after a download does not pay the one-time cost
+        // of spawning the Python worker and moving weights into VRAM.
+        warm_up_model(&app, &state);
         Ok(())
     } else {
         Err(status
@@ -2315,8 +2522,14 @@ pub fn delete_model(model: String, state: State<'_, AppState>) -> Result<(), Str
     if !is_supported_model(&model) {
         return Err(format!("Nieznany model: {model}."));
     }
-    if !matches!(state.snapshot()?.dictation, DictationState::Idle) {
-        return Err("Stop dictating before deleting a model.".into());
+    match state.snapshot()?.dictation {
+        DictationState::Recording { .. }
+        | DictationState::Processing { .. }
+        | DictationState::Pasting { .. }
+        | DictationState::Cancelling { .. } => {
+            return Err("Stop dictating before deleting a model.".into());
+        }
+        DictationState::Idle | DictationState::Failed { .. } => {}
     }
     let active_model = state
         .settings

@@ -55,6 +55,8 @@ export const settings: AppSettings = {
   streaming: true,
   theme: "system",
   language: "system",
+  dictationLanguage: "auto",
+  modelKeepAliveSecs: 0,
 };
 
 export const snapshot: AppSnapshot = {
@@ -93,7 +95,13 @@ export function adapterStub(overrides: Partial<AppAdapter> = {}): AppAdapter {
     pasteTranscript: async () => undefined,
     listHistory: async () => recordings,
     deleteHistory: async () => true,
+    exportTranscript: async () => "exported.txt",
+    clearFailedRecordings: async () => 0,
     playRecording: async () => undefined,
+    getRecordingAudio: async () => new Uint8Array(0),
+    revealRecording: async () => undefined,
+    openRecordingsFolder: async () => undefined,
+    openModelFolder: async () => undefined,
     correctTranscript: async () => 0,
     listVocabulary: async () => vocabulary,
     addVocabulary: async (heard, replacement) => {

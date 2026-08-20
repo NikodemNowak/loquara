@@ -11,7 +11,7 @@ function overlay(state: DictationState) {
   let stateListener: ((snapshot: AppSnapshot) => void) | undefined;
   let levelListener: ((level: number) => void) | undefined;
   const adapter = adapterStub({
-    getAppSnapshot: async () => ({ dictation: state, settings: { inputDevice: null, shortcut: "Ctrl+Space", autoPaste: true, retentionDays: 30, launchOnLogin: true, activeMode: "clean", showOverlay: true, model: "parakeet", streaming: true, theme: "system", language: "system" }, modelLoading: false }),
+    getAppSnapshot: async () => ({ dictation: state, settings: { inputDevice: null, shortcut: "Ctrl+Space", autoPaste: true, retentionDays: 30, launchOnLogin: true, activeMode: "clean", showOverlay: true, model: "parakeet", streaming: true, theme: "system", language: "system", dictationLanguage: "auto", modelKeepAliveSecs: 0 }, modelLoading: false }),
     onState: async (listener) => {
       stateListener = listener;
       return () => undefined;
@@ -22,7 +22,7 @@ function overlay(state: DictationState) {
     },
   });
   const view = renderWithI18n(<RecorderOverlay adapter={adapter} />);
-  return { ...view, adapter, emitState: (next: DictationState) => stateListener?.({ dictation: next, settings: { inputDevice: null, shortcut: "Ctrl+Space", autoPaste: true, retentionDays: 30, launchOnLogin: true, activeMode: "clean", showOverlay: true, model: "parakeet", streaming: true, theme: "system", language: "system" }, modelLoading: false }), emitLevel: (level: number) => levelListener?.(level) };
+  return { ...view, adapter, emitState: (next: DictationState) => stateListener?.({ dictation: next, settings: { inputDevice: null, shortcut: "Ctrl+Space", autoPaste: true, retentionDays: 30, launchOnLogin: true, activeMode: "clean", showOverlay: true, model: "parakeet", streaming: true, theme: "system", language: "system", dictationLanguage: "auto", modelKeepAliveSecs: 0 }, modelLoading: false }), emitLevel: (level: number) => levelListener?.(level) };
 }
 
 describe("nakładka dyktowania", () => {
@@ -55,24 +55,23 @@ describe("nakładka dyktowania", () => {
     expect(screen.queryByText("tekst z modelu")).not.toBeInTheDocument();
   });
 
-  test("reaguje na poziom audio i pokazuje licznik", async () => {
+  test("reaguje na poziom audio i pokazuje falę", async () => {
     vi.useFakeTimers();
     const view = overlay({ status: "recording", recordingId: "a", audioPath: "a.wav" });
     await act(async () => { await Promise.resolve(); });
-    expect(screen.getByText("00:00")).toBeVisible();
+    expect(screen.getByLabelText("Poziom mikrofonu")).toBeInTheDocument();
     act(() => {
       view.emitLevel(0.8);
       vi.advanceTimersByTime(2100);
     });
-    expect(screen.getByText("00:02")).toBeVisible();
     expect(screen.getByLabelText("Poziom mikrofonu")).toHaveAttribute("data-level", "0.80");
     vi.clearAllTimers();
     vi.useRealTimers();
   });
 
   test("Esc podczas nagrywania otwiera potwierdzenie zamiast anulować", async () => {
-    const cancelRecording = vi.fn(async () => ({ dictation: { status: "idle" }, settings: { inputDevice: null, shortcut: "Ctrl+Space", autoPaste: true, retentionDays: 30, launchOnLogin: true, activeMode: "clean", showOverlay: true, model: "parakeet", streaming: true, theme: "system", language: "system" }, modelLoading: false }));
-    const requestCancel = vi.fn(async () => ({ dictation: { status: "cancelling", recordingId: "a", audioPath: "a.wav" }, settings: { inputDevice: null, shortcut: "Ctrl+Space", autoPaste: true, retentionDays: 30, launchOnLogin: true, activeMode: "clean", showOverlay: true, model: "parakeet", streaming: true, theme: "system", language: "system" }, modelLoading: false }));
+    const cancelRecording = vi.fn(async () => ({ dictation: { status: "idle" }, settings: { inputDevice: null, shortcut: "Ctrl+Space", autoPaste: true, retentionDays: 30, launchOnLogin: true, activeMode: "clean", showOverlay: true, model: "parakeet", streaming: true, theme: "system", language: "system", dictationLanguage: "auto", modelKeepAliveSecs: 0 }, modelLoading: false }));
+    const requestCancel = vi.fn(async () => ({ dictation: { status: "cancelling", recordingId: "a", audioPath: "a.wav" }, settings: { inputDevice: null, shortcut: "Ctrl+Space", autoPaste: true, retentionDays: 30, launchOnLogin: true, activeMode: "clean", showOverlay: true, model: "parakeet", streaming: true, theme: "system", language: "system", dictationLanguage: "auto", modelKeepAliveSecs: 0 }, modelLoading: false }));
     const view = overlay({ status: "recording", recordingId: "a", audioPath: "a.wav" });
     Object.assign(view.adapter, { cancelRecording, requestCancel });
     await act(async () => { await Promise.resolve(); });
@@ -83,35 +82,35 @@ describe("nakładka dyktowania", () => {
     expect(cancelRecording).not.toHaveBeenCalled();
   });
 
-  test("Enter w potwierdzeniu wraca do nagrywania", async () => {
-    const cancelRecording = vi.fn(async () => ({ dictation: { status: "idle" }, settings: { inputDevice: null, shortcut: "Ctrl+Space", autoPaste: true, retentionDays: 30, launchOnLogin: true, activeMode: "clean", showOverlay: true, model: "parakeet", streaming: true, theme: "system", language: "system" }, modelLoading: false }));
-    const requestCancel = vi.fn(async () => ({ dictation: { status: "cancelling", recordingId: "a", audioPath: "a.wav" }, settings: { inputDevice: null, shortcut: "Ctrl+Space", autoPaste: true, retentionDays: 30, launchOnLogin: true, activeMode: "clean", showOverlay: true, model: "parakeet", streaming: true, theme: "system", language: "system" }, modelLoading: false }));
+  test("Enter w potwierdzeniu anuluje nagrywanie", async () => {
+    const cancelRecording = vi.fn(async () => ({ dictation: { status: "idle" }, settings: { inputDevice: null, shortcut: "Ctrl+Space", autoPaste: true, retentionDays: 30, launchOnLogin: true, activeMode: "clean", showOverlay: true, model: "parakeet", streaming: true, theme: "system", language: "system", dictationLanguage: "auto", modelKeepAliveSecs: 0 }, modelLoading: false }));
+    const requestCancel = vi.fn(async () => ({ dictation: { status: "cancelling", recordingId: "a", audioPath: "a.wav" }, settings: { inputDevice: null, shortcut: "Ctrl+Space", autoPaste: true, retentionDays: 30, launchOnLogin: true, activeMode: "clean", showOverlay: true, model: "parakeet", streaming: true, theme: "system", language: "system", dictationLanguage: "auto", modelKeepAliveSecs: 0 }, modelLoading: false }));
     const view = overlay({ status: "cancelling", recordingId: "a", audioPath: "a.wav" });
     Object.assign(view.adapter, { cancelRecording, requestCancel });
     await act(async () => { await Promise.resolve(); });
 
     fireEvent.keyDown(window, { key: "Enter" });
 
-    expect(requestCancel).toHaveBeenCalledTimes(1);
-    expect(cancelRecording).not.toHaveBeenCalled();
+    expect(cancelRecording).toHaveBeenCalledTimes(1);
+    expect(requestCancel).not.toHaveBeenCalled();
   });
 
-  test("Esc w potwierdzeniu anuluje nagrywanie", async () => {
-    const cancelRecording = vi.fn(async () => ({ dictation: { status: "idle" }, settings: { inputDevice: null, shortcut: "Ctrl+Space", autoPaste: true, retentionDays: 30, launchOnLogin: true, activeMode: "clean", showOverlay: true, model: "parakeet", streaming: true, theme: "system", language: "system" }, modelLoading: false }));
-    const requestCancel = vi.fn(async () => ({ dictation: { status: "cancelling", recordingId: "a", audioPath: "a.wav" }, settings: { inputDevice: null, shortcut: "Ctrl+Space", autoPaste: true, retentionDays: 30, launchOnLogin: true, activeMode: "clean", showOverlay: true, model: "parakeet", streaming: true, theme: "system", language: "system" }, modelLoading: false }));
+  test("Esc w potwierdzeniu wraca do nagrywania", async () => {
+    const cancelRecording = vi.fn(async () => ({ dictation: { status: "idle" }, settings: { inputDevice: null, shortcut: "Ctrl+Space", autoPaste: true, retentionDays: 30, launchOnLogin: true, activeMode: "clean", showOverlay: true, model: "parakeet", streaming: true, theme: "system", language: "system", dictationLanguage: "auto", modelKeepAliveSecs: 0 }, modelLoading: false }));
+    const requestCancel = vi.fn(async () => ({ dictation: { status: "cancelling", recordingId: "a", audioPath: "a.wav" }, settings: { inputDevice: null, shortcut: "Ctrl+Space", autoPaste: true, retentionDays: 30, launchOnLogin: true, activeMode: "clean", showOverlay: true, model: "parakeet", streaming: true, theme: "system", language: "system", dictationLanguage: "auto", modelKeepAliveSecs: 0 }, modelLoading: false }));
     const view = overlay({ status: "cancelling", recordingId: "a", audioPath: "a.wav" });
     Object.assign(view.adapter, { cancelRecording, requestCancel });
     await act(async () => { await Promise.resolve(); });
 
     fireEvent.keyDown(window, { key: "Escape" });
 
-    expect(cancelRecording).toHaveBeenCalledTimes(1);
-    expect(requestCancel).not.toHaveBeenCalled();
+    expect(requestCancel).toHaveBeenCalledTimes(1);
+    expect(cancelRecording).not.toHaveBeenCalled();
   });
 
   test("potwierdzenie znika po upływie czasu i wraca do nagrywania", async () => {
     vi.useFakeTimers();
-    const requestCancel = vi.fn(async () => ({ dictation: { status: "cancelling", recordingId: "a", audioPath: "a.wav" }, settings: { inputDevice: null, shortcut: "Ctrl+Space", autoPaste: true, retentionDays: 30, launchOnLogin: true, activeMode: "clean", showOverlay: true, model: "parakeet", streaming: true, theme: "system", language: "system" }, modelLoading: false }));
+    const requestCancel = vi.fn(async () => ({ dictation: { status: "cancelling", recordingId: "a", audioPath: "a.wav" }, settings: { inputDevice: null, shortcut: "Ctrl+Space", autoPaste: true, retentionDays: 30, launchOnLogin: true, activeMode: "clean", showOverlay: true, model: "parakeet", streaming: true, theme: "system", language: "system", dictationLanguage: "auto", modelKeepAliveSecs: 0 }, modelLoading: false }));
     const view = overlay({ status: "cancelling", recordingId: "a", audioPath: "a.wav" });
     Object.assign(view.adapter, { requestCancel });
     await act(async () => { await Promise.resolve(); });
@@ -124,7 +123,7 @@ describe("nakładka dyktowania", () => {
   });
 
   test("ponawia zachowane audio po błędzie", async () => {
-    const retryTranscription = vi.fn(async () => ({ dictation: { status: "idle" }, settings: { inputDevice: null, shortcut: "Ctrl+Space", autoPaste: true, retentionDays: 30, launchOnLogin: true, activeMode: "clean", showOverlay: true, model: "parakeet", streaming: true, theme: "system", language: "system" }, modelLoading: false }));
+    const retryTranscription = vi.fn(async () => ({ dictation: { status: "idle" }, settings: { inputDevice: null, shortcut: "Ctrl+Space", autoPaste: true, retentionDays: 30, launchOnLogin: true, activeMode: "clean", showOverlay: true, model: "parakeet", streaming: true, theme: "system", language: "system", dictationLanguage: "auto", modelKeepAliveSecs: 0 }, modelLoading: false }));
     const view = overlay({ status: "failed", recovery: { recordingId: "failed-1", audioPath: "f.wav" }, error: "Błąd" });
     Object.assign(view.adapter, { retryTranscription });
     await userEvent.click(await screen.findByRole("button", { name: "Ponów transkrypcję" }));
@@ -138,7 +137,7 @@ describe("nakładka dyktowania", () => {
     Object.assign(view.adapter, { cancelRecording });
 
     await screen.findByText("Anulować nagrywanie?");
-    fireEvent.keyDown(window, { key: "Escape" });
+    fireEvent.keyDown(window, { key: "Enter" });
 
     expect(await screen.findByRole("alert")).toHaveTextContent("Mikrofon nie odpowiada");
     expect(screen.getByText("Anulować nagrywanie?")).toBeVisible();
@@ -189,7 +188,7 @@ describe("nakładka dyktowania", () => {
   test("ponawia inicjalizację po błędzie", async () => {
     const getAppSnapshot = vi.fn()
       .mockRejectedValueOnce(new Error("Chwilowy błąd"))
-      .mockResolvedValueOnce({ dictation: { status: "idle" }, settings: { inputDevice: null, shortcut: "Ctrl+Space", autoPaste: true, retentionDays: 30, launchOnLogin: true, activeMode: "clean", showOverlay: true, model: "parakeet", streaming: true, theme: "system", language: "system" }, modelLoading: false });
+      .mockResolvedValueOnce({ dictation: { status: "idle" }, settings: { inputDevice: null, shortcut: "Ctrl+Space", autoPaste: true, retentionDays: 30, launchOnLogin: true, activeMode: "clean", showOverlay: true, model: "parakeet", streaming: true, theme: "system", language: "system", dictationLanguage: "auto", modelKeepAliveSecs: 0 }, modelLoading: false });
     const hideOverlay = vi.fn(async () => undefined);
     renderWithI18n(<RecorderOverlay adapter={adapterStub({ getAppSnapshot, hideOverlay })} />);
 
@@ -215,15 +214,15 @@ describe("nakładka dyktowania", () => {
 
     act(() => emitState({
       dictation: { status: "recording", recordingId: "new", audioPath: "new.wav" },
-      settings: { inputDevice: null, shortcut: "Ctrl+Space", autoPaste: true, retentionDays: 30, launchOnLogin: true, activeMode: "clean", showOverlay: true, model: "parakeet", streaming: true, theme: "system", language: "system" },
+      settings: { inputDevice: null, shortcut: "Ctrl+Space", autoPaste: true, retentionDays: 30, launchOnLogin: true, activeMode: "clean", showOverlay: true, model: "parakeet", streaming: true, theme: "system", language: "system", dictationLanguage: "auto", modelKeepAliveSecs: 0 },
       modelLoading: false,
     }));
     resolveSnapshot({
       dictation: { status: "idle" },
-      settings: { inputDevice: null, shortcut: "Ctrl+Space", autoPaste: true, retentionDays: 30, launchOnLogin: true, activeMode: "clean", showOverlay: true, model: "parakeet", streaming: true, theme: "system", language: "system" },
+      settings: { inputDevice: null, shortcut: "Ctrl+Space", autoPaste: true, retentionDays: 30, launchOnLogin: true, activeMode: "clean", showOverlay: true, model: "parakeet", streaming: true, theme: "system", language: "system", dictationLanguage: "auto", modelKeepAliveSecs: 0 },
       modelLoading: false,
     });
 
-    expect(await screen.findByText("00:00")).toBeVisible();
+    expect(await screen.findByLabelText("Poziom mikrofonu")).toBeVisible();
   });
 });

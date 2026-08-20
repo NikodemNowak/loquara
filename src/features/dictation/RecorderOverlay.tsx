@@ -1,17 +1,28 @@
 import { useEffect, useRef, useState } from "react";
 
 import { Check, RotateCcw } from "../../components/Icons";
+import { applyTheme } from "../../app/theme";
 import type { AppAdapter } from "../../lib/tauri";
-import type { AppSnapshot } from "../../lib/types";
+import type { AppSnapshot, ThemeChoice } from "../../lib/types";
 import { normalizeError } from "../../lib/errors";
 import { useI18n } from "../../lib/i18n";
 
-function timeLabel(seconds: number) {
-  return `${String(Math.floor(seconds / 60)).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
+const isTauri = "__TAURI_INTERNALS__" in window;
+
+function effectiveTheme(choice: ThemeChoice): "light" | "dark" {
+  if (choice === "light" || choice === "dark") return choice;
+  return window.matchMedia?.("(prefers-color-scheme: dark)").matches ? "dark" : "light";
 }
 
-const WAVE_BARS = 28;
-const WAVE_HEIGHT = 30;
+const WAVE_BARS = 18;
+const WAVE_HEIGHT = 18;
+
+// Deterministic pseudo-random phases so the bars bob in place like an
+// equalizer instead of forming a wave that travels left-to-right.
+const BAR_PHASES = Array.from({ length: WAVE_BARS }, (_, index) => {
+  const value = Math.sin(index * 127.1 + 311.7) * 43758.5453;
+  return (value - Math.floor(value)) * Math.PI * 2;
+});
 
 function LiveWaveform({ level, mode = "live" }: { level: number; mode?: "live" | "thinking" }) {
   const { t } = useI18n();
@@ -24,15 +35,15 @@ function LiveWaveform({ level, mode = "live" }: { level: number; mode?: "live" |
     if (!canvas) return;
     const context = canvas.getContext("2d");
     if (!context) return;
-    const cssWidth = canvas.clientWidth || 180;
+    const cssWidth = canvas.clientWidth || 104;
     const dpr = window.devicePixelRatio || 1;
     canvas.width = cssWidth * dpr;
     canvas.height = WAVE_HEIGHT * dpr;
     context.scale(dpr, dpr);
-    const gap = 3;
-    const barWidth = Math.max(3, (cssWidth - gap * (WAVE_BARS - 1)) / WAVE_BARS);
+    const barWidth = 2.4;
+    const gap = 3.0;
+    const step = barWidth + gap;
     const envelopes = new Array<number>(WAVE_BARS).fill(0);
-    const phases = Array.from({ length: WAVE_BARS }, (_, index) => index * 1.37);
     const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     let raf = 0;
 
@@ -40,26 +51,37 @@ function LiveWaveform({ level, mode = "live" }: { level: number; mode?: "live" |
       const time = reduceMotion ? 0 : now / 1000;
       const target = Math.max(0, Math.min(1, levelRef.current));
       context.clearRect(0, 0, cssWidth, WAVE_HEIGHT);
-      context.fillStyle = "#eef2f8";
+      const barColor =
+        getComputedStyle(document.documentElement).getPropertyValue("--pill-accent").trim() ||
+        "#78a9ff";
+      context.fillStyle = barColor;
+      const mid = (WAVE_BARS - 1) / 2;
+      const contentWidth = (WAVE_BARS - 1) * step + barWidth;
+      const offset = Math.max(0, (cssWidth - contentWidth) / 2);
       for (let index = 0; index < WAVE_BARS; index += 1) {
         let energy: number;
         if (mode === "thinking") {
-          const center = (Math.sin(time * 1.6) * 0.5 + 0.5) * (WAVE_BARS - 1);
+          const center = (Math.sin(time * 1.4) * 0.5 + 0.5) * (WAVE_BARS - 1);
           const dist = Math.abs(index - center);
-          energy = 0.16 + 0.72 * Math.exp(-(dist * dist) / 10);
+          energy = 0.18 + 0.74 * Math.exp(-(dist * dist) / 14);
         } else {
-          const wave = 0.5 + 0.5 * Math.sin(time * (2.4 + (index % 5) * 0.35) + phases[index]);
-          const centerBias = 1 - Math.abs(index - (WAVE_BARS - 1) / 2) / WAVE_BARS;
-          energy = 0.1 + target * (0.25 + 0.75 * wave) * (0.5 + centerBias);
+          const phase = BAR_PHASES[index];
+          const speed = 2.0 + (index % 3) * 0.4;
+          const wave =
+            0.5 +
+            0.5 *
+              Math.sin(time * speed + phase) *
+              (0.65 + 0.35 * Math.sin(time * 1.4 + phase * 1.7));
+          const falloff = 0.6 + 0.4 * (1 - Math.abs(index - mid) / (mid + 1));
+          const amp = 0.35 + 0.65 * target;
+          energy = Math.max(0.06, amp * wave * falloff);
         }
-        envelopes[index] += (energy - envelopes[index]) * 0.28;
-        const height = Math.min(WAVE_HEIGHT, 5 + (WAVE_HEIGHT - 5) * Math.min(1, envelopes[index]));
-        const x = index * (barWidth + gap);
+        envelopes[index] += (energy - envelopes[index]) * 0.4;
+        const height = Math.max(1.5, WAVE_HEIGHT * Math.min(1, envelopes[index]));
+        const x = offset + index * step;
         const y = (WAVE_HEIGHT - height) / 2;
-        context.globalAlpha = 0.5 + 0.5 * (height / WAVE_HEIGHT);
-        context.beginPath();
-        context.roundRect(x, y, barWidth, height, barWidth / 2);
-        context.fill();
+        context.globalAlpha = 0.45 + 0.55 * (height / WAVE_HEIGHT);
+        context.fillRect(x, y, barWidth, height);
       }
       context.globalAlpha = 1;
       raf = requestAnimationFrame(draw);
@@ -77,7 +99,6 @@ export function RecorderOverlay({ adapter }: { adapter: AppAdapter }) {
   const { t } = useI18n();
   const [snapshot, setSnapshot] = useState<AppSnapshot>();
   const [level, setLevel] = useState(0);
-  const [seconds, setSeconds] = useState(0);
   const [pending, setPending] = useState(false);
   const [actionError, setActionError] = useState("");
   const [initError, setInitError] = useState("");
@@ -141,13 +162,6 @@ export function RecorderOverlay({ adapter }: { adapter: AppAdapter }) {
       disposeListeners();
     };
   }, [adapter, initAttempt]);
-  useEffect(() => {
-    setSeconds(0);
-    if (snapshot?.dictation.status !== "recording") return;
-    const started = Date.now();
-    const timer = window.setInterval(() => setSeconds(Math.floor((Date.now() - started) / 1000)), 250);
-    return () => window.clearInterval(timer);
-  }, [snapshot?.dictation.status]);
 
   useEffect(() => {
     if (snapshot?.dictation.status !== "recording") return;
@@ -161,8 +175,8 @@ export function RecorderOverlay({ adapter }: { adapter: AppAdapter }) {
   useEffect(() => {
     if (snapshot?.dictation.status !== "cancelling") return;
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") void action(() => adapter.cancelRecording());
-      else if (event.key === "Enter") void action(() => adapter.requestCancel());
+      if (event.key === "Enter") void action(() => adapter.cancelRecording());
+      else if (event.key === "Escape") void action(() => adapter.requestCancel());
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
@@ -204,6 +218,17 @@ export function RecorderOverlay({ adapter }: { adapter: AppAdapter }) {
     };
   }, [adapter]);
 
+  useEffect(() => {
+    if (!snapshot) return;
+    const resolved = effectiveTheme(snapshot.settings.theme);
+    applyTheme(snapshot.settings.theme);
+    if (isTauri) {
+      void import("@tauri-apps/api/window").then(({ getCurrentWindow }) => {
+        void getCurrentWindow().setTheme(resolved);
+      });
+    }
+  }, [snapshot]);
+
   const action = async (command: () => Promise<AppSnapshot>) => {
     setPending(true);
     setActionError("");
@@ -242,8 +267,7 @@ export function RecorderOverlay({ adapter }: { adapter: AppAdapter }) {
         <span className="spinner" aria-hidden="true" />
         <strong>{t("overlay.boot")}</strong>
       </div>}
-      {!initError && state?.status === "recording" && <div className="overlay-content overlay-content--recording">
-        <time className="overlay-timer">{timeLabel(seconds)}</time>
+       {!initError && state?.status === "recording" && <div className="overlay-content overlay-content--recording">
         <LiveWaveform level={level} />
       </div>}
       {!initError && state?.status === "cancelling" && <div className="overlay-content overlay-content--cancelling">

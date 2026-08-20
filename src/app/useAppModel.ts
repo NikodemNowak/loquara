@@ -17,6 +17,8 @@ const fallbackSettings: AppSettings = {
   streaming: true,
   theme: "system",
   language: "system",
+  dictationLanguage: "auto",
+  modelKeepAliveSecs: 0,
 };
 
 export function useAppModel(adapter: AppAdapter, onError: (message: string) => void) {

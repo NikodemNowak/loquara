@@ -62,6 +62,7 @@ export function TodayPage({
   const [devices, setDevices] = useState<InputDeviceInfo[]>([]);
   const state = snapshot.dictation;
   const isRecording = state.status === "recording";
+  const startedAt = snapshot.recordingStartedAt ?? null;
 
   useEffect(() => {
     let active = true;
@@ -86,10 +87,10 @@ export function TodayPage({
       setSeconds(0);
       return;
     }
-    const started = Date.now();
+    const started = startedAt ?? Date.now();
     const timer = window.setInterval(() => setSeconds(Math.floor((Date.now() - started) / 1000)), 250);
     return () => window.clearInterval(timer);
-  }, [state.status]);
+  }, [state.status, startedAt]);
 
   const timeLabel = (total: number) =>
     `${String(Math.floor(total / 60)).padStart(2, "0")}:${String(total % 60).padStart(2, "0")}`;
@@ -137,6 +138,12 @@ export function TodayPage({
           <span><strong>{busy ? t("today.busy") : cta.label}</strong><small>{cta.detail}</small></span>
           <ShortcutKeys shortcut={snapshot.settings.shortcut} />
         </button>
+        {state.status === "idle" && snapshot.modelLoading && (
+          <p className="model-warming-note" role="status"><span className="spinner spinner--small" aria-hidden="true" />{t("today.modelLoadingNote")}</p>
+        )}
+        {state.status === "processing" && (
+          <div className="processing-progress" role="progressbar" aria-label={t("common.processing")}><span /></div>
+        )}
         <div className="hero-chips">
           <span className="hero-chip" aria-hidden="true"><Cpu size={12} />{t("today.chips.model")}: <strong>{MODEL_LABELS[snapshot.settings.model] ?? snapshot.settings.model}</strong></span>
           <span className="hero-chip" aria-hidden="true"><Languages size={12} />{t("today.chips.language")}: <strong>{lang.toUpperCase()}</strong></span>

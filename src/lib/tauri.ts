@@ -33,7 +33,13 @@ export interface AppAdapter {
   pasteTranscript(recordingId?: string): Promise<void>;
   listHistory(query: HistoryQuery): Promise<Recording[]>;
   deleteHistory(recordingId: string): Promise<boolean>;
+  exportTranscript(recordingId: string): Promise<string>;
+  clearFailedRecordings(): Promise<number>;
   playRecording(recordingId: string): Promise<void>;
+  getRecordingAudio(recordingId: string): Promise<Uint8Array>;
+  revealRecording(recordingId: string): Promise<void>;
+  openRecordingsFolder(): Promise<void>;
+  openModelFolder(modelKey: string): Promise<void>;
   correctTranscript(recordingId: string, text: string): Promise<number>;
   listVocabulary(): Promise<VocabularyEntry[]>;
   addVocabulary(heard: string, replacement: string): Promise<VocabularyEntry>;
@@ -93,8 +99,14 @@ const realAdapter: AppAdapter = {
     invoke("paste_transcript", { recordingId }),
   listHistory: (query) => invokeAfterStateReady("list_history", { query }),
   deleteHistory: (recordingId) => invoke("delete_history", { recordingId }),
-  playRecording: (recordingId) => invoke("play_recording", { recordingId }),
-  correctTranscript: (recordingId, text) => invoke("correct_transcript", { recordingId, text }),
+    exportTranscript: (recordingId) => invoke("export_transcript", { recordingId }),
+    clearFailedRecordings: () => invoke("clear_failed_recordings"),
+    playRecording: (recordingId) => invoke("play_recording", { recordingId }),
+    getRecordingAudio: (recordingId) => invoke("read_recording_audio", { recordingId }),
+    revealRecording: (recordingId) => invoke("reveal_recording", { recordingId }),
+    openRecordingsFolder: () => invoke("reveal_recordings_dir"),
+    openModelFolder: (modelKey) => invoke("reveal_model_dir", { model: modelKey }),
+    correctTranscript: (recordingId, text) => invoke("correct_transcript", { recordingId, text }),
   listVocabulary: () => invoke("list_vocabulary"),
   addVocabulary: (heard, replacement) =>
     invoke("add_vocabulary", { heard, replacement }),
@@ -143,6 +155,8 @@ const initialSettings: AppSettings = {
   streaming: false,
   theme: "system",
   language: "system",
+  dictationLanguage: "auto",
+  modelKeepAliveSecs: 0,
 };
 
 const demoHistory = (): Recording[] => [
@@ -203,7 +217,9 @@ export function createBrowserAdapter(): AppAdapter {
     ],
     startRecording: async () => {
       const id = `demo-${Date.now()}`;
-      return setState({ status: "recording", recordingId: id, audioPath: `${id}.wav` });
+      snapshot = { dictation: { status: "recording", recordingId: id, audioPath: `${id}.wav` }, settings, modelLoading: false, recordingStartedAt: Date.now() };
+      emit();
+      return snapshot;
     },
     stopRecording: async () => {
       if (snapshot.dictation.status !== "recording") return snapshot;
@@ -242,7 +258,21 @@ export function createBrowserAdapter(): AppAdapter {
       history = history.filter((item) => item.id !== recordingId);
       return before !== history.length;
     },
+    exportTranscript: async (recordingId) => {
+      const item = history.find((recording) => recording.id === recordingId);
+      if (!item?.text) throw new Error(translate("errors.noTranscript"));
+      return `${item.text}`;
+    },
+    clearFailedRecordings: async () => {
+      const before = history.length;
+      history = history.filter((item) => item.status !== "failed");
+      return before - history.length;
+    },
     playRecording: async () => undefined,
+    getRecordingAudio: async () => new Uint8Array(0),
+    revealRecording: async () => undefined,
+    openRecordingsFolder: async () => undefined,
+    openModelFolder: async () => undefined,
     correctTranscript: async () => 0,
     listVocabulary: async () => [...vocabulary],
     addVocabulary: async (heard, replacement) => {
