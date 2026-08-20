@@ -431,6 +431,14 @@ class WavConversionTests(unittest.TestCase):
                 )
 
 
+def _torch_importable() -> bool:
+    try:
+        import torch  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
 class WorkerProcessTests(unittest.TestCase):
     def test_worker_ping_stays_alive_without_importing_model_dependencies(self):
         repository = Path(__file__).resolve().parent.parent
@@ -506,6 +514,10 @@ class WorkerProcessTests(unittest.TestCase):
         self.assertEqual(response["request_id"], "żądanie-ąęłóśźż")
         self.assertEqual(response["error"]["code"], "invalid_audio")
 
+    @unittest.skipUnless(
+        _torch_importable(),
+        "PyTorch is required to run engine setup integration tests",
+    )
     def test_setup_ping_works_in_available_powershell_hosts(self):
         repository = Path(__file__).resolve().parent.parent
         script = repository / "scripts" / "setup-engine.ps1"
@@ -540,6 +552,10 @@ class WorkerProcessTests(unittest.TestCase):
                 self.assertEqual(process.returncode, 0, process.stderr)
                 self.assertIn("Parakeet worker ping: ready", process.stdout)
 
+    @unittest.skipUnless(
+        _torch_importable(),
+        "PyTorch is required to run engine setup integration tests",
+    )
     def test_setup_times_out_and_kills_hanging_worker_in_all_hosts(self):
         repository = Path(__file__).resolve().parent.parent
         script = repository / "scripts" / "setup-engine.ps1"
@@ -599,6 +615,10 @@ class WorkerProcessTests(unittest.TestCase):
                 with self.assertRaises(OSError):
                     os.kill(worker_pid, 0)
 
+    @unittest.skipUnless(
+        _torch_importable(),
+        "PyTorch is required to run engine setup integration tests",
+    )
     def test_setup_uses_mow_python_when_path_has_no_python(self):
         repository = Path(__file__).resolve().parent.parent
         script = repository / "scripts" / "setup-engine.ps1"
