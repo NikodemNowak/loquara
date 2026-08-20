@@ -40,7 +40,9 @@ class DownloadModelTests(unittest.TestCase):
                 }
             ],
         )
-        self.assertEqual(report.path, snapshot)
+        # Compare against the canonical path: on Windows CI the temp dir is
+        # reported with a short (8.3) name while resolve() expands it.
+        self.assertEqual(report.path, snapshot.resolve())
         self.assertEqual(report.bytes, 4)
 
     def test_directory_size_counts_nested_files(self):
