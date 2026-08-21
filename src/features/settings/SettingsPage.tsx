@@ -6,9 +6,10 @@ import { ConfirmDialog } from "../../components/ConfirmDialog";
 import { ShortcutCapture } from "./ShortcutCapture";
 import { Select } from "../../components/Select";
 import { HuggingFaceGate } from "./HuggingFaceGate";
+import { EngineSetup } from "./EngineSetup";
 import type { ToastKind } from "../../components/Toast";
 import type { AppAdapter } from "../../lib/tauri";
-import type { AppSettings, HfAccount, InputDeviceInfo, ModelDescriptor, ModelDownloadProgress, ModelStatus } from "../../lib/types";
+import type { AppSettings, EngineStatus, HfAccount, InputDeviceInfo, ModelDescriptor, ModelDownloadProgress, ModelStatus } from "../../lib/types";
 import { normalizeError } from "../../lib/errors";
 import { useI18n } from "../../lib/i18n";
 
@@ -39,11 +40,14 @@ export function SettingsPage({
   adapter,
   initialSettings,
   onSettingsChange,
+  onModelsChanged,
   onToast,
 }: {
   adapter: AppAdapter;
   initialSettings: AppSettings;
   onSettingsChange?: (settings: AppSettings) => void;
+  /** Lets the shell re-check readiness after a model is added or removed. */
+  onModelsChanged?: () => void;
   onToast: (message: string, kind: ToastKind) => void;
 }) {
   const { t } = useI18n();
@@ -60,6 +64,9 @@ export function SettingsPage({
   /** The model whose download stopped because it needs Hugging Face access. */
   const [gatedModel, setGatedModel] = useState<ModelDescriptor>();
   const [hfAccount, setHfAccount] = useState<HfAccount>({ connected: false, name: null });
+  const [engine, setEngine] = useState<EngineStatus>();
+  const [checkingEngine, setCheckingEngine] = useState(false);
+  const [engineAttempt, setEngineAttempt] = useState(0);
 
   const formatBytes = (bytes: number | null | undefined) => {
     if (!bytes) return t("settings.models.notDownloadedBytes");
@@ -105,6 +112,18 @@ export function SettingsPage({
     })();
     return () => { active = false; };
   }, [adapter, settings.model, t]);
+
+  // Probing the interpreter spawns a process, so it is kept out of the main
+  // startup effect and re-run only when the user asks.
+  useEffect(() => {
+    let active = true;
+    setCheckingEngine(true);
+    void adapter.engineStatus()
+      .then((status) => { if (active) setEngine(status); })
+      .catch(() => {})
+      .finally(() => { if (active) setCheckingEngine(false); });
+    return () => { active = false; };
+  }, [adapter, engineAttempt]);
   useEffect(() => {
     let active = true;
     let unlisten: (() => void) | undefined;
@@ -163,6 +182,7 @@ export function SettingsPage({
       setModels(loaded);
       const status = await adapter.getModelStatus();
       setModelStatus(status);
+      onModelsChanged?.();
       onToast(t("settings.models.downloadedToast", { model: models.find((model) => model.key === key)?.display ?? key }), "success");
     } catch (error) {
       const message = normalizeError(error);
@@ -184,6 +204,7 @@ export function SettingsPage({
     try {
       await adapter.deleteModel(model.key);
       setModels(await adapter.listModels());
+      onModelsChanged?.();
       onToast(t("settings.models.removedToast", { model: model.display }), "success");
     } catch (error) {
       onToast(t("settings.models.removeError", { error: normalizeError(error) }), "error");
@@ -210,6 +231,14 @@ export function SettingsPage({
       </header>
 
       <div className="settings-column">
+        {engine && (
+          <EngineSetup
+            status={engine}
+            modelReady={selectedState === "ready"}
+            checking={checkingEngine}
+            onRecheck={() => setEngineAttempt((attempt) => attempt + 1)}
+          />
+        )}
         <section className="settings-group">
           <div className="group-heading">
             <h2>{t("settings.recording.title")}</h2>

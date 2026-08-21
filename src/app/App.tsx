@@ -9,6 +9,7 @@ import { DictatePage } from "../features/dictate/DictatePage";
 import { HistoryPage } from "../features/history/HistoryPage";
 import { SettingsPage } from "../features/settings/SettingsPage";
 import { getAdapter, type AppAdapter } from "../lib/tauri";
+import type { ModelStatus } from "../lib/types";
 import { useI18n, type TranslationKey } from "../lib/i18n";
 import { useAppModel } from "./useAppModel";
 
@@ -42,6 +43,9 @@ export function App({ adapter: adapterProp }: { adapter?: AppAdapter }) {
   }, []);
   const { snapshot, setSnapshot, history, refreshHistory, loading } = useAppModel(adapter, toast);
   const [model, setModel] = useState<{ display: string; provider: string }>();
+  /** Whether the selected model is actually present on this machine. */
+  const [installed, setInstalled] = useState<ModelStatus["state"] | "checking">("checking");
+  const [reload, setReload] = useState(0);
   useEffect(() => {
     let active = true;
     void adapter.listModels()
@@ -55,14 +59,27 @@ export function App({ adapter: adapterProp }: { adapter?: AppAdapter }) {
       .catch(() => {
         if (active) setModel({ display: snapshot.settings.model, provider: snapshot.settings.model });
       });
+    // Readiness is a fact about the disk, not something that can be inferred
+    // from the app being idle: claiming "ready" with no model installed is
+    // exactly the state a first run is in.
+    void adapter.getModelStatus()
+      .then((status) => { if (active) setInstalled(status.state); })
+      .catch(() => { if (active) setInstalled("error"); });
     return () => { active = false; };
-  }, [adapter, snapshot.settings.model]);
-  const engine: { state: "recording" | "loading" | "ready"; label: TranslationKey } =
+  }, [adapter, snapshot.settings.model, reload]);
+
+  const engine: { state: string; label: TranslationKey } =
     snapshot.dictation.status === "recording" || snapshot.dictation.status === "cancelling"
       ? { state: "recording", label: "engine.recording" }
       : snapshot.modelLoading
         ? { state: "loading", label: "engine.loading" }
-        : { state: "ready", label: "engine.ready" };
+        : installed === "checking"
+          ? { state: "checking", label: "engine.checking" }
+          : installed === "ready"
+            ? { state: "ready", label: "engine.ready" }
+            : installed === "error"
+              ? { state: "error", label: "engine.error" }
+              : { state: "missing", label: "engine.missing" };
   useEffect(() => {
     // Loquara is dark-only; tell the OS so the window frame and native
     // scrollbars match rather than flashing a light chrome on launch.
@@ -86,11 +103,11 @@ export function App({ adapter: adapterProp }: { adapter?: AppAdapter }) {
   if (loading) {
     content = <div className="page page-skeleton" aria-label={t("app.loading")}><span /><span /><span /></div>;
   } else if (page === "dictate") {
-    content = <DictatePage adapter={adapter} snapshot={snapshot} recordings={history} onSnapshot={setSnapshot} onHistory={() => setPage("history")} onSettings={() => setPage("settings")} onToast={toast} />;
+    content = <DictatePage adapter={adapter} snapshot={snapshot} recordings={history} modelReady={installed === "ready"} onSnapshot={setSnapshot} onHistory={() => setPage("history")} onSettings={() => setPage("settings")} onToast={toast} />;
   } else if (page === "history") {
     content = <HistoryPage adapter={adapter} recordings={history} onRefresh={refreshHistory} onToast={toast} />;
   } else {
-    content = <SettingsPage adapter={adapter} initialSettings={snapshot.settings} onSettingsChange={(settings) => setSnapshot((current) => ({ ...current, settings }))} onToast={toast} />;
+    content = <SettingsPage adapter={adapter} initialSettings={snapshot.settings} onSettingsChange={(settings) => setSnapshot((current) => ({ ...current, settings }))} onModelsChanged={() => setReload((value) => value + 1)} onToast={toast} />;
   }
 
   return (

@@ -88,8 +88,13 @@ def download_exact_model(
     spec = model_spec(model_key)
     using_hf_downloader = downloader is None
     if downloader is None:
-        from huggingface_hub import snapshot_download
-        from tqdm.auto import tqdm
+        try:
+            from huggingface_hub import snapshot_download
+            from tqdm.auto import tqdm
+        except ImportError as error:
+            # Loquara ships without the Python engine, so this is the normal
+            # state of a fresh machine rather than a broken install.
+            raise ModelAccessError("engine", spec.id, str(error)) from error
 
         downloader = snapshot_download
     kwargs = {"repo_id": spec.id, "revision": spec.revision}
@@ -150,6 +155,9 @@ class ModelAccessError(Exception):
         Hugging Face account. A token alone is not enough.
     ``unauthorized``
         No token was supplied, or the one supplied is invalid or expired.
+    ``engine``
+        The Python dependencies this script needs are not installed, so no
+        download could even be attempted.
     """
 
     def __init__(self, kind: str, repo: str, detail: str = "") -> None:
@@ -188,10 +196,14 @@ def verify_token() -> str:
     """Returns the account name for the token in the environment.
 
     Raises ``ModelAccessError('unauthorized', ...)`` when the token is missing
-    or rejected, so the caller can tell "wrong token" from "no network".
+    or rejected, so the caller can tell "wrong token" from "no network", and
+    ``ModelAccessError('engine', ...)`` when the dependencies are absent.
     """
-    from huggingface_hub import HfApi
-    from huggingface_hub.utils import HfHubHTTPError
+    try:
+        from huggingface_hub import HfApi
+        from huggingface_hub.utils import HfHubHTTPError
+    except ImportError as error:
+        raise ModelAccessError("engine", "", str(error)) from error
 
     try:
         identity = HfApi().whoami()

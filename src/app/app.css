@@ -89,6 +89,10 @@ time, kbd, .tabular { font-variant-numeric: tabular-nums; }
 .engine-chip--loading .engine-chip__state i { background: var(--warning); animation: pulse 1.4s ease-in-out infinite; }
 .engine-chip--recording .engine-chip__state i { background: var(--recording); box-shadow: 0 0 6px color-mix(in srgb, var(--recording) 60%, transparent); animation: pulse 1.6s ease-in-out infinite; }
 .engine-chip--recording .engine-chip__state { color: var(--recording); }
+.engine-chip--missing .engine-chip__state i, .engine-chip--error .engine-chip__state i { background: var(--warning); }
+.engine-chip--missing .engine-chip__state, .engine-chip--error .engine-chip__state { color: var(--warning); }
+.engine-chip--missing, .engine-chip--error { border-color: color-mix(in srgb, var(--warning) 35%, var(--border)); }
+.dictate__state--noModel { color: var(--warning); }
 
 .app-content { min-width: 0; min-height: 0; overflow: hidden; }
 .app-scroll { width: 100%; height: 100%; overflow: auto; }
@@ -389,6 +393,30 @@ input[type="checkbox"]:disabled { opacity: 0.45; cursor: not-allowed; }
 .privacy-line { display: flex; align-items: baseline; gap: var(--s-2); margin: 0; color: var(--faint); font-size: var(--t-small); }
 .privacy-line strong { color: var(--muted); font-weight: var(--w-medium); }
 
+/* ===== First-run setup ===================================================
+ * Shown only while something is still missing, and it goes away for good once
+ * everything is in place — this is a checklist, not a permanent panel.
+ */
+.setup { display: grid; gap: var(--s-4); padding: var(--s-4); border: 1px solid color-mix(in srgb, var(--warning) 30%, var(--border)); border-radius: var(--r-md); background: var(--panel); box-shadow: var(--panel-edge), var(--panel-shadow); }
+.setup__head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--s-4); }
+.setup__head h2 { margin: 0; font-family: var(--font-display); font-size: var(--t-strong); font-weight: var(--w-bold); letter-spacing: -0.01em; }
+.setup__head p { margin: var(--s-1) 0 0; color: var(--muted); font-size: var(--t-small); }
+.setup__steps { display: grid; gap: var(--s-3); margin: 0; padding: 0; list-style: none; }
+.setup__step { display: grid; grid-template-columns: 18px minmax(0, 1fr); gap: var(--s-3); align-items: start; }
+.setup__mark { display: grid; place-items: center; width: 18px; height: 18px; margin-top: 1px; border: 1px solid var(--border-strong); border-radius: 50%; color: var(--bg); }
+.setup__step--done .setup__mark { border-color: var(--success); background: var(--success); }
+.setup__body { display: grid; gap: var(--s-2); min-width: 0; }
+.setup__body strong { font-size: var(--t-body); font-weight: var(--w-medium); }
+.setup__step--done .setup__body strong { color: var(--muted); font-weight: var(--w-regular); }
+.setup__body small { color: var(--muted); font-size: var(--t-small); line-height: var(--lh-normal); }
+.setup__body > a { justify-self: start; font-size: var(--t-small); }
+
+/* A command is only useful if it can be taken away verbatim. */
+.command { display: flex; align-items: center; gap: var(--s-2); padding: var(--s-2) var(--s-2) var(--s-2) var(--s-3); border: 1px solid var(--border-strong); border-radius: var(--r-sm); background: var(--bg); }
+.command code { flex: 1 1 auto; overflow-x: auto; color: var(--text); font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: var(--t-micro); line-height: var(--lh-normal); white-space: nowrap; }
+.command__copy { display: grid; place-items: center; width: 26px; height: 26px; flex: 0 0 auto; padding: 0; border: 0; border-radius: var(--r-sm); color: var(--muted); background: transparent; transition: color var(--fast) var(--ease), background var(--fast) var(--ease); }
+.command__copy:hover { color: var(--text); background: var(--surface-hover); }
+
 /* ===== Model library ===================================================== */
 .model-options { display: grid; overflow: hidden; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--panel); box-shadow: var(--panel-edge), var(--panel-shadow); }
 .model-option { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: var(--s-3); min-height: 62px; padding: var(--s-3) var(--s-4); border: 0; background: transparent; text-align: left; cursor: pointer; transition: background var(--fast) var(--ease); }
@@ -450,6 +478,8 @@ input[type="checkbox"]:disabled { opacity: 0.45; cursor: not-allowed; }
 .gate__status { display: flex; align-items: center; gap: var(--s-2); margin: 0; font-size: var(--t-small); }
 .gate__status--ok { color: var(--success); }
 .gate__status--error { color: var(--danger); }
+.gate__fallback { margin: 0; padding-top: var(--s-3); border-top: 1px solid var(--border); color: var(--faint); font-size: var(--t-micro); line-height: var(--lh-relaxed); }
+.gate__fallback code { padding: 2px 6px; border-radius: 4px; background: var(--surface-active); color: var(--muted); font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; }
 
 /* ===== Modes ============================================================= */
 .modes-page { width: min(920px, 100%); }

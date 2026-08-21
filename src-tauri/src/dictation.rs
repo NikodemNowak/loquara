@@ -465,13 +465,34 @@ struct WorkerAccessError {
     repo: String,
 }
 
-/// Turns a reported access failure into a message the interface can localize
-/// and act on. Kept stable, because `src/lib/errors.ts` matches on it.
+/// Turns a reported failure into a message the interface can localize and act
+/// on. Kept stable, because `src/lib/errors.ts` matches on it.
 fn access_error_message(kind: &str, repo: &str) -> String {
     match kind {
         "gated" => format!("Model requires accepting its licence on Hugging Face: {repo}"),
+        "engine" => ENGINE_MISSING.to_string(),
         _ => format!("Hugging Face rejected the access token for: {repo}"),
     }
+}
+
+/// Loquara installs without the Python engine, so a fresh machine cannot
+/// download or transcribe until it is set up. Both of these are matched in
+/// `src/lib/errors.ts`, which is why the wording is fixed.
+pub const ENGINE_MISSING: &str = "The Python engine is not set up.";
+pub const PYTHON_MISSING: &str = "Python was not found.";
+
+/// Whether the configured interpreter can actually be started.
+fn python_is_available(python: &crate::transcription::PythonExecutable) -> bool {
+    let mut command = std::process::Command::new(&python.program);
+    no_console(
+        command
+            .args(&python.args)
+            .arg("--version")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null()),
+    );
+    command.status().is_ok_and(|status| status.success())
 }
 
 fn emit_model_progress(app: &AppHandle, model: &str, phase: &str, downloaded_bytes: u64, total_bytes: Option<u64>) {
@@ -2529,6 +2550,88 @@ fn verify_hf_token(state: &AppState, token: &str) -> Result<String, String> {
     Err(stderr.lines().last().unwrap_or("").trim().to_owned())
 }
 
+/// What the Python side of Loquara looks like on this machine.
+///
+/// Loquara installs without an engine, so a fresh machine is missing all of
+/// this. Reporting each part separately lets the interface say which step is
+/// outstanding instead of failing at the first thing that happens to be used.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EngineStatus {
+    /// A usable interpreter was found.
+    pub python: bool,
+    /// How Loquara invokes it, for showing in a command the user can paste.
+    pub python_command: String,
+    /// The lightweight dependencies from requirements.txt are importable.
+    pub dependencies: bool,
+    /// PyTorch is importable. Transcription needs it; downloading does not.
+    pub torch: bool,
+    /// Absolute path of the bundled requirements file, or None if it is gone.
+    pub requirements_path: Option<String>,
+}
+
+/// Probes the interpreter without importing anything heavy.
+///
+/// `find_spec` only looks the modules up on the path, so this stays fast even
+/// though importing torch would take seconds.
+const PROBE: &str = "import json,importlib.util as u;\
+print(json.dumps({\
+'deps': all(u.find_spec(m) is not None for m in ('huggingface_hub','transformers','numpy','librosa')),\
+'torch': u.find_spec('torch') is not None}))";
+
+#[derive(Debug, Deserialize)]
+struct ProbeResult {
+    deps: bool,
+    torch: bool,
+}
+
+#[tauri::command]
+pub fn engine_status(state: State<'_, AppState>) -> EngineStatus {
+    let python = state.python.clone();
+    let python_command = std::iter::once(python.program.to_string_lossy().into_owned())
+        .chain(python.args.iter().map(|arg| arg.to_string_lossy().into_owned()))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let requirements_path = state
+        .worker_path
+        .parent()
+        .map(|dir| dir.join("requirements.txt"))
+        .filter(|path| path.is_file())
+        .map(|path| path.to_string_lossy().into_owned());
+
+    if !python_is_available(&python) {
+        return EngineStatus {
+            python: false,
+            python_command,
+            dependencies: false,
+            torch: false,
+            requirements_path,
+        };
+    }
+
+    let mut command = std::process::Command::new(&python.program);
+    no_console(
+        command
+            .args(&python.args)
+            .arg("-c")
+            .arg(PROBE)
+            .stdin(std::process::Stdio::null()),
+    );
+    let probe = command
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| serde_json::from_slice::<ProbeResult>(&output.stdout).ok());
+
+    EngineStatus {
+        python: true,
+        python_command,
+        dependencies: probe.as_ref().is_some_and(|probe| probe.deps),
+        torch: probe.as_ref().is_some_and(|probe| probe.torch),
+        requirements_path,
+    }
+}
+
 #[tauri::command]
 pub fn hf_account() -> HfAccount {
     HfAccount {
@@ -2587,6 +2690,9 @@ pub async fn download_model(
             "Nie znaleziono skryptu pobierania: {}",
             script.display()
         ));
+    }
+    if !python_is_available(&python) {
+        return Err(PYTHON_MISSING.to_string());
     }
     emit_model_progress(&app, &model, "preparing", 0, None);
     let verification_model = model.clone();

@@ -5,12 +5,12 @@ Loquara is a local, open-source dictation app for Windows (Linux builds run in C
 ## Highlights
 
 - global shortcut `Ctrl+Space` starts and stops recording, `Esc` cancels;
-- a minimal floating pill shows a live waveform while dictating — nothing else;
+- a minimal floating pill shows a live level meter while dictating — nothing else;
 - distinct sound cues mark recording start, stop, and transcript-ready;
 - system tray: start recording, paste the last transcript, open the main window;
 - history keeps audio and text; a custom vocabulary and modes refine results;
 - shortcut capture: click the shortcut field and press the new combo to set it;
-- light, dark, and system theme;
+- a dark interface, tuned for long dictation sessions;
 - Polish and English UI — follows the OS language (Polish on Polish systems, English otherwise), switchable anytime in settings;
 - **everything runs locally** — audio never leaves the machine.
 

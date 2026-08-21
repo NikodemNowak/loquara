@@ -111,6 +111,10 @@ export function HuggingFaceGate({
       )}
 
       {error && <p className="gate__status gate__status--error" role="alert">{error}</p>}
+
+      <p className="gate__fallback">
+        {t("gate.cliAlternative")} <code>huggingface-cli login</code>
+      </p>
     </div>
   );
 }

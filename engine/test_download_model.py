@@ -208,6 +208,24 @@ class AccessErrorTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.kind, "gated")
 
+    def test_a_missing_engine_is_reported_as_such_not_as_a_crash(self):
+        # Loquara installs without the Python engine, so this is what a fresh
+        # machine looks like: the app has to explain it, not show a traceback.
+        import builtins
+
+        real_import = builtins.__import__
+
+        def refuse(name, *args, **kwargs):
+            if name.startswith("huggingface_hub") or name.startswith("tqdm"):
+                raise ImportError(f"No module named {name!r}")
+            return real_import(name, *args, **kwargs)
+
+        with mock.patch.object(builtins, "__import__", refuse):
+            with self.assertRaises(ModelAccessError) as raised:
+                download_exact_model(model_key="cohere")
+
+        self.assertEqual(raised.exception.kind, "engine")
+
     def test_download_does_not_swallow_ordinary_failures(self):
         def explode(**_kwargs):
             raise OSError("no space left on device")

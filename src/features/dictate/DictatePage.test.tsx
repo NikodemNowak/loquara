@@ -111,4 +111,43 @@ describe("ekran Dyktuj", () => {
 
     expect(screen.getByLabelText("Czas nagrania")).toHaveTextContent("01:05");
   });
+
+  test("bez modelu nie twierdzi, że jest gotowa", async () => {
+    // Zgłoszone z czystej instalacji: aplikacja pokazywała "Gotowy", mimo że
+    // żaden model nie był pobrany, więc skrót mógł się tylko wysypać.
+    renderWithI18n(<DictatePage
+      adapter={adapterStub()}
+      snapshot={{ dictation: { status: "idle" }, settings, modelLoading: false }}
+      recordings={[]}
+      modelReady={false}
+      onSnapshot={() => undefined}
+      onHistory={() => undefined}
+      onSettings={() => undefined}
+      onToast={() => undefined}
+    />);
+
+    expect(screen.getByRole("heading", { name: "Brak modelu" })).toBeVisible();
+    expect(screen.queryByRole("heading", { name: "Gotowy" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Zacznij nagrywać" })).not.toBeInTheDocument();
+  });
+
+  test("bez modelu kieruje do ustawień zamiast uruchamiać nagrywanie", async () => {
+    const startRecording = vi.fn();
+    const onSettings = vi.fn();
+    renderWithI18n(<DictatePage
+      adapter={adapterStub({ startRecording })}
+      snapshot={{ dictation: { status: "idle" }, settings, modelLoading: false }}
+      recordings={[]}
+      modelReady={false}
+      onSnapshot={() => undefined}
+      onHistory={() => undefined}
+      onSettings={onSettings}
+      onToast={() => undefined}
+    />);
+
+    await userEvent.click(screen.getByRole("button", { name: "Wybierz i pobierz model" }));
+
+    expect(onSettings).toHaveBeenCalledOnce();
+    expect(startRecording).not.toHaveBeenCalled();
+  });
 });

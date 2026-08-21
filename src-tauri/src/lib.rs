@@ -1,3 +1,4 @@
+pub mod engine;
 pub mod audio;
 pub mod dictation;
 pub mod domain;
@@ -338,6 +339,7 @@ pub fn run() {
             dictation::get_model_status,
             dictation::list_models,
             dictation::download_model,
+            dictation::engine_status,
             dictation::hf_account,
             dictation::connect_hf_account,
             dictation::disconnect_hf_account,

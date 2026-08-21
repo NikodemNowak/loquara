@@ -267,4 +267,41 @@ describe("ustawienia", () => {
     await waitFor(() => expect(saved.length).toBe(2));
     expect(saved[1]).toEqual(expect.objectContaining({ autoPaste: false, launchOnLogin: false }));
   });
+
+  test("na czystej maszynie mówi czego brakuje i daje polecenie do wklejenia", async () => {
+    // Loquara instaluje się bez silnika Pythona, więc to jest normalny stan
+    // świeżego komputera, a nie awaria.
+    const requirementsPath = "C:/Loquara/engine/requirements.txt";
+    renderWithI18n(<SettingsPage
+      adapter={adapterStub({
+        engineStatus: async () => ({
+          python: true,
+          pythonCommand: "python",
+          dependencies: false,
+          torch: false,
+          requirementsPath,
+        }),
+      })}
+      initialSettings={settings}
+      onSettingsChange={() => undefined}
+      onToast={() => undefined}
+    />);
+
+    expect(await screen.findByText("Zanim zaczniesz")).toBeVisible();
+    expect(screen.getByText(/pip install -r/)).toHaveTextContent(
+      `python -m pip install -r "${requirementsPath}"`,
+    );
+  });
+
+  test("gdy wszystko jest gotowe, panel konfiguracji znika", async () => {
+    renderWithI18n(<SettingsPage
+      adapter={adapterStub()}
+      initialSettings={settings}
+      onSettingsChange={() => undefined}
+      onToast={() => undefined}
+    />);
+
+    await screen.findByRole("combobox", { name: "Mikrofon" });
+    expect(screen.queryByText("Zanim zaczniesz")).not.toBeInTheDocument();
+  });
 });

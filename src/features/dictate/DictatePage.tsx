@@ -90,6 +90,7 @@ export function DictatePage({
   adapter,
   snapshot,
   recordings,
+  modelReady = true,
   onSnapshot,
   onHistory,
   onSettings,
@@ -98,6 +99,8 @@ export function DictatePage({
   adapter: AppAdapter;
   snapshot: AppSnapshot;
   recordings: Recording[];
+  /** False until the selected model exists on this machine. */
+  modelReady?: boolean;
   onSnapshot: (snapshot: AppSnapshot) => void;
   onHistory: () => void;
   onSettings?: () => void;
@@ -110,7 +113,11 @@ export function DictatePage({
   const state = snapshot.dictation;
   const status = state.status;
   const startedAt = snapshot.recordingStartedAt ?? null;
-  const readout = READOUTS[status] ?? READOUTS.idle;
+  // With no model there is nothing to be ready for, and saying "Ready" would
+  // send the user to press a shortcut that can only fail.
+  const readout = status === "idle" && !modelReady
+    ? { state: "dictate.state.noModel", hint: "dictate.hint.noModel", action: "dictate.action.getModel" } as Readout
+    : READOUTS[status] ?? READOUTS.idle;
   const loadingModel = status === "processing" && snapshot.modelLoading;
 
   useEffect(() => {
@@ -156,7 +163,7 @@ export function DictatePage({
   return (
     <section className="page dictate-page">
       <div className="dictate">
-        <h1 className={`dictate__state dictate__state--${status}`} aria-live="polite">
+        <h1 className={`dictate__state dictate__state--${status === "idle" && !modelReady ? "noModel" : status}`} aria-live="polite">
           {loadingModel ? t("dictate.state.loadingModel") : t(readout.state)}
         </h1>
         <p className="dictate__hint">
@@ -192,9 +199,15 @@ export function DictatePage({
 
         {readout.action && (
           <div className="dictate__actions">
-            <button className="secondary-button" disabled={busy} onClick={() => void act()}>
-              {busy ? t("dictate.action.working") : t(readout.action)}
-            </button>
+            {status === "idle" && !modelReady ? (
+              <button className="primary-button" onClick={() => onSettings?.()}>
+                {t(readout.action)}
+              </button>
+            ) : (
+              <button className="secondary-button" disabled={busy} onClick={() => void act()}>
+                {busy ? t("dictate.action.working") : t(readout.action)}
+              </button>
+            )}
           </div>
         )}
       </div>

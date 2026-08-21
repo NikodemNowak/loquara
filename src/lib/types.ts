@@ -67,6 +67,15 @@ export interface ModelDescriptor {
   message: string | null;
 }
 
+/** What the Python side of Loquara looks like on this machine. */
+export interface EngineStatus {
+  python: boolean;
+  pythonCommand: string;
+  dependencies: boolean;
+  torch: boolean;
+  requirementsPath: string | null;
+}
+
 /** Whether Loquara holds a Hugging Face token, and for which account. */
 export interface HfAccount {
   connected: boolean;
