@@ -1,3 +1,4 @@
+pub mod models;
 pub mod engine;
 pub mod audio;
 pub mod dictation;
