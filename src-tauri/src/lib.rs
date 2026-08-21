@@ -3,7 +3,6 @@ pub mod engine;
 pub mod audio;
 pub mod dictation;
 pub mod domain;
-pub mod hf;
 pub mod platform;
 pub mod sound;
 pub mod storage;
@@ -190,10 +189,6 @@ pub fn run() {
             let worker_path =
                 resolve_worker_path(&current_dir, &resource_dir, resolution_mode)?;
             let resource_worker_exists = worker_path.is_file();
-            // Keep the UI available when Python is missing; dictation will
-            // report the actionable runtime error instead of aborting startup.
-            let python = transcription::resolve_python_executable()
-                .unwrap_or_else(|_| transcription::PythonExecutable::new("python", Vec::<&str>::new()));
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
             let health_marker = health_path(&data_dir);
@@ -201,13 +196,9 @@ pub fn run() {
             let recordings_dir = data_dir.join("recordings");
             let storage = storage::Storage::open(data_dir.join("loquara.sqlite3"), &recordings_dir)
                 .map_err(|error| error.to_string())?;
-            let worker_log = data_dir.join("worker.log");
             let state = AppState::new(
                 audio::AudioRecorder::new(recordings_dir),
                 storage,
-                python,
-                worker_path,
-                worker_log,
                 data_dir.join("models"),
             );
             // Register state before any window can invoke a Tauri command.
@@ -340,10 +331,6 @@ pub fn run() {
             dictation::get_model_status,
             dictation::list_models,
             dictation::download_model,
-            dictation::engine_status,
-            dictation::hf_account,
-            dictation::connect_hf_account,
-            dictation::disconnect_hf_account,
             dictation::delete_model,
             dictation::update_settings,
             dictation::update_setting_value,

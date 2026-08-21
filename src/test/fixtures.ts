@@ -83,16 +83,6 @@ export function adapterStub(overrides: Partial<AppAdapter> = {}): AppAdapter {
     listInputDevices: async () => [
       { id: "default", name: "Mikrofon domyślny", isDefault: true },
     ],
-    engineStatus: async () => ({
-      python: true,
-      pythonCommand: "python",
-      dependencies: true,
-      torch: true,
-      requirementsPath: "C:\\Loquara\\engine\\requirements.txt",
-    }),
-    hfAccount: async () => ({ connected: false, name: null }),
-    connectHfAccount: async () => ({ connected: true, name: "tester" }),
-    disconnectHfAccount: async () => ({ connected: false, name: null }),
     startRecording: async () => snapshot,
     stopRecording: async () => snapshot,
     cancelRecording: async () => snapshot,

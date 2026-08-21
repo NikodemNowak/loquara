@@ -125,67 +125,6 @@ describe("ustawienia", () => {
     expect(screen.getByRole("button", { name: /Zmień globalny skrót/ })).toBeEnabled();
   });
 
-  test("gdy model jest zablokowany, tłumaczy kroki zamiast pokazywać błąd", async () => {
-    const onToast = vi.fn();
-    const downloadModel = vi.fn(async () => {
-      throw new Error("Model requires accepting its licence on Hugging Face: acme/model");
-    });
-    renderWithI18n(<SettingsPage
-      adapter={adapterStub({ downloadModel })}
-      initialSettings={settings}
-      onSettingsChange={() => undefined}
-      onToast={onToast}
-    />);
-
-    const download = await screen.findByRole("button", { name: "Pobierz Cohere Transcribe 2B" });
-    await userEvent.click(download);
-
-    expect(await screen.findByText("Ten model wymaga konta Hugging Face")).toBeVisible();
-    expect(onToast).not.toHaveBeenCalled();
-  });
-
-  test("zapisuje token dopiero po zaakceptowaniu go przez Hugging Face", async () => {
-    const connectHfAccount = vi.fn(async () => ({ connected: true, name: "nikodem" }));
-    const downloadModel = vi.fn(async () => {
-      throw new Error("Model requires accepting its licence on Hugging Face: acme/model");
-    });
-    renderWithI18n(<SettingsPage
-      adapter={adapterStub({ downloadModel, connectHfAccount })}
-      initialSettings={settings}
-      onSettingsChange={() => undefined}
-      onToast={() => undefined}
-    />);
-    await userEvent.click(await screen.findByRole("button", { name: "Pobierz Cohere Transcribe 2B" }));
-
-    await userEvent.type(await screen.findByLabelText("Token dostępu"), "hf_secret");
-    await userEvent.click(screen.getByRole("button", { name: "Połącz konto" }));
-
-    expect(connectHfAccount).toHaveBeenCalledWith("hf_secret");
-    expect(await screen.findByText("Połączono jako nikodem")).toBeVisible();
-  });
-
-  test("odrzucony token zostawia formularz otwarty i wyjaśnia powód", async () => {
-    const connectHfAccount = vi.fn(async () => {
-      throw new Error("Hugging Face rejected the access token.");
-    });
-    const downloadModel = vi.fn(async () => {
-      throw new Error("Model requires accepting its licence on Hugging Face: acme/model");
-    });
-    renderWithI18n(<SettingsPage
-      adapter={adapterStub({ downloadModel, connectHfAccount })}
-      initialSettings={settings}
-      onSettingsChange={() => undefined}
-      onToast={() => undefined}
-    />);
-    await userEvent.click(await screen.findByRole("button", { name: "Pobierz Cohere Transcribe 2B" }));
-
-    await userEvent.type(await screen.findByLabelText("Token dostępu"), "hf_wrong");
-    await userEvent.click(screen.getByRole("button", { name: "Połącz konto" }));
-
-    expect(await screen.findByRole("alert")).toHaveTextContent("Hugging Face odrzucił ten token.");
-    expect(screen.getByLabelText("Token dostępu")).toBeVisible();
-  });
-
   test("wybór z listy rozwijanej zapisuje nową wartość", async () => {
     const updateSettings = vi.fn(async (next: typeof settings) => ({ settings: next, warning: null }));
     renderWithI18n(<SettingsPage
@@ -268,40 +207,4 @@ describe("ustawienia", () => {
     expect(saved[1]).toEqual(expect.objectContaining({ autoPaste: false, launchOnLogin: false }));
   });
 
-  test("na czystej maszynie mówi czego brakuje i daje polecenie do wklejenia", async () => {
-    // Loquara instaluje się bez silnika Pythona, więc to jest normalny stan
-    // świeżego komputera, a nie awaria.
-    const requirementsPath = "C:/Loquara/engine/requirements.txt";
-    renderWithI18n(<SettingsPage
-      adapter={adapterStub({
-        engineStatus: async () => ({
-          python: true,
-          pythonCommand: "python",
-          dependencies: false,
-          torch: false,
-          requirementsPath,
-        }),
-      })}
-      initialSettings={settings}
-      onSettingsChange={() => undefined}
-      onToast={() => undefined}
-    />);
-
-    expect(await screen.findByText("Zanim zaczniesz")).toBeVisible();
-    expect(screen.getByText(/pip install -r/)).toHaveTextContent(
-      `python -m pip install -r "${requirementsPath}"`,
-    );
-  });
-
-  test("gdy wszystko jest gotowe, panel konfiguracji znika", async () => {
-    renderWithI18n(<SettingsPage
-      adapter={adapterStub()}
-      initialSettings={settings}
-      onSettingsChange={() => undefined}
-      onToast={() => undefined}
-    />);
-
-    await screen.findByRole("combobox", { name: "Mikrofon" });
-    expect(screen.queryByText("Zanim zaczniesz")).not.toBeInTheDocument();
-  });
 });

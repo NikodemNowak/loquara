@@ -50,13 +50,6 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "resources": [
-      "../engine/parakeet_worker.py",
-      "../engine/protocol.py",
-      "../engine/__init__.py",
-      "../engine/download_model.py",
-      "../engine/requirements.txt"
-    ],
     "windows": {
       "nsis": {
         "installMode": "currentUser"

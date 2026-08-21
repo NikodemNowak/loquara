@@ -5,11 +5,9 @@ import { BrandLogo } from "../../components/BrandLogo";
 import { ConfirmDialog } from "../../components/ConfirmDialog";
 import { ShortcutCapture } from "./ShortcutCapture";
 import { Select } from "../../components/Select";
-import { HuggingFaceGate } from "./HuggingFaceGate";
-import { EngineSetup } from "./EngineSetup";
 import type { ToastKind } from "../../components/Toast";
 import type { AppAdapter } from "../../lib/tauri";
-import type { AppSettings, EngineStatus, HfAccount, InputDeviceInfo, ModelDescriptor, ModelDownloadProgress, ModelStatus } from "../../lib/types";
+import type { AppSettings, InputDeviceInfo, ModelDescriptor, ModelDownloadProgress, ModelStatus } from "../../lib/types";
 import { normalizeError } from "../../lib/errors";
 import { useI18n } from "../../lib/i18n";
 
@@ -61,12 +59,6 @@ export function SettingsPage({
   const [deleting, setDeleting] = useState("");
   const [pendingDelete, setPendingDelete] = useState<ModelDescriptor>();
   const [downloadProgress, setDownloadProgress] = useState<ModelDownloadProgress>();
-  /** The model whose download stopped because it needs Hugging Face access. */
-  const [gatedModel, setGatedModel] = useState<ModelDescriptor>();
-  const [hfAccount, setHfAccount] = useState<HfAccount>({ connected: false, name: null });
-  const [engine, setEngine] = useState<EngineStatus>();
-  const [checkingEngine, setCheckingEngine] = useState(false);
-  const [engineAttempt, setEngineAttempt] = useState(0);
 
   const formatBytes = (bytes: number | null | undefined) => {
     if (!bytes) return t("settings.models.notDownloadedBytes");
@@ -91,9 +83,6 @@ export function SettingsPage({
     void adapter.listModels()
       .then((loaded) => { if (active) setModels(loaded); })
       .catch(() => {});
-    void adapter.hfAccount()
-      .then((account) => { if (active) setHfAccount(account); })
-      .catch(() => {});
     void adapter.getModelStatus()
       .then((status) => { if (active) setModelStatus(status); })
       .catch((error) => {
@@ -113,17 +102,6 @@ export function SettingsPage({
     return () => { active = false; };
   }, [adapter, settings.model, t]);
 
-  // Probing the interpreter spawns a process, so it is kept out of the main
-  // startup effect and re-run only when the user asks.
-  useEffect(() => {
-    let active = true;
-    setCheckingEngine(true);
-    void adapter.engineStatus()
-      .then((status) => { if (active) setEngine(status); })
-      .catch(() => {})
-      .finally(() => { if (active) setCheckingEngine(false); });
-    return () => { active = false; };
-  }, [adapter, engineAttempt]);
   useEffect(() => {
     let active = true;
     let unlisten: (() => void) | undefined;
@@ -185,14 +163,7 @@ export function SettingsPage({
       onModelsChanged?.();
       onToast(t("settings.models.downloadedToast", { model: models.find((model) => model.key === key)?.display ?? key }), "success");
     } catch (error) {
-      const message = normalizeError(error);
-      // Access failures are not really errors to dismiss: there are steps the
-      // user can take, so the gate explains them next to the model itself.
-      if (isAccessFailure(error)) {
-        setGatedModel(models.find((candidate) => candidate.key === key));
-      } else {
-        onToast(t("settings.models.downloadError", { error: message }), "error");
-      }
+      onToast(t("settings.models.downloadError", { error: normalizeError(error) }), "error");
     } finally {
       setDownloading("");
       setDownloadProgress(undefined);
@@ -231,14 +202,6 @@ export function SettingsPage({
       </header>
 
       <div className="settings-column">
-        {engine && (
-          <EngineSetup
-            status={engine}
-            modelReady={selectedState === "ready"}
-            checking={checkingEngine}
-            onRecheck={() => setEngineAttempt((attempt) => attempt + 1)}
-          />
-        )}
         <section className="settings-group">
           <div className="group-heading">
             <h2>{t("settings.recording.title")}</h2>
@@ -419,14 +382,6 @@ export function SettingsPage({
               </button>
             ) : null}
           </p>
-          {gatedModel && (
-            <HuggingFaceGate
-              adapter={adapter}
-              model={gatedModel}
-              account={hfAccount}
-              onAccount={setHfAccount}
-            />
-          )}
           {(modelStatus?.message ?? selectedModel?.message) && selectedState !== "ready"
             ? <p className="model-card__message">{modelStatus?.message ?? selectedModel?.message}</p>
             : null}

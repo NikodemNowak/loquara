@@ -3,8 +3,6 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   AppSettings,
   AppSnapshot,
-  EngineStatus,
-  HfAccount,
   HistoryQuery,
   InputDeviceInfo,
   Mode,
@@ -50,10 +48,6 @@ export interface AppAdapter {
   getModelStatus(): Promise<ModelStatus>;
   listModels(): Promise<ModelDescriptor[]>;
   downloadModel(model: string): Promise<void>;
-  engineStatus(): Promise<EngineStatus>;
-  hfAccount(): Promise<HfAccount>;
-  connectHfAccount(token: string): Promise<HfAccount>;
-  disconnectHfAccount(): Promise<HfAccount>;
   deleteModel(model: string): Promise<void>;
   updateSettings(settings: AppSettings): Promise<SettingsUpdateResult>;
   updateSettingValue(key: string, value: unknown): Promise<void>;
@@ -117,10 +111,6 @@ const realAdapter: AppAdapter = {
   getModelStatus: () => invoke("get_model_status"),
   listModels: () => invoke("list_models"),
   downloadModel: (model) => invoke("download_model", { model }),
-  engineStatus: () => invoke("engine_status"),
-  hfAccount: () => invoke("hf_account"),
-  connectHfAccount: (token) => invoke("connect_hf_account", { token }),
-  disconnectHfAccount: () => invoke("disconnect_hf_account"),
   deleteModel: (model) => invoke("delete_model", { model }),
   updateSettings: (settings) => invoke("update_settings", { settings }),
   updateSettingValue: (key, value) =>
@@ -324,16 +314,6 @@ export function createBrowserAdapter(): AppAdapter {
       { key: "cohere", id: "AEmotionStudio/cohere-transcribe-03-2026-models", provider: "Cohere", source: "local", revision: "d114f701a80b2150943f5dbae71458f4d1fcb37b", display: "Cohere Transcribe 2B", minVramGb: 5, minRamGb: 8, languages: "pl/en/fr/de/...", estimatedSizeBytes: 4_132_000_000, status: "not_installed", installedSizeBytes: null, message: null },
     ]),
     downloadModel: async () => undefined,
-    engineStatus: async () => ({
-      python: true,
-      pythonCommand: "python",
-      dependencies: true,
-      torch: true,
-      requirementsPath: "C:\\Loquara\\engine\\requirements.txt",
-    }),
-    hfAccount: async () => ({ connected: false, name: null }),
-    connectHfAccount: async () => ({ connected: true, name: "demo" }),
-    disconnectHfAccount: async () => ({ connected: false, name: null }),
     deleteModel: async () => undefined,
     updateSettings: async (next) => {
       settings = { ...next };

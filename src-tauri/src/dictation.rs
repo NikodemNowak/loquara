@@ -1,3 +1,4 @@
+use crate::engine::{Engine, EngineError};
 use crate::audio::{
     AudioRecorder, CompletedRecording, InputDeviceInfo, cleanup_partial, quantize_peaks,
 };
@@ -8,7 +9,7 @@ use crate::storage::{
     VocabularyEntry, postprocess_for_mode,
 };
 use crate::transcription::{
-    ClientError, PythonExecutable, TranscriptionResult, WorkerClient, no_console,
+    TranscriptionResult, no_console,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -456,44 +457,6 @@ struct WorkerDownloadProgress {
     total_bytes: Option<u64>,
 }
 
-/// A line the download script prints when the repository cannot be reached
-/// with the current credentials.
-#[derive(Debug, Deserialize)]
-struct WorkerAccessError {
-    event: String,
-    kind: String,
-    repo: String,
-}
-
-/// Turns a reported failure into a message the interface can localize and act
-/// on. Kept stable, because `src/lib/errors.ts` matches on it.
-fn access_error_message(kind: &str, repo: &str) -> String {
-    match kind {
-        "gated" => format!("Model requires accepting its licence on Hugging Face: {repo}"),
-        "engine" => ENGINE_MISSING.to_string(),
-        _ => format!("Hugging Face rejected the access token for: {repo}"),
-    }
-}
-
-/// Loquara installs without the Python engine, so a fresh machine cannot
-/// download or transcribe until it is set up. Both of these are matched in
-/// `src/lib/errors.ts`, which is why the wording is fixed.
-pub const ENGINE_MISSING: &str = "The Python engine is not set up.";
-pub const PYTHON_MISSING: &str = "Python was not found.";
-
-/// Whether the configured interpreter can actually be started.
-fn python_is_available(python: &crate::transcription::PythonExecutable) -> bool {
-    let mut command = std::process::Command::new(&python.program);
-    no_console(
-        command
-            .args(&python.args)
-            .arg("--version")
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null()),
-    );
-    command.status().is_ok_and(|status| status.success())
-}
 
 fn emit_model_progress(app: &AppHandle, model: &str, phase: &str, downloaded_bytes: u64, total_bytes: Option<u64>) {
     let _ = app.emit(
@@ -749,18 +712,15 @@ pub struct AppState {
     pub machine: Arc<Mutex<CoordinatorMachine>>,
     pub audio: Arc<AudioRecorder>,
     pub storage: Arc<Storage>,
-    pub worker: Arc<Mutex<Option<WorkerClient>>>,
-    /// When the idle worker was last placed back in the slot, so a keep-alive
-    /// watchdog can unload the model after a configurable idle timeout.
-    worker_last_used: Arc<Mutex<Instant>>,
+    pub engine: Arc<Engine>,
+    /// When the engine last finished work, so a keep-alive watchdog can unload
+    /// the model after a configurable idle timeout.
+    engine_last_used: Arc<Mutex<Instant>>,
     pub target_window: Arc<Mutex<Option<WindowTarget>>>,
     pub settings: Arc<RwLock<AppSettings>>,
     pub model_warm: Arc<ModelWarmup>,
     lifecycle: Arc<Mutex<()>>,
     settings_update: Arc<Mutex<()>>,
-    python: PythonExecutable,
-    worker_path: PathBuf,
-    worker_log: PathBuf,
     model_home: PathBuf,
 }
 
@@ -809,6 +769,18 @@ impl ModelWarmup {
         }
     }
 
+    /// Forgets that any model is loaded.
+    ///
+    /// Called when the engine releases its model on idle: leaving the state at
+    /// `Ready` would tell the next warm-up there was nothing to do, and the
+    /// first dictation afterwards would pay the load cost while claiming to be
+    /// ready.
+    pub fn forget(&self) {
+        let mut state = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        *state = ModelWarmupState::Idle;
+        self.changed.notify_all();
+    }
+
     pub fn is_ready_for(&self, model: &str) -> bool {
         let state = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         matches!(&*state, ModelWarmupState::Ready(current) if current == model)
@@ -819,8 +791,14 @@ impl ModelWarmup {
         matches!(&*state, ModelWarmupState::Warming(_))
     }
 
-    fn wait_until_ready_for(&self, model: &str, timeout: Duration) -> Result<(), ClientError> {
-        let mut state = self.state.lock().map_err(|_| ClientError::WorkerUnavailable)?;
+    /// Blocks until the named model has finished warming, or the wait times
+    /// out. A timeout is reported as an error so the caller can decide; a
+    /// failed warm-up is not, because the load will simply be retried.
+    fn wait_until_ready_for(&self, model: &str, timeout: Duration) -> Result<(), EngineError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| EngineError::Load("warm-up lock poisoned".into()))?;
         if matches!(&*state, ModelWarmupState::Ready(current) if current == model) {
             return Ok(());
         }
@@ -832,15 +810,15 @@ impl ModelWarmup {
             .wait_timeout_while(state, timeout, |state| {
                 matches!(state, ModelWarmupState::Warming(current) if current == model)
             })
-            .map_err(|_| ClientError::WorkerUnavailable)?;
+            .map_err(|_| EngineError::Load("warm-up lock poisoned".into()))?;
         state = guard;
         if wait_result.timed_out()
             && matches!(&*state, ModelWarmupState::Warming(current) if current == model)
         {
-            return Err(ClientError::Timeout {
-                request_id: "warm-up".into(),
-                timeout_ms: timeout.as_millis().try_into().unwrap_or(u64::MAX),
-            });
+            return Err(EngineError::Load(format!(
+                "the model did not finish loading within {}s",
+                timeout.as_secs()
+            )));
         }
         Ok(())
     }
@@ -1057,11 +1035,9 @@ impl AppState {
     pub fn new(
         audio: AudioRecorder,
         storage: Storage,
-        python: impl Into<PythonExecutable>,
-        worker_path: impl Into<PathBuf>,
-        worker_log: impl Into<PathBuf>,
         model_home: impl Into<PathBuf>,
     ) -> Self {
+        let model_home = model_home.into();
         let settings = storage
             .get_setting::<AppSettings>("app")
             .ok()
@@ -1071,30 +1047,17 @@ impl AppState {
             machine: Arc::new(Mutex::new(CoordinatorMachine::default())),
             audio: Arc::new(audio),
             storage: Arc::new(storage),
-            worker: Arc::new(Mutex::new(None)),
-            worker_last_used: Arc::new(Mutex::new(Instant::now())),
+            engine: Arc::new(Engine::new(model_home.clone())),
+            engine_last_used: Arc::new(Mutex::new(Instant::now())),
             target_window: Arc::new(Mutex::new(None)),
             settings: Arc::new(RwLock::new(settings)),
             model_warm: Arc::new(ModelWarmup::default()),
             lifecycle: Arc::new(Mutex::new(())),
             settings_update: Arc::new(Mutex::new(())),
-            python: python.into(),
-            worker_path: worker_path.into(),
-            worker_log: worker_log.into(),
-            model_home: model_home.into(),
+            model_home,
         }
     }
 
-    /// Places a freshly loaded/idle worker back into the slot and records that
-    /// it became idle now (used by the keep-alive unloader).
-    fn store_worker(&self, client: WorkerClient) {
-        if let Ok(mut slot) = self.worker.lock() {
-            *slot = Some(client);
-        }
-        if let Ok(mut last_used) = self.worker_last_used.lock() {
-            *last_used = Instant::now();
-        }
-    }
 
     fn snapshot(&self) -> Result<AppSnapshot, String> {
         let dictation = self
@@ -1206,57 +1169,35 @@ fn epoch_ms() -> i64 {
 
 pub fn warm_up_model(app: &AppHandle, state: &AppState) {
     let warm = state.model_warm.clone();
-    let worker = state.worker.clone();
-    let python = state.python.clone();
-    let worker_path = state.worker_path.clone();
-    let worker_log = state.worker_log.clone();
-    let model_home = state.model_home.clone();
+    let engine = state.engine.clone();
+    let engine_last_used = state.engine_last_used.clone();
     let model = state
         .settings
         .read()
         .map(|settings| settings.model.clone())
         .unwrap_or_else(|_| default_model());
-    // Model loading must never turn into an implicit network download. The
-    // explicit model action owns installation; warm-up only uses a complete
-    // local snapshot.
-    if model_status_from_local(&state.model_home, &model).state != ModelStatusState::Ready {
+    // Loading must never turn into an implicit download: the explicit model
+    // action owns installation, and warm-up only uses what is already here.
+    if !engine.is_installed(&model) {
         return;
     }
     if warm.is_ready_for(&model) {
         return;
     }
-    let warm_model = model.clone();
     warm.begin_for(model.clone());
     emit_state(app, state);
-    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
-    let worker_slot = worker.clone();
-    let worker_last_used = state.worker_last_used.clone();
-    std::thread::spawn(move || {
-        let result = (|| -> Result<(), ClientError> {
-            let mut client = WorkerClient::spawn_with_model_home(
-                python,
-                worker_path,
-                Duration::from_secs(240),
-                Some(&worker_log),
-                Some(&model_home),
-            )?;
-            client.load(Some(warm_model.clone()))?;
-            if let Ok(mut slot) = worker_slot.lock() {
-                *slot = Some(client);
-            }
-            if let Ok(mut last_used) = worker_last_used.lock() {
-                *last_used = Instant::now();
-            }
-            Ok(())
-        })();
-        let _ = sender.send(result);
-    });
+
+    let warm_model = model.clone();
     let emit_app = app.clone();
     let emit_state_after = state.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let result = receiver.recv_timeout(Duration::from_secs(300));
-        let ready = matches!(result, Ok(Ok(())));
-        warm.finish_for(model, ready);
+    std::thread::spawn(move || {
+        let ready = engine.ensure_loaded(&warm_model).is_ok();
+        if ready {
+            if let Ok(mut last_used) = engine_last_used.lock() {
+                *last_used = Instant::now();
+            }
+        }
+        warm.finish_for(warm_model, ready);
         emit_state(&emit_app, &emit_state_after);
     });
 }
@@ -1292,21 +1233,15 @@ pub fn spawn_model_keep_alive_watchdog(state: &AppState) {
             .unwrap_or(0);
         if keep > 0 {
             let idle_elapsed = state
-                .worker_last_used
+                .engine_last_used
                 .lock()
                 .map(|last| last.elapsed())
                 .unwrap_or_default();
-            if idle_elapsed >= Duration::from_secs(keep) {
-                let dropped = state
-                    .worker
-                    .lock()
-                    .ok()
-                    .and_then(|mut slot| slot.take())
-                    .is_some();
-                if dropped {
-                    if let Ok(mut last) = state.worker_last_used.lock() {
-                        *last = Instant::now();
-                    }
+            if idle_elapsed >= Duration::from_secs(keep) && state.engine.loaded_model().is_some() {
+                state.engine.unload();
+                state.model_warm.forget();
+                if let Ok(mut last) = state.engine_last_used.lock() {
+                    *last = Instant::now();
                 }
             }
         }
@@ -1584,62 +1519,31 @@ async fn transcribe_recording(
     recording_id: String,
     audio_path: PathBuf,
 ) {
-    let worker = state.worker.clone();
-    let worker_last_used = state.worker_last_used.clone();
-    let python = state.python.clone();
-    let worker_path = state.worker_path.clone();
-    let worker_log = state.worker_log.clone();
-    let model_home = state.model_home.clone();
-    let audio_for_worker = audio_path.clone();
+    let engine = state.engine.clone();
+    let engine_last_used = state.engine_last_used.clone();
+    let audio_for_engine = audio_path.clone();
     let warm = state.model_warm.clone();
     let model = state
         .settings
         .read()
         .map(|settings| settings.model.clone())
         .unwrap_or_else(|_| default_model());
-    let language_hint = state
-        .settings
-        .read()
-        .map(|settings| settings.dictation_language.clone())
-        .unwrap_or_else(|_| default_dictation_language());
-    let language_hint = (language_hint != "auto").then_some(language_hint);
+    let started = Instant::now();
     let outcome = tauri::async_runtime::spawn_blocking(move || {
-        warm.wait_until_ready_for(&model, Duration::from_secs(240))?;
-        let mut existing = worker
-            .lock()
-            .map_err(|_| ClientError::WorkerUnavailable)?
-            .take();
-        if let Some(client) = existing.as_ref() {
-            if client.model().is_some_and(|loaded| loaded != model) {
-                existing = None;
-            }
+        // A warm-up started when recording began may still be finishing; the
+        // engine would serialise on its own lock anyway, but waiting here
+        // keeps the reported state honest.
+        let _ = warm.wait_until_ready_for(&model, Duration::from_secs(240));
+        let text = engine.transcribe(&model, &audio_for_engine)?;
+        if let Ok(mut last_used) = engine_last_used.lock() {
+            *last_used = Instant::now();
         }
-        let mut client = match existing {
-            Some(client) => client,
-            None => WorkerClient::spawn_with_model_home(
-                python,
-                worker_path,
-                Duration::from_secs(120),
-                Some(&worker_log),
-                Some(&model_home),
-            )?,
-        };
-        let result = client.transcribe(audio_for_worker, language_hint);
-        let must_respawn = matches!(
-            result,
-            Err(ClientError::Timeout { .. }
-                | ClientError::Crashed { .. }
-                | ClientError::WorkerUnavailable)
-        );
-        if !must_respawn {
-            if let Ok(mut slot) = worker.lock() {
-                *slot = Some(client);
-            }
-            if let Ok(mut last_used) = worker_last_used.lock() {
-                *last_used = Instant::now();
-            }
-        }
-        result
+        Ok::<_, EngineError>(TranscriptionResult {
+            text,
+            model,
+            language: None,
+            duration_ms: started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
+        })
     })
     .await;
     match outcome {
@@ -2477,196 +2381,38 @@ pub fn system_lang() -> &'static str {
 
 #[tauri::command]
 pub fn list_models(state: State<'_, AppState>) -> Vec<ModelDescriptor> {
-    model_descriptors()
-        .into_iter()
-        .map(|mut descriptor| {
-            let status = model_status_from_local(&state.model_home, &descriptor.key);
-            let snapshot = local_model_snapshot_path(&state.model_home, &descriptor.key);
-            descriptor.status = status.state;
-            descriptor.message = status.message;
-            descriptor.installed_size_bytes = snapshot_size_bytes(&snapshot)
-                .ok()
-                .filter(|size| *size > 0);
-            descriptor
+    crate::models::CATALOGUE
+        .iter()
+        .map(|spec| {
+            let installed = state.engine.is_installed(spec.key);
+            ModelDescriptor {
+                key: spec.key.to_owned(),
+                id: spec.repo.to_owned(),
+                provider: spec.provider.to_owned(),
+                source: "local".to_owned(),
+                revision: String::new(),
+                display: spec.display.to_owned(),
+                min_vram_gb: 0.0,
+                min_ram_gb: 2.0,
+                languages: spec.languages.to_owned(),
+                estimated_size_bytes: spec.total_bytes(),
+                status: if installed {
+                    ModelStatusState::Ready
+                } else {
+                    ModelStatusState::NotInstalled
+                },
+                installed_size_bytes: Some(crate::models::installed_bytes(
+                    spec.key,
+                    &state.engine.model_dir(spec.key),
+                ))
+                .filter(|size| *size > 0),
+                message: None,
+            }
         })
         .collect()
 }
 
 
-/// The Hugging Face account name Loquara has a token for, if any.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct HfAccount {
-    pub connected: bool,
-    pub name: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct WorkerWhoami {
-    event: String,
-    name: String,
-}
-
-/// Runs the download script's token check and returns the account name.
-fn verify_hf_token(state: &AppState, token: &str) -> Result<String, String> {
-    let engine_dir = state
-        .worker_path
-        .parent()
-        .ok_or_else(|| "Could not determine the engine directory.".to_string())?
-        .to_path_buf();
-    let script = engine_dir.join("download_model.py");
-    if !script.is_file() {
-        return Err(format!(
-            "Nie znaleziono skryptu pobierania: {}",
-            script.display()
-        ));
-    }
-    let mut command = std::process::Command::new(&state.python.program);
-    command.env("HF_TOKEN", token);
-    no_console(
-        command
-            .args(&state.python.args)
-            .arg("-X")
-            .arg("utf8")
-            .arg(&script)
-            .arg("--verify-token")
-            .current_dir(&engine_dir),
-    );
-    let output = command.output().map_err(|error| error.to_string())?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    for line in stdout.lines() {
-        if let Ok(whoami) = serde_json::from_str::<WorkerWhoami>(line) {
-            if whoami.event == "whoami" {
-                return Ok(whoami.name);
-            }
-        }
-        if let Ok(failure) = serde_json::from_str::<WorkerAccessError>(line) {
-            if failure.event == "error" {
-                return Err("Hugging Face rejected the access token.".to_string());
-            }
-        }
-    }
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    Err(stderr.lines().last().unwrap_or("").trim().to_owned())
-}
-
-/// What the Python side of Loquara looks like on this machine.
-///
-/// Loquara installs without an engine, so a fresh machine is missing all of
-/// this. Reporting each part separately lets the interface say which step is
-/// outstanding instead of failing at the first thing that happens to be used.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct EngineStatus {
-    /// A usable interpreter was found.
-    pub python: bool,
-    /// How Loquara invokes it, for showing in a command the user can paste.
-    pub python_command: String,
-    /// The lightweight dependencies from requirements.txt are importable.
-    pub dependencies: bool,
-    /// PyTorch is importable. Transcription needs it; downloading does not.
-    pub torch: bool,
-    /// Absolute path of the bundled requirements file, or None if it is gone.
-    pub requirements_path: Option<String>,
-}
-
-/// Probes the interpreter without importing anything heavy.
-///
-/// `find_spec` only looks the modules up on the path, so this stays fast even
-/// though importing torch would take seconds.
-const PROBE: &str = "import json,importlib.util as u;\
-print(json.dumps({\
-'deps': all(u.find_spec(m) is not None for m in ('huggingface_hub','transformers','numpy','librosa')),\
-'torch': u.find_spec('torch') is not None}))";
-
-#[derive(Debug, Deserialize)]
-struct ProbeResult {
-    deps: bool,
-    torch: bool,
-}
-
-#[tauri::command]
-pub fn engine_status(state: State<'_, AppState>) -> EngineStatus {
-    let python = state.python.clone();
-    let python_command = std::iter::once(python.program.to_string_lossy().into_owned())
-        .chain(python.args.iter().map(|arg| arg.to_string_lossy().into_owned()))
-        .collect::<Vec<_>>()
-        .join(" ");
-    let requirements_path = state
-        .worker_path
-        .parent()
-        .map(|dir| dir.join("requirements.txt"))
-        .filter(|path| path.is_file())
-        .map(|path| path.to_string_lossy().into_owned());
-
-    if !python_is_available(&python) {
-        return EngineStatus {
-            python: false,
-            python_command,
-            dependencies: false,
-            torch: false,
-            requirements_path,
-        };
-    }
-
-    let mut command = std::process::Command::new(&python.program);
-    no_console(
-        command
-            .args(&python.args)
-            .arg("-c")
-            .arg(PROBE)
-            .stdin(std::process::Stdio::null()),
-    );
-    let probe = command
-        .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .and_then(|output| serde_json::from_slice::<ProbeResult>(&output.stdout).ok());
-
-    EngineStatus {
-        python: true,
-        python_command,
-        dependencies: probe.as_ref().is_some_and(|probe| probe.deps),
-        torch: probe.as_ref().is_some_and(|probe| probe.torch),
-        requirements_path,
-    }
-}
-
-#[tauri::command]
-pub fn hf_account() -> HfAccount {
-    HfAccount {
-        connected: crate::hf::stored_token().is_some(),
-        name: None,
-    }
-}
-
-/// Verifies a pasted token and stores it only if Hugging Face accepts it.
-#[tauri::command]
-pub async fn connect_hf_account(
-    token: String,
-    state: State<'_, AppState>,
-) -> Result<HfAccount, String> {
-    let token = crate::hf::normalize_token(&token)?;
-    let verifying = state.inner().clone();
-    let checked = token.clone();
-    let name = tauri::async_runtime::spawn_blocking(move || verify_hf_token(&verifying, &checked))
-        .await
-        .map_err(|error| error.to_string())??;
-    crate::hf::store_token(&token).map_err(|error| error.to_string())?;
-    Ok(HfAccount {
-        connected: true,
-        name: Some(name),
-    })
-}
-
-#[tauri::command]
-pub fn disconnect_hf_account() -> Result<HfAccount, String> {
-    crate::hf::clear_token().map_err(|error| error.to_string())?;
-    Ok(HfAccount {
-        connected: false,
-        name: None,
-    })
-}
 
 #[tauri::command]
 pub async fn download_model(
@@ -2674,116 +2420,34 @@ pub async fn download_model(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    if !is_supported_model(&model) {
-        return Err(format!("Nieznany model: {model}."));
-    }
-    let python = state.python.clone();
-    let model_home = state.model_home.clone();
-    let engine_dir = state
-        .worker_path
-        .parent()
-        .ok_or_else(|| "Could not determine the engine directory.".to_string())?
-        .to_path_buf();
-    let script = engine_dir.join("download_model.py");
-    if !script.is_file() {
-        return Err(format!(
-            "Nie znaleziono skryptu pobierania: {}",
-            script.display()
-        ));
-    }
-    if !python_is_available(&python) {
-        return Err(PYTHON_MISSING.to_string());
-    }
-    emit_model_progress(&app, &model, "preparing", 0, None);
-    let verification_model = model.clone();
-    let verification_home = model_home.clone();
+    let spec =
+        crate::models::spec(&model).ok_or_else(|| format!("Nieznany model: {model}."))?;
+    let directory = state.engine.model_dir(&model);
+    let total = spec.total_bytes();
     let progress_app = app.clone();
     let progress_model = model.clone();
-    let output = tauri::async_runtime::spawn_blocking(move || {
-        let mut command = std::process::Command::new(&python.program);
-        // huggingface_hub reads HF_TOKEN from the environment, so a connected
-        // account needs no extra plumbing inside the script.
-        if let Some(token) = crate::hf::stored_token() {
-            command.env("HF_TOKEN", token);
-        }
-        no_console(
-            command
-                .args(&python.args)
-                .arg("-X")
-                .arg("utf8")
-                .arg(&script)
-                .arg("--model")
-                .arg(&model)
-                .arg("--local-dir")
-                .arg(&model_home)
-                .current_dir(&engine_dir),
-        );
-        command.stdout(std::process::Stdio::piped());
-        command.stderr(std::process::Stdio::piped());
-        let mut child = command.spawn().map_err(|error| error.to_string())?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| "Could not read the download progress.".to_string())?;
-        let stderr = child
-            .stderr
-            .take()
-            .ok_or_else(|| "Could not read the download error.".to_string())?;
-        let stderr_thread = std::thread::spawn(move || {
-            let mut output = String::new();
-            let mut reader = BufReader::new(stderr);
-            let _ = reader.read_to_string(&mut output);
-            output
-        });
-        let reader = BufReader::new(stdout);
-        let mut access_error: Option<String> = None;
-        for line in reader.lines().map_while(Result::ok) {
-            if let Ok(progress) = serde_json::from_str::<WorkerDownloadProgress>(&line) {
-                if progress.event == "progress" {
-                    emit_model_progress(
-                        &progress_app,
-                        &progress_model,
-                        "downloading",
-                        progress.downloaded_bytes,
-                        progress.total_bytes,
-                    );
-                }
-                continue;
-            }
-            if let Ok(failure) = serde_json::from_str::<WorkerAccessError>(&line) {
-                if failure.event == "error" {
-                    access_error = Some(access_error_message(&failure.kind, &failure.repo));
-                }
-            }
-        }
-        let status = child.wait().map_err(|error| error.to_string())?;
-        let stderr = stderr_thread
-            .join()
-            .map_err(|_| "Could not read the download error.".to_string())?;
-        Ok::<_, String>((status, stderr, access_error))
+    emit_model_progress(&app, &model, "downloading", 0, Some(total));
+
+    let fetch_model = model.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::models::download(
+            &fetch_model,
+            &directory,
+            |done, total| {
+                emit_model_progress(&progress_app, &progress_model, "downloading", done, Some(total));
+            },
+            || true,
+        )
     })
     .await
-    .map_err(|error| error.to_string())??;
-    let (status, stderr, access_error) = output;
-    if !status.success() {
-        // The script classifies access failures itself; the stderr tail is
-        // only a fallback for faults it did not recognise.
-        return Err(access_error
-            .unwrap_or_else(|| stderr.lines().last().unwrap_or(&stderr).trim().to_owned()));
-    }
-    emit_model_progress(&app, &verification_model, "validating", 0, None);
-    let status = model_status_from_local(&verification_home, &verification_model);
-    if status.state == ModelStatusState::Ready {
-        // Begin loading the freshly downloaded model in the background so the
-        // first transcription after a download does not pay the one-time cost
-        // of spawning the Python worker and moving weights into VRAM.
-        warm_up_model(&app, &state);
-        Ok(())
-    } else {
-        Err(status
-            .message
-            .unwrap_or_else(|| "The download finished with an incomplete model.".into()))
-    }
+    .map_err(|error| error.to_string())?
+    .map_err(|error| error.to_string())?;
+
+    // A model that has just arrived is the one the user means to dictate with,
+    // so it is worth loading before they press the shortcut.
+    warm_up_model(&app, &state);
+    emit_state(&app, &state);
+    Ok(())
 }
 
 #[tauri::command]
@@ -2885,11 +2549,10 @@ pub fn update_settings(
         .write()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = live;
     if model_changed {
-        let _ = state
-            .worker
-            .lock()
-            .map_err(|_| "worker lock poisoned")?
-            .take();
+        // The old model is of no further use, and holding two at once would
+        // double the memory for as long as the new one takes to load.
+        state.engine.unload();
+        state.model_warm.forget();
         warm_up_model(&app, &state);
     }
     if language_changed {
@@ -4017,7 +3680,10 @@ mod tests {
             .wait_until_ready_for("parakeet", Duration::from_millis(20))
             .unwrap_err();
 
-        assert!(matches!(error, ClientError::Timeout { .. }));
+        // The wait reports a timeout so the caller knows the model was still
+        // loading, rather than silently proceeding without it.
+        assert!(matches!(error, EngineError::Load(_)), "{error:?}");
+        assert!(error.to_string().contains("did not finish loading"), "{error}");
     }
 
     #[test]
