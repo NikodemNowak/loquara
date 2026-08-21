@@ -14,6 +14,9 @@ const exactMessages: Record<string, TranslationKey> = {
   "Could not read the download error.": "errors.downloadError",
   "The download finished with an incomplete model.": "errors.downloadIncomplete",
   "The model revision path is not a directory.": "errors.revisionNotDir",
+  "Hugging Face rejected the access token.": "errors.tokenRejected",
+  "The access token is empty.": "errors.tokenEmpty",
+  "The access token contains spaces.": "errors.tokenSpaces",
 };
 
 /** Backend messages with dynamic parts, matched by pattern. */
@@ -29,6 +32,8 @@ const patternMessages: Array<[
   [/^Could not check model artifacts: (.+)$/, "errors.artifactsCheck", (m) => ({ error: m[1] })],
   [/^Could not inspect the local model cache: (.+)$/, "errors.cacheCheck", (m) => ({ error: m[1] })],
   [/^Could not delete the model: (.+)$/, "errors.modelDeleteFailed", (m) => ({ error: m[1] })],
+  [/^Model requires accepting its licence on Hugging Face: (.+)$/, "errors.modelGated", (m) => ({ repo: m[1] })],
+  [/^Hugging Face rejected the access token for: (.+)$/, "errors.modelUnauthorized", (m) => ({ repo: m[1] })],
   [/^(.+) contains an invalid shard name$/, "errors.invalidShardName", (m) => ({ name: m[1] })],
   [/^(.+) contains a disallowed shard path: (.+)$/, "errors.invalidShardPath", (m) => ({ name: m[1], shard: m[2] })],
 ];

@@ -1,13 +1,45 @@
-export function Waveform({ seed, active = false }: { seed: string; active?: boolean }) {
-  let hash = 7;
-  for (const char of seed) hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
-  const bars = Array.from(
-    { length: 18 },
-    (_, index) => 4 + (((hash >>> (index % 16)) + index * 7) % 15),
-  );
-  return (
-    <span className={`mini-wave ${active ? "mini-wave--active" : ""}`} aria-hidden="true">
-      {bars.map((height, index) => <i key={index} style={{ height }} />)}
-    </span>
-  );
+import { useEffect, useRef, useState } from "react";
+
+import { cssColor, drawPeaks, prepareCanvas, type Peaks } from "../lib/waveform";
+
+const HEIGHT = 20;
+
+/**
+ * The amplitude envelope of one recording, as captured.
+ *
+ * Renders nothing when there is no envelope — recordings made before Loquara
+ * stored one, and captures still in progress. An invented shape would suggest
+ * the app knows something about the audio that it does not.
+ */
+export function Waveform({ peaks }: { peaks: Peaks | null }) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const [width, setWidth] = useState(0);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(([entry]) => {
+      setWidth(Math.round(entry.contentRect.width));
+    });
+    observer.observe(canvas);
+    return () => observer.disconnect();
+  }, [peaks]);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || !peaks?.length) return;
+    const prepared = prepareCanvas(canvas, HEIGHT);
+    if (!prepared) return;
+    const color = cssColor("--faint", "#7d8792");
+    drawPeaks(prepared.context, peaks, prepared.width, prepared.height, {
+      played: color,
+      pending: color,
+      barWidth: 2,
+      gap: 1.5,
+    });
+  }, [peaks, width]);
+
+  if (!peaks?.length) return null;
+
+  return <canvas ref={canvasRef} className="wave wave--static" aria-hidden="true" />;
 }

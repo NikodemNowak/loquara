@@ -7,12 +7,6 @@ import { adapterStub, settings } from "../../test/fixtures";
 import { renderWithI18n } from "../../test/renderWithI18n";
 
 describe("ustawienia", () => {
-  test("stosuje wybrany motyw na dokumencie", async () => {
-    renderWithI18n(<SettingsPage adapter={adapterStub()} initialSettings={settings} onToast={() => undefined} />);
-    await userEvent.click(screen.getByRole("radio", { name: "Ciemny" }));
-    expect(document.documentElement).toHaveAttribute("data-theme", "dark");
-  });
-
   test("cofa nieudaną zmianę i pokazuje komunikat", async () => {
     const onToast = vi.fn();
     const updateSettings = vi.fn(async () => { throw new Error("Brak uprawnień"); });
@@ -129,5 +123,148 @@ describe("ustawienia", () => {
 
     expect(updateSettings).not.toHaveBeenCalled();
     expect(screen.getByRole("button", { name: /Zmień globalny skrót/ })).toBeEnabled();
+  });
+
+  test("gdy model jest zablokowany, tłumaczy kroki zamiast pokazywać błąd", async () => {
+    const onToast = vi.fn();
+    const downloadModel = vi.fn(async () => {
+      throw new Error("Model requires accepting its licence on Hugging Face: acme/model");
+    });
+    renderWithI18n(<SettingsPage
+      adapter={adapterStub({ downloadModel })}
+      initialSettings={settings}
+      onSettingsChange={() => undefined}
+      onToast={onToast}
+    />);
+
+    const download = await screen.findByRole("button", { name: "Pobierz Cohere Transcribe 2B" });
+    await userEvent.click(download);
+
+    expect(await screen.findByText("Ten model wymaga konta Hugging Face")).toBeVisible();
+    expect(onToast).not.toHaveBeenCalled();
+  });
+
+  test("zapisuje token dopiero po zaakceptowaniu go przez Hugging Face", async () => {
+    const connectHfAccount = vi.fn(async () => ({ connected: true, name: "nikodem" }));
+    const downloadModel = vi.fn(async () => {
+      throw new Error("Model requires accepting its licence on Hugging Face: acme/model");
+    });
+    renderWithI18n(<SettingsPage
+      adapter={adapterStub({ downloadModel, connectHfAccount })}
+      initialSettings={settings}
+      onSettingsChange={() => undefined}
+      onToast={() => undefined}
+    />);
+    await userEvent.click(await screen.findByRole("button", { name: "Pobierz Cohere Transcribe 2B" }));
+
+    await userEvent.type(await screen.findByLabelText("Token dostępu"), "hf_secret");
+    await userEvent.click(screen.getByRole("button", { name: "Połącz konto" }));
+
+    expect(connectHfAccount).toHaveBeenCalledWith("hf_secret");
+    expect(await screen.findByText("Połączono jako nikodem")).toBeVisible();
+  });
+
+  test("odrzucony token zostawia formularz otwarty i wyjaśnia powód", async () => {
+    const connectHfAccount = vi.fn(async () => {
+      throw new Error("Hugging Face rejected the access token.");
+    });
+    const downloadModel = vi.fn(async () => {
+      throw new Error("Model requires accepting its licence on Hugging Face: acme/model");
+    });
+    renderWithI18n(<SettingsPage
+      adapter={adapterStub({ downloadModel, connectHfAccount })}
+      initialSettings={settings}
+      onSettingsChange={() => undefined}
+      onToast={() => undefined}
+    />);
+    await userEvent.click(await screen.findByRole("button", { name: "Pobierz Cohere Transcribe 2B" }));
+
+    await userEvent.type(await screen.findByLabelText("Token dostępu"), "hf_wrong");
+    await userEvent.click(screen.getByRole("button", { name: "Połącz konto" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Hugging Face odrzucił ten token.");
+    expect(screen.getByLabelText("Token dostępu")).toBeVisible();
+  });
+
+  test("wybór z listy rozwijanej zapisuje nową wartość", async () => {
+    const updateSettings = vi.fn(async (next: typeof settings) => ({ settings: next, warning: null }));
+    renderWithI18n(<SettingsPage
+      adapter={adapterStub({ updateSettings })}
+      initialSettings={settings}
+      onSettingsChange={() => undefined}
+      onToast={() => undefined}
+    />);
+
+    await userEvent.click(screen.getByRole("combobox", { name: "Przechowuj nagrania" }));
+    await userEvent.click(await screen.findByRole("option", { name: "7 dni" }));
+
+    await waitFor(() => expect(updateSettings).toHaveBeenCalledWith(
+      expect.objectContaining({ retentionDays: 7 }),
+    ));
+  });
+
+  test("wybór domyślnego mikrofonu zapisuje brak urządzenia, a nie pusty tekst", async () => {
+    // Lista rozwijana rezerwuje pusty string na "brak wyboru", więc opcja
+    // domyślna niesie wartość zastępczą, którą trzeba odwzorować na null.
+    const updateSettings = vi.fn(async (next: typeof settings) => ({ settings: next, warning: null }));
+    renderWithI18n(<SettingsPage
+      adapter={adapterStub({ updateSettings })}
+      initialSettings={{ ...settings, inputDevice: "default" }}
+      onSettingsChange={() => undefined}
+      onToast={() => undefined}
+    />);
+
+    await userEvent.click(await screen.findByRole("combobox", { name: "Mikrofon" }));
+    await userEvent.click(await screen.findByRole("option", { name: "Domyślny systemowy" }));
+
+    await waitFor(() => expect(updateSettings).toHaveBeenCalledWith(
+      expect.objectContaining({ inputDevice: null }),
+    ));
+  });
+
+  test("zmiana jednego ustawienia nie wyszarza pozostałych kontrolek", async () => {
+    // Zapis był kiedyś blokujący: jeden przełącznik gasił wszystkie inne pola
+    // na czas zapisu, co wyglądało jak migotanie całej strony.
+    let release!: () => void;
+    const updateSettings = vi.fn(async (next: typeof settings) => {
+      await new Promise<void>((resolve) => { release = resolve; });
+      return { settings: next, warning: null };
+    });
+    renderWithI18n(<SettingsPage
+      adapter={adapterStub({ updateSettings })}
+      initialSettings={settings}
+      onSettingsChange={() => undefined}
+      onToast={() => undefined}
+    />);
+
+    await userEvent.click(screen.getByRole("checkbox", { name: "Wklejaj automatycznie" }));
+
+    await waitFor(() => expect(updateSettings).toHaveBeenCalled());
+    expect(screen.getByRole("checkbox", { name: "Pokaż nakładkę" })).toBeEnabled();
+    expect(screen.getByRole("combobox", { name: "Przechowuj nagrania" })).toBeEnabled();
+    expect(screen.getByRole("combobox", { name: "Język dyktowania" })).toBeEnabled();
+    release();
+  });
+
+  test("dwie szybkie zmiany zapisują się obie", async () => {
+    // Bez blokowania kontrolek dwa kliknięcia mogą się wyprzedzić, więc zapis
+    // składa się na najnowszym stanie, a nie na tym z chwili renderowania.
+    const saved: Array<typeof settings> = [];
+    const updateSettings = vi.fn(async (next: typeof settings) => {
+      saved.push(next);
+      return { settings: next, warning: null };
+    });
+    renderWithI18n(<SettingsPage
+      adapter={adapterStub({ updateSettings, getSettings: async () => saved[saved.length - 1] ?? settings })}
+      initialSettings={settings}
+      onSettingsChange={() => undefined}
+      onToast={() => undefined}
+    />);
+
+    await userEvent.click(screen.getByRole("checkbox", { name: "Wklejaj automatycznie" }));
+    await userEvent.click(screen.getByRole("checkbox", { name: "Uruchamiaj z systemem" }));
+
+    await waitFor(() => expect(saved.length).toBe(2));
+    expect(saved[1]).toEqual(expect.objectContaining({ autoPaste: false, launchOnLogin: false }));
   });
 });

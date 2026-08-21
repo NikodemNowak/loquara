@@ -1,9 +1,9 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-
 import type {
   AppSettings,
   AppSnapshot,
+  HfAccount,
   HistoryQuery,
   InputDeviceInfo,
   Mode,
@@ -16,9 +16,7 @@ import type {
 } from "./types";
 import { normalizeError } from "./errors";
 import { translate } from "./i18n/lang";
-
 type Listener<T> = (payload: T) => void;
-
 export interface AppAdapter {
   getAppSnapshot(): Promise<AppSnapshot>;
   listInputDevices(): Promise<InputDeviceInfo[]>;
@@ -51,6 +49,9 @@ export interface AppAdapter {
   getModelStatus(): Promise<ModelStatus>;
   listModels(): Promise<ModelDescriptor[]>;
   downloadModel(model: string): Promise<void>;
+  hfAccount(): Promise<HfAccount>;
+  connectHfAccount(token: string): Promise<HfAccount>;
+  disconnectHfAccount(): Promise<HfAccount>;
   deleteModel(model: string): Promise<void>;
   updateSettings(settings: AppSettings): Promise<SettingsUpdateResult>;
   updateSettingValue(key: string, value: unknown): Promise<void>;
@@ -59,16 +60,13 @@ export interface AppAdapter {
   onModelProgress(listener: Listener<ModelDownloadProgress>): Promise<UnlistenFn>;
   onError(listener: Listener<string>): Promise<UnlistenFn>;
 }
-
 export function platformErrorMessage(payload: unknown): string {
   return normalizeError(payload, translate("errors.platform"));
 }
-
 function isStateNotManaged(error: unknown): boolean {
   const message = normalizeError(error, "").toLowerCase();
   return message.includes("state not managed") || message.includes("not managed for field");
 }
-
 async function invokeAfterStateReady<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   let lastError: unknown;
   for (let attempt = 0; attempt < 40; attempt += 1) {
@@ -82,7 +80,6 @@ async function invokeAfterStateReady<T>(command: string, args?: Record<string, u
   }
   throw lastError ?? new Error(translate("errors.stateInit"));
 }
-
 const realAdapter: AppAdapter = {
   getAppSnapshot: () => invokeAfterStateReady("get_app_snapshot"),
   listInputDevices: () => invoke("list_input_devices"),
@@ -118,6 +115,9 @@ const realAdapter: AppAdapter = {
   getModelStatus: () => invoke("get_model_status"),
   listModels: () => invoke("list_models"),
   downloadModel: (model) => invoke("download_model", { model }),
+  hfAccount: () => invoke("hf_account"),
+  connectHfAccount: (token) => invoke("connect_hf_account", { token }),
+  disconnectHfAccount: () => invoke("disconnect_hf_account"),
   deleteModel: (model) => invoke("delete_model", { model }),
   updateSettings: (settings) => invoke("update_settings", { settings }),
   updateSettingValue: (key, value) =>
@@ -142,7 +142,6 @@ const realAdapter: AppAdapter = {
     };
   },
 };
-
 const initialSettings: AppSettings = {
   inputDevice: null,
   shortcut: "Ctrl+Space",
@@ -153,10 +152,22 @@ const initialSettings: AppSettings = {
   showOverlay: true,
   model: "parakeet",
   streaming: false,
-  theme: "system",
   language: "system",
   dictationLanguage: "auto",
   modelKeepAliveSecs: 0,
+};
+/** A speech-shaped envelope, so the demo mode looks like real dictation. */
+const demoPeaks = (seed: number): number[] => {
+  let value = seed * 2_654_435_761;
+  const next = () => {
+    value = (value * 1_103_515_245 + 12_345) & 0x7fffffff;
+    return value / 0x7fffffff;
+  };
+  return Array.from({ length: 200 }, (_, index) => {
+    const syllable = 0.5 + 0.5 * Math.sin(index / 3.1);
+    const phrase = index % 47 < 6 ? 0.12 : 1;
+    return Math.round(Math.min(1, syllable * phrase * (0.55 + 0.45 * next())) * 255);
+  });
 };
 
 const demoHistory = (): Recording[] => [
@@ -167,6 +178,7 @@ const demoHistory = (): Recording[] => [
   ["r5", "Sprawdź proszę najnowsze wymagania i daj znać, jeśli coś jest niejasne.", "completed", 17_000, "Edge"],
 ].map(([id, text, status, durationMs, sourceApp], index) => ({
   id: String(id),
+  peaks: demoPeaks(index + 1),
   createdAt: Date.now() - index * 3_600_000,
   durationMs: Number(durationMs),
   status: status as Recording["status"],
@@ -176,7 +188,6 @@ const demoHistory = (): Recording[] => [
   sourceApp: sourceApp as string | null,
   error: status === "failed" ? "Nie udało się uruchomić modelu." : null,
 }));
-
 const builtInModes = (): Mode[] =>
   [
     ["clean", "demo.mode.clean.name", "demo.mode.clean.description", "demo.mode.clean.prompt"],
@@ -191,7 +202,6 @@ const builtInModes = (): Mode[] =>
     isDefault: true,
     createdAt: index,
   }));
-
 export function createBrowserAdapter(): AppAdapter {
   let settings = { ...initialSettings };
   let snapshot: AppSnapshot = { dictation: { status: "idle" }, settings, modelLoading: false };
@@ -208,7 +218,6 @@ export function createBrowserAdapter(): AppAdapter {
     emit();
     return snapshot;
   };
-
   return {
     getAppSnapshot: async () => snapshot,
     listInputDevices: async () => [
@@ -230,6 +239,7 @@ export function createBrowserAdapter(): AppAdapter {
           id: recordingId, createdAt: Date.now(), durationMs: 8_000,
           status: "completed", text: "To jest przykładowa transkrypcja z trybu demonstracyjnego.",
           model: "NVIDIA Parakeet 0.6B v3", audioPath, sourceApp: null, error: null,
+          peaks: demoPeaks(history.length + 1),
         }, ...history];
         setState({ status: "idle" });
       }, 900);
@@ -311,6 +321,9 @@ export function createBrowserAdapter(): AppAdapter {
       { key: "cohere", id: "AEmotionStudio/cohere-transcribe-03-2026-models", provider: "Cohere", source: "local", revision: "d114f701a80b2150943f5dbae71458f4d1fcb37b", display: "Cohere Transcribe 2B", minVramGb: 5, minRamGb: 8, languages: "pl/en/fr/de/...", estimatedSizeBytes: 4_132_000_000, status: "not_installed", installedSizeBytes: null, message: null },
     ]),
     downloadModel: async () => undefined,
+    hfAccount: async () => ({ connected: false, name: null }),
+    connectHfAccount: async () => ({ connected: true, name: "demo" }),
+    disconnectHfAccount: async () => ({ connected: false, name: null }),
     deleteModel: async () => undefined,
     updateSettings: async (next) => {
       settings = { ...next };
@@ -330,9 +343,7 @@ export function createBrowserAdapter(): AppAdapter {
     onError: async () => () => undefined,
   };
 }
-
 let browserAdapter: AppAdapter | undefined;
-
 export function getAdapter(): AppAdapter {
   const isTauri = "__TAURI_INTERNALS__" in window;
   if (isTauri) return realAdapter;

@@ -45,6 +45,7 @@ describe("historia", () => {
       audioPath: null,
       sourceApp: null,
       error: "Previous dictation was interrupted before audio finalization.",
+      peaks: null,
     };
     renderWithI18n(<HistoryPage adapter={adapterStub()} recordings={[failedNoAudio]} onRefresh={async () => undefined} onToast={() => undefined} />);
 

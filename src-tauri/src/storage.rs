@@ -71,6 +71,13 @@ pub struct Recording {
     pub audio_path: Option<String>,
     pub source_app: Option<String>,
     pub error: Option<String>,
+    /// Amplitude envelope, one byte per bucket, `0..=255` mapping to `0.0..=1.0`.
+    /// `None` for recordings captured before envelopes were stored, and while
+    /// a capture is still running. It survives retention pruning: the envelope
+    /// describes the recording, not the audio file, and stays useful in the
+    /// history list after the WAV is gone.
+    #[serde(default)]
+    pub peaks: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -175,7 +182,8 @@ impl Storage {
                model TEXT,
                audio_path TEXT,
                source_app TEXT,
-               error TEXT
+               error TEXT,
+               peaks BLOB
              );
              CREATE INDEX IF NOT EXISTS history_created_at ON history(created_at DESC);
              CREATE INDEX IF NOT EXISTS history_status ON history(status);
@@ -217,6 +225,20 @@ impl Storage {
                 self.connection()?.execute_batch(&migrations)?;
             }
         }
+        if version < 3 {
+            // Recordings captured before this column existed keep a NULL
+            // envelope; the interface renders those rows without a waveform
+            // rather than inventing one.
+            let columns: Vec<String> = self
+                .connection()?
+                .prepare("PRAGMA table_info(history)")?
+                .query_map([], |row| row.get::<_, String>(1))?
+                .collect::<Result<_, _>>()?;
+            if !columns.iter().any(|column| column == "peaks") {
+                self.connection()?
+                    .execute_batch("ALTER TABLE history ADD COLUMN peaks BLOB;")?;
+            }
+        }
         self.connection()?.execute_batch(
             "INSERT OR IGNORE INTO modes
                (id,config_json,name,description,prompt,enabled,is_default,created_at)
@@ -224,7 +246,7 @@ impl Storage {
                ('clean','{}','Clean','Light text normalization','',1,1,0),
                ('message','{}','Message','Natural message style','',1,0,1),
                ('code','{}','Code','Dictating technical terms','',1,0,2);
-             UPDATE schema_version SET version = 2 WHERE version < 2;",
+             UPDATE schema_version SET version = 3 WHERE version < 3;",
         )?;
         Ok(())
     }
@@ -256,8 +278,8 @@ impl Storage {
     pub fn insert_recording(&self, recording: &Recording) -> Result<(), StorageError> {
         self.connection()?.execute(
             "INSERT INTO history
-             (id, created_at, duration_ms, status, text, model, audio_path, source_app, error)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+             (id, created_at, duration_ms, status, text, model, audio_path, source_app, error, peaks)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 recording.id,
                 recording.created_at,
@@ -268,6 +290,7 @@ impl Storage {
                 recording.audio_path,
                 recording.source_app,
                 recording.error,
+                recording.peaks,
             ],
         )?;
         Ok(())
@@ -276,7 +299,7 @@ impl Storage {
     pub fn update_recording(&self, recording: &Recording) -> Result<bool, StorageError> {
         Ok(self.connection()?.execute(
             "UPDATE history SET created_at=?2, duration_ms=?3, status=?4, text=?5,
-             model=?6, audio_path=?7, source_app=?8, error=?9 WHERE id=?1",
+             model=?6, audio_path=?7, source_app=?8, error=?9, peaks=?10 WHERE id=?1",
             params![
                 recording.id,
                 recording.created_at,
@@ -287,6 +310,7 @@ impl Storage {
                 recording.audio_path,
                 recording.source_app,
                 recording.error,
+                recording.peaks,
             ],
         )? > 0)
     }
@@ -307,6 +331,14 @@ impl Storage {
         )? > 0)
     }
 
+    /// Stores the amplitude envelope captured while the recording ran.
+    pub fn store_peaks(&self, id: &str, peaks: &[u8]) -> Result<bool, StorageError> {
+        Ok(self
+            .connection()?
+            .execute("UPDATE history SET peaks=?2 WHERE id=?1", params![id, peaks])?
+            > 0)
+    }
+
     pub fn mark_retrying(&self, id: &str) -> Result<bool, StorageError> {
         self.update_status(id, RecordingStatus::Processing, None, None, None, None)
     }
@@ -314,7 +346,7 @@ impl Storage {
     pub fn get_recording(&self, id: &str) -> Result<Option<Recording>, StorageError> {
         let connection = self.connection()?;
         let mut statement = connection.prepare(
-            "SELECT id, created_at, duration_ms, status, text, model, audio_path, source_app, error
+            "SELECT id, created_at, duration_ms, status, text, model, audio_path, source_app, error, peaks
              FROM history WHERE id=?1",
         )?;
         let raw = statement.query_row([id], raw_recording).optional()?;
@@ -330,7 +362,7 @@ impl Storage {
         let status = query.status.map(RecordingStatus::as_str);
         let connection = self.connection()?;
         let mut statement = connection.prepare(
-            "SELECT id, created_at, duration_ms, status, text, model, audio_path, source_app, error
+            "SELECT id, created_at, duration_ms, status, text, model, audio_path, source_app, error, peaks
              FROM history
              WHERE (?1 IS NULL OR status=?1) AND COALESCE(text,'') LIKE ?2
              ORDER BY created_at DESC, id DESC",
@@ -708,6 +740,7 @@ struct RawRecording {
     audio_path: Option<String>,
     source_app: Option<String>,
     error: Option<String>,
+    peaks: Option<Vec<u8>>,
 }
 
 fn raw_recording(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawRecording> {
@@ -721,6 +754,7 @@ fn raw_recording(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawRecording> {
         audio_path: row.get(6)?,
         source_app: row.get(7)?,
         error: row.get(8)?,
+        peaks: row.get(9)?,
     })
 }
 
@@ -738,6 +772,7 @@ impl TryFrom<RawRecording> for Recording {
             audio_path: raw.audio_path,
             source_app: raw.source_app,
             error: raw.error,
+            peaks: raw.peaks,
         })
     }
 }
@@ -933,6 +968,7 @@ mod tests {
             audio_path: Some(format!("{id}.wav")),
             source_app: Some("Notatnik".to_owned()),
             error: None,
+            peaks: None,
         }
     }
 
@@ -940,7 +976,7 @@ mod tests {
     fn migrates_all_tables_and_records_schema_version() {
         let (_temp, storage) = storage();
 
-        assert_eq!(storage.schema_version().unwrap(), 2);
+        assert_eq!(storage.schema_version().unwrap(), 3);
         assert_eq!(
             storage.table_names().unwrap(),
             vec!["history", "modes", "settings", "vocabulary"]
@@ -948,7 +984,7 @@ mod tests {
     }
 
     #[test]
-    fn reopening_v2_database_with_partial_migration_is_idempotent() {
+    fn reopening_an_older_database_with_partial_migration_is_idempotent() {
         let temp = tempfile::tempdir().unwrap();
         let database = temp.path().join("mow.sqlite3");
         let recordings = temp.path().join("recordings");
@@ -972,11 +1008,78 @@ mod tests {
 
         let storage = Storage::open(&database, &recordings).unwrap();
 
-        assert_eq!(storage.schema_version().unwrap(), 2);
+        assert_eq!(storage.schema_version().unwrap(), 3);
         assert_eq!(
             storage.list_modes().unwrap().iter().map(|mode| mode.id.clone()).collect::<Vec<_>>(),
             vec!["clean", "message", "code"]
         );
+    }
+
+    #[test]
+    fn upgrading_a_database_without_the_peaks_column_keeps_existing_rows() {
+        let temp = tempfile::tempdir().unwrap();
+        let database = temp.path().join("mow.sqlite3");
+        let recordings = temp.path().join("recordings");
+        let connection = rusqlite::Connection::open(&database).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE history (
+                   id TEXT PRIMARY KEY,
+                   created_at INTEGER NOT NULL,
+                   duration_ms INTEGER NOT NULL DEFAULT 0,
+                   status TEXT NOT NULL CHECK(status IN ('recording','processing','completed','failed','cancelled')),
+                   text TEXT,
+                   model TEXT,
+                   audio_path TEXT,
+                   source_app TEXT,
+                   error TEXT
+                 );
+                 INSERT INTO history(id,created_at,status,text)
+                   VALUES ('old','1','completed','spoken before envelopes existed');
+                 CREATE TABLE modes (
+                   id TEXT PRIMARY KEY,
+                   config_json TEXT NOT NULL,
+                   name TEXT NOT NULL DEFAULT '',
+                   description TEXT NOT NULL DEFAULT '',
+                   prompt TEXT NOT NULL DEFAULT '',
+                   enabled INTEGER NOT NULL DEFAULT 1,
+                   is_default INTEGER NOT NULL DEFAULT 0,
+                   created_at INTEGER NOT NULL DEFAULT 0
+                 );
+                 CREATE TABLE schema_version (version INTEGER NOT NULL);
+                 INSERT INTO schema_version(version) VALUES (2);",
+            )
+            .unwrap();
+        drop(connection);
+
+        let storage = Storage::open(&database, &recordings).unwrap();
+
+        let migrated = storage.get_recording("old").unwrap().unwrap();
+        assert_eq!(migrated.text.as_deref(), Some("spoken before envelopes existed"));
+        assert_eq!(migrated.peaks, None);
+        assert_eq!(storage.schema_version().unwrap(), 3);
+    }
+
+    #[test]
+    fn envelopes_round_trip_through_storage() {
+        let (_temp, storage) = storage();
+        storage
+            .insert_recording(&recording("a", RecordingStatus::Completed, Some("hello")))
+            .unwrap();
+
+        assert!(storage.store_peaks("a", &[0, 128, 255]).unwrap());
+
+        assert_eq!(
+            storage.get_recording("a").unwrap().unwrap().peaks,
+            Some(vec![0, 128, 255])
+        );
+    }
+
+    #[test]
+    fn storing_an_envelope_for_a_missing_recording_reports_no_match() {
+        let (_temp, storage) = storage();
+
+        assert!(!storage.store_peaks("gone", &[1, 2, 3]).unwrap());
     }
 
     #[test]

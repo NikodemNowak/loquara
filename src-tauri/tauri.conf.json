@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "Loquara",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "identifier": "io.loquara.desktop",
   "build": {
     "beforeDevCommand": "pnpm dev",
@@ -28,8 +28,8 @@
         "label": "overlay",
         "title": "Loquara — dyktowanie",
         "url": "index.html?window=overlay",
-         "width": 118,
-         "height": 32,
+         "width": 80,
+         "height": 42,
         "decorations": false,
         "resizable": false,
         "alwaysOnTop": true,

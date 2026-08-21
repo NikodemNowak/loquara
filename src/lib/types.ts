@@ -31,7 +31,6 @@ export interface AppSettings {
   showOverlay: boolean;
   model: string;
   streaming: boolean;
-  theme: ThemeChoice;
   language: LanguageChoice;
   dictationLanguage: string;
   modelKeepAliveSecs: number;
@@ -66,6 +65,12 @@ export interface ModelDescriptor {
   status: ModelStatus["state"];
   installedSizeBytes: number | null;
   message: string | null;
+}
+
+/** Whether Loquara holds a Hugging Face token, and for which account. */
+export interface HfAccount {
+  connected: boolean;
+  name: string | null;
 }
 
 export interface PlatformError {
@@ -108,6 +113,9 @@ export interface Recording {
   audioPath: string | null;
   sourceApp: string | null;
   error: string | null;
+  /** Amplitude envelope, one byte per bucket (0-255). Null for recordings
+   *  captured before envelopes were stored, and while one is still running. */
+  peaks: number[] | null;
 }
 
 export interface HistoryQuery {
@@ -131,6 +139,5 @@ export interface Mode {
   createdAt: number;
 }
 
-export type ThemeChoice = "system" | "light" | "dark";
 
 export type LanguageChoice = "system" | "pl" | "en";

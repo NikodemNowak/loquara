@@ -4,6 +4,8 @@ from pathlib import Path
 from unittest import mock
 
 from engine.download_model import (
+    ModelAccessError,
+    classify_access_error,
     directory_size,
     download_exact_model,
     patch_cohere_modeling,
@@ -147,6 +149,71 @@ class DownloadModelTests(unittest.TestCase):
             root = Path(directory)
             (root / "config.json").write_text("{}", encoding="utf-8")
             self.assertFalse(patch_cohere_modeling(root))
+
+
+class _Response:
+    def __init__(self, status_code):
+        self.status_code = status_code
+
+
+class _HttpError(Exception):
+    def __init__(self, status_code, message="denied"):
+        super().__init__(message)
+        self.response = _Response(status_code)
+
+
+class GatedRepoError(Exception):
+    """Stands in for the huggingface_hub exception, which is matched by name."""
+
+
+class RepositoryNotFoundError(Exception):
+    pass
+
+
+class AccessErrorTests(unittest.TestCase):
+    def test_gated_repository_is_reported_as_needing_a_licence(self):
+        error = classify_access_error(GatedRepoError("access denied"), "acme/model")
+
+        self.assertIsNotNone(error)
+        self.assertEqual(error.kind, "gated")
+        self.assertEqual(error.repo, "acme/model")
+
+    def test_forbidden_means_the_licence_was_never_accepted(self):
+        error = classify_access_error(_HttpError(403), "acme/model")
+
+        self.assertEqual(error.kind, "gated")
+
+    def test_unauthorized_means_the_token_is_missing_or_wrong(self):
+        error = classify_access_error(_HttpError(401), "acme/model")
+
+        self.assertEqual(error.kind, "unauthorized")
+
+    def test_a_repository_that_looks_missing_is_treated_as_no_access(self):
+        # Hugging Face returns 404 for private repos to callers without a
+        # token, so "not found" must not be reported as a broken model id.
+        error = classify_access_error(RepositoryNotFoundError("nope"), "acme/model")
+
+        self.assertEqual(error.kind, "unauthorized")
+
+    def test_unrelated_failures_keep_their_own_message(self):
+        self.assertIsNone(classify_access_error(OSError("no space left"), "acme/model"))
+        self.assertIsNone(classify_access_error(_HttpError(500), "acme/model"))
+
+    def test_download_surfaces_a_gated_repository_instead_of_the_raw_exception(self):
+        def refuse(**_kwargs):
+            raise GatedRepoError("you must accept the licence")
+
+        with self.assertRaises(ModelAccessError) as raised:
+            download_exact_model(downloader=refuse, model_key="cohere")
+
+        self.assertEqual(raised.exception.kind, "gated")
+
+    def test_download_does_not_swallow_ordinary_failures(self):
+        def explode(**_kwargs):
+            raise OSError("no space left on device")
+
+        with self.assertRaises(OSError):
+            download_exact_model(downloader=explode, model_key="cohere")
 
 
 if __name__ == "__main__":

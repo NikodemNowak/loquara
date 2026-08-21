@@ -1,97 +1,48 @@
 import { useEffect, useRef, useState } from "react";
 
 import { Check, RotateCcw } from "../../components/Icons";
-import { applyTheme } from "../../app/theme";
 import type { AppAdapter } from "../../lib/tauri";
-import type { AppSnapshot, ThemeChoice } from "../../lib/types";
+import type { AppSnapshot } from "../../lib/types";
 import { normalizeError } from "../../lib/errors";
+import { LevelMeter } from "../../components/LevelMeter";
 import { useI18n } from "../../lib/i18n";
 
 const isTauri = "__TAURI_INTERNALS__" in window;
 
-function effectiveTheme(choice: ThemeChoice): "light" | "dark" {
-  if (choice === "light" || choice === "dark") return choice;
-  return window.matchMedia?.("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+/* Pill geometry. Mirrored in tauri.conf.json, which sets the initial size.
+ * The window is not resizable by the user; only this code changes its size,
+ * which needs core:window:allow-set-size in the capability file. */
+const PILL_WIDTH = 80;
+const PILL_HEIGHT = 42;
+/** Width for the states that carry words rather than a meter. */
+const WORD_WIDTH = 168;
+/** The cancel question needs room for two key hints beside it. */
+const CONFIRM_WIDTH = 208;
+
+/**
+ * The window size each state needs.
+ *
+ * Metering is what the pill does almost all of the time, so that state is
+ * kept as small as it can be. The transient states that have something to say
+ * widen rather than truncate it — a clipped error is worse than a wider pill
+ * for two seconds.
+ */
+function sizeFor(status: string | undefined, initError: boolean) {
+  if (initError) return { width: WORD_WIDTH, height: PILL_HEIGHT };
+  switch (status) {
+    case "cancelling":
+      return { width: CONFIRM_WIDTH, height: PILL_HEIGHT };
+    case "pasting":
+    case "failed":
+      return { width: WORD_WIDTH, height: PILL_HEIGHT };
+    default:
+      return { width: PILL_WIDTH, height: PILL_HEIGHT };
+  }
 }
+/** How long the cancel prompt waits before withdrawing itself. */
+const CONFIRM_TIMEOUT_MS = 10_000;
 
-const WAVE_BARS = 18;
-const WAVE_HEIGHT = 18;
-
-// Deterministic pseudo-random phases so the bars bob in place like an
-// equalizer instead of forming a wave that travels left-to-right.
-const BAR_PHASES = Array.from({ length: WAVE_BARS }, (_, index) => {
-  const value = Math.sin(index * 127.1 + 311.7) * 43758.5453;
-  return (value - Math.floor(value)) * Math.PI * 2;
-});
-
-function LiveWaveform({ level, mode = "live" }: { level: number; mode?: "live" | "thinking" }) {
-  const { t } = useI18n();
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const levelRef = useRef(level);
-  levelRef.current = level;
-
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const context = canvas.getContext("2d");
-    if (!context) return;
-    const cssWidth = canvas.clientWidth || 104;
-    const dpr = window.devicePixelRatio || 1;
-    canvas.width = cssWidth * dpr;
-    canvas.height = WAVE_HEIGHT * dpr;
-    context.scale(dpr, dpr);
-    const barWidth = 2.4;
-    const gap = 3.0;
-    const step = barWidth + gap;
-    const envelopes = new Array<number>(WAVE_BARS).fill(0);
-    const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    let raf = 0;
-
-    const draw = (now: number) => {
-      const time = reduceMotion ? 0 : now / 1000;
-      const target = Math.max(0, Math.min(1, levelRef.current));
-      context.clearRect(0, 0, cssWidth, WAVE_HEIGHT);
-      const barColor =
-        getComputedStyle(document.documentElement).getPropertyValue("--pill-accent").trim() ||
-        "#78a9ff";
-      context.fillStyle = barColor;
-      const mid = (WAVE_BARS - 1) / 2;
-      const contentWidth = (WAVE_BARS - 1) * step + barWidth;
-      const offset = Math.max(0, (cssWidth - contentWidth) / 2);
-      for (let index = 0; index < WAVE_BARS; index += 1) {
-        let energy: number;
-        if (mode === "thinking") {
-          const center = (Math.sin(time * 1.4) * 0.5 + 0.5) * (WAVE_BARS - 1);
-          const dist = Math.abs(index - center);
-          energy = 0.18 + 0.74 * Math.exp(-(dist * dist) / 14);
-        } else {
-          const phase = BAR_PHASES[index];
-          const speed = 2.0 + (index % 3) * 0.4;
-          const wave =
-            0.5 +
-            0.5 *
-              Math.sin(time * speed + phase) *
-              (0.65 + 0.35 * Math.sin(time * 1.4 + phase * 1.7));
-          const falloff = 0.6 + 0.4 * (1 - Math.abs(index - mid) / (mid + 1));
-          const amp = 0.35 + 0.65 * target;
-          energy = Math.max(0.06, amp * wave * falloff);
-        }
-        envelopes[index] += (energy - envelopes[index]) * 0.4;
-        const height = Math.max(1.5, WAVE_HEIGHT * Math.min(1, envelopes[index]));
-        const x = offset + index * step;
-        const y = (WAVE_HEIGHT - height) / 2;
-        context.globalAlpha = 0.45 + 0.55 * (height / WAVE_HEIGHT);
-        context.fillRect(x, y, barWidth, height);
-      }
-      context.globalAlpha = 1;
-      raf = requestAnimationFrame(draw);
-    };
-    raf = requestAnimationFrame(draw);
-    return () => cancelAnimationFrame(raf);
-  }, [mode]);
-
-  return <canvas ref={canvasRef} className="live-waveform" aria-label={t("overlay.micLevel")} data-level={level.toFixed(2)} />;
-}
+const WAVE_HEIGHT = 32;
 
 const DRAG_IGNORE = "button, input, a, select, textarea, [role='button']";
 
@@ -103,6 +54,8 @@ export function RecorderOverlay({ adapter }: { adapter: AppAdapter }) {
   const [actionError, setActionError] = useState("");
   const [initError, setInitError] = useState("");
   const [initAttempt, setInitAttempt] = useState(0);
+  /** Set while the app moves its own window, so the move is not persisted. */
+  const selfMoving = useRef(false);
 
   useEffect(() => {
     let active = true;
@@ -163,39 +116,65 @@ export function RecorderOverlay({ adapter }: { adapter: AppAdapter }) {
     };
   }, [adapter, initAttempt]);
 
-  useEffect(() => {
-    if (snapshot?.dictation.status !== "recording") return;
-    const armOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") void action(() => adapter.requestCancel());
-    };
-    window.addEventListener("keydown", armOnEscape);
-    return () => window.removeEventListener("keydown", armOnEscape);
-  }, [adapter, snapshot?.dictation.status]);
+  const status = snapshot?.dictation.status;
+  const cancelling = status === "cancelling";
 
+  // Withdrawing the question is the safe default, so it is the one thing the
+  // pill still decides for itself.
   useEffect(() => {
-    if (snapshot?.dictation.status !== "cancelling") return;
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Enter") void action(() => adapter.cancelRecording());
-      else if (event.key === "Escape") void action(() => adapter.requestCancel());
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [adapter, snapshot?.dictation.status]);
-
-  useEffect(() => {
-    if (snapshot?.dictation.status !== "cancelling") return;
+    if (!cancelling) return;
     const timer = window.setTimeout(() => {
       void action(() => adapter.requestCancel());
-    }, 10_000);
+    }, CONFIRM_TIMEOUT_MS);
     return () => window.clearTimeout(timer);
-  }, [adapter, snapshot?.dictation.status]);
+  }, [adapter, cancelling]);
+
+  // The window is sized to whatever the current state needs, keeping its
+  // bottom edge so it never slides off a screen where it already sits near the
+  // taskbar. If the platform refuses to resize, nothing moves and `grown`
+  // stays false, so the cancel prompt renders inside the pill instead.
+  const wanted = sizeFor(status, Boolean(initError));
+  const applied = useRef({ width: PILL_WIDTH, height: PILL_HEIGHT });
+  useEffect(() => {
+    if (!isTauri) return;
+    if (applied.current.width === wanted.width && applied.current.height === wanted.height) return;
+    applied.current = wanted;
+    let active = true;
+    void import("@tauri-apps/api/window").then(async ({ getCurrentWindow, LogicalSize }) => {
+      if (!active) return;
+      const overlay = getCurrentWindow();
+      const position = await overlay.outerPosition();
+      const before = await overlay.innerSize();
+      selfMoving.current = true;
+      try {
+        await overlay.setSize(new LogicalSize(wanted.width, wanted.height));
+        // Move by however much the window actually changed, not by how much
+        // it was asked to: a platform that refuses the resize resolves the
+        // call anyway, and moving on that promise would shift the pill for a
+        // change that never happened.
+        const after = await overlay.innerSize();
+        const difference = after.height - before.height;
+        if (difference !== 0) {
+          position.y -= difference;
+          await overlay.setPosition(position);
+        }
+      } catch {
+        // The pill keeps its previous size; the prompt still reads correctly,
+        // so there is nothing here the user needs to be told about.
+      } finally {
+        // Let the move event settle before re-arming the position writer.
+        window.setTimeout(() => { selfMoving.current = false; }, 400);
+      }
+    });
+    return () => { active = false; };
+  }, [wanted.width, wanted.height]);
 
   useEffect(() => {
-    if (snapshot?.dictation.status === "idle") void adapter.hideOverlay();
-  }, [adapter, snapshot?.dictation.status]);
+    if (status === "idle") void adapter.hideOverlay();
+  }, [adapter, status]);
 
   useEffect(() => {
-    if (!("__TAURI_INTERNALS__" in window)) return;
+    if (!isTauri) return;
     let active = true;
     let dispose: (() => void) | undefined;
     let latest: { x: number; y: number } | undefined;
@@ -203,7 +182,7 @@ export function RecorderOverlay({ adapter }: { adapter: AppAdapter }) {
     void import("@tauri-apps/api/window").then(({ getCurrentWindow }) => {
       if (!active) return;
       getCurrentWindow().onMoved(({ payload }) => {
-        if (!active) return;
+        if (!active || selfMoving.current) return;
         latest = { x: payload.x, y: payload.y };
         window.clearTimeout(timer);
         timer = window.setTimeout(() => {
@@ -219,15 +198,11 @@ export function RecorderOverlay({ adapter }: { adapter: AppAdapter }) {
   }, [adapter]);
 
   useEffect(() => {
-    if (!snapshot) return;
-    const resolved = effectiveTheme(snapshot.settings.theme);
-    applyTheme(snapshot.settings.theme);
-    if (isTauri) {
-      void import("@tauri-apps/api/window").then(({ getCurrentWindow }) => {
-        void getCurrentWindow().setTheme(resolved);
-      });
-    }
-  }, [snapshot]);
+    if (!isTauri) return;
+    void import("@tauri-apps/api/window").then(({ getCurrentWindow }) => {
+      void getCurrentWindow().setTheme("dark");
+    });
+  }, []);
 
   const action = async (command: () => Promise<AppSnapshot>) => {
     setPending(true);
@@ -244,50 +219,76 @@ export function RecorderOverlay({ adapter }: { adapter: AppAdapter }) {
   const startDrag = (event: React.MouseEvent) => {
     if (event.button !== 0) return;
     if ((event.target as HTMLElement).closest(DRAG_IGNORE)) return;
-    if (!("__TAURI_INTERNALS__" in window)) return;
+    if (!isTauri) return;
     void import("@tauri-apps/api/window").then(({ getCurrentWindow }) => {
       void getCurrentWindow().startDragging();
     });
   };
 
   const state = snapshot?.dictation;
-
   return (
-    <main className={`recorder-overlay recorder-overlay--${initError ? "init-error" : state?.status ?? "initializing"}`} aria-live="polite" data-tauri-drag-region onMouseDown={startDrag}>
-      {initError ? <>
-        <span className="failure-mark" aria-hidden="true">!</span>
-        <div className="overlay-failure-copy" role="alert">
-          <strong>{t("overlay.initError.title")}</strong>
-          <span>{initError}</span>
+    <main
+      className={`recorder-overlay recorder-overlay--${initError ? "init-error" : state?.status ?? "initializing"}`}
+      aria-live="polite"
+      data-tauri-drag-region
+      onMouseDown={startDrag}
+    >
+      {initError ? (
+        <div className="overlay-main" title={initError}>
+          <div className="overlay-copy overlay-copy--alert" role="alert">
+            <strong>{t("overlay.initError.title")}</strong>
+          </div>
+          <button
+            disabled={pending}
+            className="text-button"
+            aria-label={t("overlay.initError.retryAria")}
+            onClick={() => setInitAttempt((attempt) => attempt + 1)}
+          >
+            <RotateCcw size={13} />
+          </button>
         </div>
-        <button disabled={pending} className="text-button danger-text" aria-label={t("overlay.initError.retryAria")} onClick={() => setInitAttempt((attempt) => attempt + 1)}>
-          <RotateCcw size={14} /> {t("common.retry")}
-        </button>
-      </> : !state && <div className="overlay-content overlay-content--boot">
-        <span className="spinner" aria-hidden="true" />
-        <strong>{t("overlay.boot")}</strong>
-      </div>}
-       {!initError && state?.status === "recording" && <div className="overlay-content overlay-content--recording">
-        <LiveWaveform level={level} />
-      </div>}
-      {!initError && state?.status === "cancelling" && <div className="overlay-content overlay-content--cancelling">
-        <div className="overlay-copy"><strong>{t("overlay.cancelling.title")}</strong><small>{t("overlay.cancelling.hint")}</small></div>
-      </div>}
-      {!initError && state?.status === "processing" && <div className="overlay-content overlay-content--processing">
-        <LiveWaveform level={0} mode="thinking" />
-      </div>}
-      {!initError && state?.status === "pasting" && <div className="overlay-content overlay-content--complete">
-        <span className="overlay-complete-mark"><Check size={15} /></span>
-        <div className="overlay-copy"><strong>{t("common.pasting")}</strong></div>
-      </div>}
-      {!initError && state?.status === "failed" && <div className="overlay-content overlay-content--failed">
-        <span className="failure-mark" aria-hidden="true">!</span>
-        <div className="overlay-copy overlay-failure-copy"><strong>{t("overlay.failed.title")}</strong><small>{t("today.cta.retryDetail")}</small></div>
-        <button disabled={pending} className="text-button danger-text" aria-label={t("overlay.failed.retryAria")} onClick={() => void action(() => adapter.retryTranscription(state.recovery.recordingId))}>
-          <RotateCcw size={14} /> {t("common.retry")}
-        </button>
-      </div>}
-      {actionError && <span className="overlay-error" role="alert">{actionError}</span>}
+      ) : !state ? (
+        <div className="overlay-main overlay-main--center" role="status" aria-label={t("overlay.boot")}>
+          <span className="spinner" aria-hidden="true" />
+        </div>
+      ) : cancelling ? (
+        <div className="overlay-main overlay-main--confirm" role="alertdialog" aria-label={t("overlay.cancelling.title")}>
+          <strong>{t("overlay.cancelling.title")}</strong>
+          <span className="overlay-keys">
+            <kbd>Esc</kbd><em>{t("overlay.cancelling.confirm")}</em>
+          </span>
+        </div>
+      ) : state.status === "recording" ? (
+        <div className="overlay-main">
+          <LevelMeter level={cancelling ? 0 : level} height={WAVE_HEIGHT} barWidth={3} gap={2} className="overlay-wave" label={t("overlay.micLevel")} colorToken="--pill-accent" />
+        </div>
+      ) : state.status === "processing" ? (
+        <div className="overlay-main">
+          <LevelMeter level={0} mode="thinking" height={WAVE_HEIGHT} barWidth={3} gap={2} className="overlay-wave" label={t("common.processing")} colorToken="--pill-accent" />
+        </div>
+      ) : state.status === "pasting" ? (
+        <div className="overlay-main">
+          <span className="overlay-mark overlay-mark--success"><Check size={13} /></span>
+          <div className="overlay-copy"><strong>{t("common.pasting")}</strong></div>
+        </div>
+      ) : state.status === "failed" ? (
+        <div className="overlay-main">
+          <div className="overlay-copy overlay-copy--alert">
+            <strong>{t("overlay.failed.title")}</strong>
+          </div>
+          <button
+            disabled={pending}
+            className="text-button"
+            aria-label={t("overlay.failed.retryAria")}
+            onClick={() => void action(() => adapter.retryTranscription(state.recovery.recordingId))}
+          >
+            <RotateCcw size={13} />
+          </button>
+        </div>
+      ) : null}
+
+
+      {actionError && <span className="overlay-note overlay-note--error" role="alert">{actionError}</span>}
     </main>
   );
 }

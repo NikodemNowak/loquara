@@ -3,6 +3,7 @@ import {
   ArrowCounterclockwiseRegular,
   BookOpenRegular,
   CheckmarkRegular,
+  ChevronDownRegular,
   ColorRegular,
   CopyRegular,
   DeleteRegular,
@@ -60,4 +61,5 @@ export const Languages = wrap(LocalLanguageRegular);
 export const FolderOpen = wrap(OpenFolderRegular);
 export const Palette = wrap(ColorRegular);
 export const SlidersHorizontal = wrap(OptionsRegular);
+export const ChevronDown = wrap(ChevronDownRegular);
 export const Keyboard = wrap(KeyboardRegular);

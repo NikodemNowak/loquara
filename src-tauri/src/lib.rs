@@ -1,6 +1,7 @@
 pub mod audio;
 pub mod dictation;
 pub mod domain;
+pub mod hf;
 pub mod platform;
 pub mod sound;
 pub mod storage;
@@ -164,7 +165,7 @@ pub fn run() {
                         .unwrap_or_default();
                     match platform::shortcut_role_for(shortcut, &configured) {
                         Ok(platform::ShortcutRole::Cancel) => {
-                            let _ = dictation::request_cancel_inner(&app, &state);
+                            dictation::handle_cancel_press(&app, &state);
                         }
                         Ok(platform::ShortcutRole::Toggle) => {
                             tauri::async_runtime::spawn(async move {
@@ -337,6 +338,9 @@ pub fn run() {
             dictation::get_model_status,
             dictation::list_models,
             dictation::download_model,
+            dictation::hf_account,
+            dictation::connect_hf_account,
+            dictation::disconnect_hf_account,
             dictation::delete_model,
             dictation::update_settings,
             dictation::update_setting_value,

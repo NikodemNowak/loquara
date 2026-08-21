@@ -1,6 +1,6 @@
 [package]
 name = "loquara"
-version = "0.1.0"
+version = "0.2.0"
 description = "Lokalna aplikacja do dyktowania"
 edition = "2024"
 rust-version = "1.95"
@@ -14,6 +14,11 @@ crate-type = ["lib", "cdylib", "staticlib"]
 arboard = "3"
 cpal = "0.16"
 hound = "3.5"
+# Windows Credential Manager only. The default features also pull in a
+# Linux secret-service backend, which the CI Linux build has no use for and
+# which drags zbus into the tree; on that platform Entry::new simply reports
+# that no store is available and the token is treated as absent.
+keyring = { version = "3", default-features = false, features = ["windows-native"] }
 regex = "1.11"
 rusqlite = { version = "0.37", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }

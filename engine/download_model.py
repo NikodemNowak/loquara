@@ -127,27 +127,127 @@ def download_exact_model(
         kwargs["local_dir"] = str(local_dir / model_key / (spec.revision or "main"))
     if local_files_only:
         kwargs["local_files_only"] = True
-    snapshot = Path(downloader(**kwargs)).resolve()
+    try:
+        snapshot = Path(downloader(**kwargs)).resolve()
+    except Exception as error:  # noqa: BLE001 - re-raised unless recognised
+        access_error = classify_access_error(error, spec.id)
+        if access_error is None:
+            raise
+        raise access_error from error
     validate_snapshot(snapshot)
     if spec.kind == "cohere":
         patch_cohere_modeling(snapshot)
     return DownloadReport(path=snapshot, bytes=directory_size(snapshot))
 
 
+class ModelAccessError(Exception):
+    """A download that failed for a reason the user can actually act on.
+
+    ``kind`` is one of:
+
+    ``gated``
+        The repository exists but requires accepting its licence with a
+        Hugging Face account. A token alone is not enough.
+    ``unauthorized``
+        No token was supplied, or the one supplied is invalid or expired.
+    """
+
+    def __init__(self, kind: str, repo: str, detail: str = "") -> None:
+        super().__init__(detail or kind)
+        self.kind = kind
+        self.repo = repo
+        self.detail = detail
+
+
+def _status_code(error: BaseException) -> int | None:
+    response = getattr(error, "response", None)
+    return getattr(response, "status_code", None)
+
+
+def classify_access_error(error: BaseException, repo: str) -> ModelAccessError | None:
+    """Maps a huggingface_hub exception onto something explainable.
+
+    Returns ``None`` for anything that is not an access problem, so genuine
+    faults (no disk space, no network) keep their original message.
+    """
+    name = type(error).__name__
+    if name == "GatedRepoError":
+        return ModelAccessError("gated", repo, str(error))
+    status = _status_code(error)
+    if name == "RepositoryNotFoundError" or status == 404:
+        # A private or gated repo is indistinguishable from a missing one
+        # when the caller is not authorised, and the actionable reading is
+        # that the user needs access.
+        return ModelAccessError("unauthorized", repo, str(error))
+    if status in (401, 403):
+        return ModelAccessError("gated" if status == 403 else "unauthorized", repo, str(error))
+    return None
+
+
+def verify_token() -> str:
+    """Returns the account name for the token in the environment.
+
+    Raises ``ModelAccessError('unauthorized', ...)`` when the token is missing
+    or rejected, so the caller can tell "wrong token" from "no network".
+    """
+    from huggingface_hub import HfApi
+    from huggingface_hub.utils import HfHubHTTPError
+
+    try:
+        identity = HfApi().whoami()
+    except HfHubHTTPError as error:
+        if _status_code(error) in (401, 403):
+            raise ModelAccessError("unauthorized", "", str(error)) from error
+        raise
+    return identity.get("name") or identity.get("fullname") or ""
+
+
 def main() -> None:
     import argparse
+
+    import sys
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--local-only", action="store_true")
     parser.add_argument("--model", default=DEFAULT_MODEL_KEY)
     parser.add_argument("--local-dir", type=Path, default=None)
-    args = parser.parse_args()
-    spec = model_spec(args.model)
-    report = download_exact_model(
-        local_files_only=args.local_only,
-        model_key=args.model,
-        local_dir=args.local_dir,
+    parser.add_argument(
+        "--verify-token",
+        action="store_true",
+        help="Check the HF_TOKEN in the environment and print the account name.",
     )
+    args = parser.parse_args()
+
+    def emit_access_error(error: ModelAccessError) -> None:
+        # On stdout, alongside progress, so the caller parses one stream.
+        print(
+            json.dumps(
+                {"event": "error", "kind": error.kind, "repo": error.repo},
+                separators=(",", ":"),
+            ),
+            flush=True,
+        )
+        print(error.detail, file=sys.stderr)
+
+    if args.verify_token:
+        try:
+            name = verify_token()
+        except ModelAccessError as error:
+            emit_access_error(error)
+            raise SystemExit(1)
+        print(json.dumps({"event": "whoami", "name": name}, separators=(",", ":")), flush=True)
+        return
+
+    spec = model_spec(args.model)
+    try:
+        report = download_exact_model(
+            local_files_only=args.local_only,
+            model_key=args.model,
+            local_dir=args.local_dir,
+        )
+    except ModelAccessError as error:
+        emit_access_error(error)
+        raise SystemExit(1)
     print(f"Model: {spec.id}")
     print(f"Revision: {spec.revision}")
     print(f"Cache: {report.path}")

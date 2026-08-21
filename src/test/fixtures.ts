@@ -6,7 +6,6 @@ import type {
   Recording,
   VocabularyEntry,
 } from "../lib/types";
-
 export const recordings: Recording[] = [
   {
     id: "failed-1",
@@ -18,6 +17,7 @@ export const recordings: Recording[] = [
     audioPath: "C:\\Mow\\failed-1.wav",
     sourceApp: "Word",
     error: "Model chwilowo niedostępny",
+    peaks: [40, 180, 90, 220, 60],
   },
   {
     id: "active-1",
@@ -29,6 +29,8 @@ export const recordings: Recording[] = [
     audioPath: "C:\\Mow\\active-1.wav",
     sourceApp: null,
     error: null,
+    // Still capturing, so the envelope does not exist yet.
+    peaks: null,
   },
   {
     id: "complete-1",
@@ -40,9 +42,9 @@ export const recordings: Recording[] = [
     audioPath: "C:\\Mow\\complete-1.wav",
     sourceApp: "Outlook",
     error: null,
+    peaks: [10, 120, 200, 255, 140, 60, 20],
   },
 ];
-
 export const settings: AppSettings = {
   inputDevice: null,
   shortcut: "Ctrl+Space",
@@ -53,18 +55,15 @@ export const settings: AppSettings = {
   showOverlay: true,
   model: "parakeet",
   streaming: true,
-  theme: "system",
   language: "system",
   dictationLanguage: "auto",
   modelKeepAliveSecs: 0,
 };
-
 export const snapshot: AppSnapshot = {
   dictation: { status: "idle" },
   settings,
   modelLoading: false,
 };
-
 export function adapterStub(overrides: Partial<AppAdapter> = {}): AppAdapter {
   const vocabulary: VocabularyEntry[] = [];
   const modes: Mode[] = [
@@ -84,6 +83,9 @@ export function adapterStub(overrides: Partial<AppAdapter> = {}): AppAdapter {
     listInputDevices: async () => [
       { id: "default", name: "Mikrofon domyślny", isDefault: true },
     ],
+    hfAccount: async () => ({ connected: false, name: null }),
+    connectHfAccount: async () => ({ connected: true, name: "tester" }),
+    disconnectHfAccount: async () => ({ connected: false, name: null }),
     startRecording: async () => snapshot,
     stopRecording: async () => snapshot,
     cancelRecording: async () => snapshot,

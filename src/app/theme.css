@@ -1,93 +1,141 @@
-/* Loquara design tokens - macOS-style window/group separation, neutral grays. */
+/* Loquara design tokens.
+ *
+ * Dark only. The app is driven by a global shortcut and spends most of its
+ * life as a 260px pill floating over other windows, so the window chrome is
+ * built to recede: deep neutral ground, flat surfaces separated by hairlines
+ * rather than cards, and one accent reserved for things you can act on.
+ */
 :root {
-  color-scheme: light;
-  font-family: "Segoe UI Variable Text", "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+  color-scheme: dark;
+  /* Windows 11 ships optical sizes of its UI face. Using Display for large
+   * text and Text for body is what native apps do, and it is the difference
+   * between headings that look set and headings that look scaled up. */
+  --font-ui: "Segoe UI Variable Text", "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+  --font-display: "Segoe UI Variable Display", "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+  font-family: var(--font-ui);
   font-synthesis: none;
 
-  --bg: #f0f1f4;
-  --surface: #ffffff;
-  --surface-raised: #ffffff;
-  --surface-subtle: #f4f5f7;
-  --surface-hover: #eaecef;
+  /* --- Ground and surfaces -------------------------------------------- */
+  --bg: #0e0f11;
+  --surface: #16181b;
+  --surface-raised: #1c1f23;
+  --surface-hover: #212529;
+  --surface-active: #282d32;
 
-  --text: #1a1f27;
-  --muted: #6b7480;
-  --faint: #9aa3ae;
+  /* --- Ink -------------------------------------------------------------
+   * Every ink clears 4.5:1 against --bg, because all three are used at
+   * 11-13.5px where the large-text exemption does not apply.
+   * text 15.9:1 · muted 7.4:1 · faint 5.1:1
+   */
+  --text: #eceef1;
+  --muted: #9ba3ad;
+  --faint: #7d8792;
 
-  --border: #e3e6ea;
-  --border-strong: #c8ced6;
+  --border: #212428;
+  --border-strong: #2f343a;
 
-  --accent: #2f6fe4;
-  --accent-hover: #245fc9;
-  --accent-soft: #e8f0fe;
-  --accent-contrast: #ffffff;
+  /* --- Accent ----------------------------------------------------------
+   * Reserved for what the user can act on: focus, primary action, current
+   * selection, an engaged toggle, download progress, played audio. Status
+   * colours below are never the accent, so "selected" and "ready" cannot be
+   * confused with one another.
+   */
+  /* The logo tile, matching src-tauri/app-icon.svg so the mark in the window
+   * is the same mark as the one in the taskbar. Distinct from --accent, which
+   * is an interface colour rather than an identity. */
+  --brand: #1457c8;
 
-  --danger: #c74436;
-  --danger-soft: #fbeae8;
-  --success: #27845b;
-  --success-soft: #e2f2ea;
-  --warning: #c27a16;
+  --accent: #4c8dff;
+  --accent-hover: #6ba0ff;
+  --accent-pressed: #3a79e8;
+  --accent-soft: #16233a;
+  --accent-contrast: #05101f;
 
-  --shadow-sm: 0 1px 2px rgba(16, 24, 40, 0.05);
-  --shadow: 0 4px 16px -4px rgba(16, 24, 40, 0.08);
-  --shadow-lg: 0 8px 32px -8px rgba(16, 24, 40, 0.16);
+  /* --- Status ----------------------------------------------------------
+   * Red means capture is live; it is the only red in the interface and it
+   * never shares a screen region with the accent. Green means a resource is
+   * present and usable. Amber means degraded but not failed.
+   */
+  --recording: #ff5f56;
+  --recording-soft: #2b1614;
+  --danger: #ff6b5e;
+  --danger-soft: #2b1614;
+  --success: #4ade80;
+  --success-soft: #10281b;
+  --warning: #e0a458;
 
+  /* --- Type scale ------------------------------------------------------
+   * Six steps, each with one job. Nothing in the app may invent a seventh.
+   */
+  --t-micro: 11px;    /* timestamps, keycaps, units */
+  --t-small: 12.5px;  /* descriptions beneath a label */
+  --t-body: 13.5px;   /* default interface text */
+  --t-strong: 15px;   /* item names, transcript text */
+  --t-title: 19px;    /* section and page headings */
+  --t-display: 28px;  /* the dictation state, and nothing else */
+
+  --w-regular: 400;
+  --w-medium: 550;
+  --w-bold: 650;
+
+  --lh-tight: 1.25;
+  --lh-normal: 1.45;
+  --lh-relaxed: 1.6;
+
+  /* --- Space ----------------------------------------------------------- */
+  --s-1: 4px;
+  --s-2: 8px;
+  --s-3: 12px;
+  --s-4: 16px;
+  --s-5: 24px;
+  --s-6: 32px;
+  --s-7: 48px;
+
+  /* --- Radius ----------------------------------------------------------- */
   --r-sm: 6px;
-  --r-md: 8px;
-  --r-lg: 10px;
-  --r-xl: 14px;
+  --r-md: 10px;
+  --r-full: 999px;
 
-  /* The recorder pill is always dark, in both themes. */
-  --pill-border: rgba(255, 255, 255, 0.08);
-  --pill-text: #f4f7fb;
-  --pill-muted: #9aa6b3;
-  --pill-accent: #78a9ff;
-  --pill-danger: #ff6b62;
-  --pill-success: #3ddc97;
-}
-
-:root[data-theme="dark"] {
-  color-scheme: dark;
-
-  --bg: #17181b;
-  --surface: #222427;
-  --surface-raised: #2a2d31;
-  --surface-subtle: #26292d;
-  --surface-hover: #2f3338;
-
-  --text: #f2f4f7;
-  --muted: #9aa3ad;
-  --faint: #6d7680;
-
-  --border: #303439;
-  --border-strong: #42474e;
-
-  --accent: #78a9ff;
-  --accent-hover: #96bcff;
-  --accent-soft: #1e2c47;
-  --accent-contrast: #0d1b33;
-
-  --danger: #ff7965;
-  --danger-soft: #3a2421;
-  --success: #70d0a0;
-  --success-soft: #17332a;
-  --warning: #e0a44a;
-
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
   --shadow: 0 4px 16px -4px rgba(0, 0, 0, 0.5);
-  --shadow-lg: 0 8px 32px -8px rgba(0, 0, 0, 0.6);
+  --shadow-lg: 0 16px 48px -12px rgba(0, 0, 0, 0.7);
+
+  /* --- Material ---------------------------------------------------------
+   * A dark panel drawn as one flat fill reads as a rectangle of slightly
+   * different paint. These give it a lit edge and a gentle fall-off, which is
+   * what makes a surface look like a surface.
+   */
+  --panel: linear-gradient(180deg, #1a1d21 0%, #16181b 60%);
+  --panel-edge: inset 0 1px 0 rgba(255, 255, 255, 0.045);
+  --panel-shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 8px 24px -12px rgba(0, 0, 0, 0.55);
+
+  /* --- Motion ----------------------------------------------------------- */
+  --ease: cubic-bezier(0.2, 0, 0.1, 1);
+  --fast: 0.1s;
+  --medium: 0.18s;
+
+  /* --- Recorder pill ----------------------------------------------------
+   * The overlay floats over arbitrary application windows, so it carries its
+   * own ground rather than inheriting the app's.
+   */
+  --pill-bg: #101215;
+  --pill-border: rgba(255, 255, 255, 0.1);
+  --pill-text: #f2f4f7;
+  --pill-muted: #8d96a1;
+  --pill-accent: #4c8dff;
+  --pill-danger: #ff6b5e;
+  --pill-success: #4ade80;
 }
 
-/* Deterministic, theme-aware scrollbars (no OS-style bars). */
+/* Deterministic scrollbars, so the app looks the same on every machine. */
 :root { scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent; }
 *::-webkit-scrollbar { width: 10px; height: 10px; }
 *::-webkit-scrollbar-track { background: transparent; }
 *::-webkit-scrollbar-thumb {
   background-color: var(--border-strong);
-  border-radius: 999px;
+  border-radius: var(--r-full);
   border: 2px solid transparent;
   background-clip: padding-box;
 }
 *::-webkit-scrollbar-thumb:hover { background-color: var(--faint); }
 *::-webkit-scrollbar-corner { background: transparent; }
-::selection { background: color-mix(in srgb, var(--accent) 26%, transparent); }
+::selection { background: color-mix(in srgb, var(--accent) 30%, transparent); }

@@ -334,7 +334,7 @@ struct ActiveRecording {
     started_at: Instant,
     sender: SyncSender<WriterMessage>,
     bridge: JoinHandle<()>,
-    writer: JoinHandle<Result<(), AudioError>>,
+    writer: JoinHandle<Result<Vec<f32>, AudioError>>,
     overflowed: Arc<AtomicBool>,
     _input: Box<dyn ActiveInput>,
 }
@@ -347,12 +347,74 @@ pub struct StartedRecording {
     pub part_path: PathBuf,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CompletedRecording {
     pub id: String,
     pub path: PathBuf,
     pub duration_ms: u64,
+    /// Amplitude envelope of the capture, `PEAK_BUCKETS` values in `0.0..=1.0`,
+    /// evenly spaced across the recording. Drawn in the history list and used
+    /// as the scrub track in the player, so it is computed once here rather
+    /// than by decoding the WAV again on every render.
+    pub peaks: Vec<f32>,
+}
+
+/// Enough resolution to read as speech at the widest place it is drawn (a
+/// ~600px inspector waveform at 2x), small enough to keep in a row of SQLite.
+pub const PEAK_BUCKETS: usize = 200;
+
+/// Collapses one peak-per-packet into `PEAK_BUCKETS` evenly spaced buckets.
+///
+/// Buckets take the maximum rather than the mean of their inputs: an envelope
+/// is meant to show that a syllable happened, and averaging flattens exactly
+/// the transients that make speech legible.
+pub fn downsample_peaks(source: &[f32]) -> Vec<f32> {
+    if source.is_empty() {
+        return Vec::new();
+    }
+    if source.len() <= PEAK_BUCKETS {
+        // `f32::NAN.clamp(..)` is NaN, so non-finite values are dropped to
+        // silence explicitly rather than clamped.
+        return source.iter().map(|peak| sanitize_peak(*peak)).collect();
+    }
+    (0..PEAK_BUCKETS)
+        .map(|bucket| {
+            let start = bucket * source.len() / PEAK_BUCKETS;
+            let end = ((bucket + 1) * source.len() / PEAK_BUCKETS).max(start + 1);
+            source[start..end.min(source.len())]
+                .iter()
+                .copied()
+                .filter(|peak| peak.is_finite())
+                .fold(0.0_f32, f32::max)
+                .clamp(0.0, 1.0)
+        })
+        .collect()
+}
+
+/// Maps one peak into `0.0..=1.0`, treating non-finite input as silence.
+fn sanitize_peak(peak: f32) -> f32 {
+    if peak.is_finite() { peak.clamp(0.0, 1.0) } else { 0.0 }
+}
+
+/// Packs an envelope into one byte per bucket for storage and IPC.
+///
+/// A waveform is never drawn taller than a few dozen pixels, so 8 bits per
+/// bucket is already finer than the display can resolve.
+pub fn quantize_peaks(peaks: &[f32]) -> Vec<u8> {
+    peaks
+        .iter()
+        .map(|peak| (sanitize_peak(*peak) * 255.0).round() as u8)
+        .collect()
+}
+
+/// Loudest absolute sample in a packet, ignoring non-finite values.
+fn packet_peak(samples: &[f32]) -> f32 {
+    samples
+        .iter()
+        .filter(|sample| sample.is_finite())
+        .fold(0.0_f32, |peak, sample| peak.max(sample.abs()))
+        .clamp(0.0, 1.0)
 }
 
 pub struct AudioRecorder {
@@ -446,12 +508,17 @@ impl AudioRecorder {
         let writer_handle = thread::spawn(move || {
             let mut writer = writer;
             let mut last_level = Instant::now() - Duration::from_millis(40);
+            let mut peaks: Vec<f32> = Vec::new();
             while let Ok(message) = writer_receiver.recv() {
                 match message {
                     WriterMessage::Samples(samples) => {
+                        // One float pass serves both consumers: the live meter
+                        // the overlay animates from, and the stored envelope.
+                        let float_samples = samples.as_f32();
+                        peaks.push(packet_peak(&float_samples));
                         if last_level.elapsed() >= Duration::from_millis(40) {
                             if let Some(sender) = &level_sender {
-                                let _ = sender.try_send(normalized_rms(&samples.as_f32()));
+                                let _ = sender.try_send(normalized_rms(&float_samples));
                             }
                             last_level = Instant::now();
                         }
@@ -461,7 +528,7 @@ impl AudioRecorder {
                 }
             }
             writer.finalize().map_err(AudioError::from)?;
-            Ok(())
+            Ok(downsample_peaks(&peaks))
         });
         let started = StartedRecording {
             id: id.clone(),
@@ -524,7 +591,7 @@ impl AudioRecorder {
             let writer_result = writer
                 .join()
                 .map_err(|_| AudioError::Io("audio writer thread panicked".into()))?;
-            writer_result?;
+            let peaks = writer_result?;
             finish_result?;
             if overflowed.load(Ordering::Acquire) {
                 return Err(AudioError::BufferOverflow);
@@ -534,16 +601,20 @@ impl AudioRecorder {
             } else {
                 finalize_atomic(&part_path, &path)?;
             }
-            Ok::<(), AudioError>(())
+            Ok::<Vec<f32>, AudioError>(peaks)
         })();
-        if let Err(error) = result {
-            let _ = fs::remove_file(&part_path);
-            return Err(error);
-        }
+        let peaks = match result {
+            Ok(peaks) => peaks,
+            Err(error) => {
+                let _ = fs::remove_file(&part_path);
+                return Err(error);
+            }
+        };
         Ok(CompletedRecording {
             id,
             path,
             duration_ms,
+            peaks,
         })
     }
 }
@@ -884,5 +955,61 @@ mod tests {
         assert!(!started.path.exists());
         assert!(recorder.start(None).is_ok());
         assert_eq!(recorder.cancel().unwrap_err(), AudioError::BufferOverflow);
+    }
+
+    #[test]
+    fn downsampling_keeps_transients_rather_than_averaging_them_away() {
+        // One loud sample buried in a long quiet stretch: a mean would erase
+        // it, and the envelope would show silence where a word was spoken.
+        let mut source = vec![0.02_f32; 4_000];
+        source[1_500] = 0.9;
+
+        let peaks = downsample_peaks(&source);
+
+        assert_eq!(peaks.len(), PEAK_BUCKETS);
+        let loudest = peaks.iter().copied().fold(0.0_f32, f32::max);
+        assert!(
+            (loudest - 0.9).abs() < 1e-6,
+            "expected the transient to survive, got {loudest}"
+        );
+    }
+
+    #[test]
+    fn downsampling_covers_the_whole_recording_without_gaps() {
+        // A ramp must come out monotonically increasing: if any bucket read
+        // from the wrong slice the envelope would misplace speech in time.
+        let source: Vec<f32> = (0..1_000).map(|index| index as f32 / 1_000.0).collect();
+
+        let peaks = downsample_peaks(&source);
+
+        assert_eq!(peaks.len(), PEAK_BUCKETS);
+        assert!(peaks.windows(2).all(|pair| pair[1] >= pair[0]));
+        assert!(peaks[0] < 0.05);
+        assert!(peaks[PEAK_BUCKETS - 1] > 0.95);
+    }
+
+    #[test]
+    fn short_recordings_keep_every_bucket_they_have() {
+        let peaks = downsample_peaks(&[0.1, 0.5, 0.2]);
+
+        assert_eq!(peaks, vec![0.1, 0.5, 0.2]);
+    }
+
+    #[test]
+    fn a_recording_with_no_packets_has_no_envelope() {
+        assert!(downsample_peaks(&[]).is_empty());
+    }
+
+    #[test]
+    fn non_finite_samples_do_not_poison_the_envelope() {
+        let peaks = downsample_peaks(&[f32::NAN, 0.4, f32::INFINITY]);
+
+        assert!(peaks.iter().all(|peak| peak.is_finite()));
+        assert!(peaks.iter().all(|peak| (0.0..=1.0).contains(peak)));
+    }
+
+    #[test]
+    fn quantising_spans_the_full_byte_range() {
+        assert_eq!(quantize_peaks(&[0.0, 0.5, 1.0, 1.4, -0.3]), vec![0, 128, 255, 255, 0]);
     }
 }

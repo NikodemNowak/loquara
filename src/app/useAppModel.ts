@@ -1,10 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-
 import type { AppAdapter } from "../lib/tauri";
 import type { AppSettings, AppSnapshot, Recording } from "../lib/types";
 import { normalizeError } from "../lib/errors";
 import { translate } from "../lib/i18n/lang";
-
 const fallbackSettings: AppSettings = {
   inputDevice: null,
   shortcut: "Ctrl+Space",
@@ -15,12 +13,10 @@ const fallbackSettings: AppSettings = {
   showOverlay: true,
   model: "parakeet",
   streaming: true,
-  theme: "system",
   language: "system",
   dictationLanguage: "auto",
   modelKeepAliveSecs: 0,
 };
-
 export function useAppModel(adapter: AppAdapter, onError: (message: string) => void) {
   const [snapshot, setSnapshot] = useState<AppSnapshot>({
     dictation: { status: "idle" },
@@ -30,7 +26,6 @@ export function useAppModel(adapter: AppAdapter, onError: (message: string) => v
   const [history, setHistory] = useState<Recording[]>([]);
   const [loading, setLoading] = useState(true);
   const previousStatus = useRef(snapshot.dictation.status);
-
   const refreshHistory = useCallback(async () => {
     try {
       setHistory(await adapter.listHistory({}));
@@ -38,7 +33,6 @@ export function useAppModel(adapter: AppAdapter, onError: (message: string) => v
       onError(translate("useAppModel.loadHistoryError", { error: normalizeError(error) }));
     }
   }, [adapter, onError]);
-
   useEffect(() => {
     let active = true;
     let stateEventSeen = false;
@@ -74,6 +68,5 @@ export function useAppModel(adapter: AppAdapter, onError: (message: string) => v
       unlisteners.forEach((unlisten) => unlisten());
     };
   }, [adapter, onError, refreshHistory]);
-
   return { snapshot, setSnapshot, history, refreshHistory, loading };
 }

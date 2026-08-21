@@ -16,7 +16,7 @@ describe("główna nawigacja", () => {
     const user = userEvent.setup();
     renderApp();
 
-    expect(await screen.findByRole("heading", { name: /dyktowanie/i })).toBeVisible();
+    expect(await screen.findByRole("heading", { name: "Gotowy" })).toBeVisible();
     await user.click(screen.getByRole("button", { name: "Historia" }));
     expect(await screen.findByRole("heading", { name: "Historia" })).toBeVisible();
     await user.click(screen.getByRole("button", { name: "Ustawienia" }));
@@ -67,7 +67,7 @@ describe("główna nawigacja", () => {
     }));
     resolveSnapshot(snapshot);
 
-    expect(await screen.findByRole("button", { name: /Zatrzymaj nagrywanie/ })).toBeVisible();
+    expect(await screen.findByRole("heading", { name: "Nagrywam" })).toBeVisible();
     expect(getAppSnapshot).toHaveBeenCalledOnce();
   });
 
@@ -80,7 +80,7 @@ describe("główna nawigacja", () => {
     });
     renderWithI18n(<App adapter={adapter} />, { language: "en" });
 
-    expect(await screen.findByRole("heading", { name: "Dictation" })).toBeVisible();
+    expect(await screen.findByRole("heading", { name: "Ready" })).toBeVisible();
     expect(document.documentElement.lang).toBe("en");
   });
 });

@@ -274,8 +274,35 @@ pub fn register_shortcuts<R: Runtime>(
         .map_err(|error| PlatformError::ShortcutRegistration(error.to_string()))?;
     manager
         .register(toggle.as_str())
-        .and_then(|()| manager.register("Escape"))
         .map_err(|error| PlatformError::ShortcutRegistration(error.to_string()))
+}
+
+/// The key that discards a recording in progress.
+pub const CANCEL_SHORTCUT: &str = "Escape";
+
+/// Claims or releases Escape.
+///
+/// A global hotkey is exclusive: while it is held, no other application sees
+/// that key at all. Escape is far too important to hold permanently — doing so
+/// breaks dialogs, menus and games system-wide — so it is claimed only while a
+/// recording exists to discard, and released the moment one does not.
+///
+/// Both directions are idempotent, because this is driven from every state
+/// change and most of those do not cross the boundary.
+pub fn set_cancel_shortcut<R: Runtime>(
+    app: &AppHandle<R>,
+    armed: bool,
+) -> Result<(), PlatformError> {
+    let manager = app.global_shortcut();
+    if armed == manager.is_registered(CANCEL_SHORTCUT) {
+        return Ok(());
+    }
+    let result = if armed {
+        manager.register(CANCEL_SHORTCUT)
+    } else {
+        manager.unregister(CANCEL_SHORTCUT)
+    };
+    result.map_err(|error| PlatformError::ShortcutRegistration(error.to_string()))
 }
 
 /// Temporarily unregisters all global shortcuts (used while the user records

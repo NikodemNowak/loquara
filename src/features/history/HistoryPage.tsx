@@ -5,20 +5,13 @@ import { EmptyState } from "../../components/EmptyState";
 import { AudioPlayer } from "../../components/AudioPlayer";
 import { ConfirmDialog } from "../../components/ConfirmDialog";
 import { Waveform } from "../../components/Waveform";
+import { Select } from "../../components/Select";
 import type { AppAdapter } from "../../lib/tauri";
 import type { Recording, RecordingStatus } from "../../lib/types";
 import type { ToastKind } from "../../components/Toast";
 import { useAsyncAction } from "../../lib/useAsyncAction";
-import { dateLocale, useI18n, type TranslationKey } from "../../lib/i18n";
+import { dateLocale, useI18n } from "../../lib/i18n";
 import { normalizeError } from "../../lib/errors";
-
-const statusLabels: Record<RecordingStatus, TranslationKey> = {
-  completed: "history.status.completed",
-  failed: "history.status.failed",
-  recording: "history.status.recording",
-  processing: "history.status.processing",
-  cancelled: "history.status.cancelled",
-};
 
 const formatDuration = (ms: number) =>
   `${String(Math.floor(ms / 60_000)).padStart(2, "0")}:${String(Math.floor(ms / 1000) % 60).padStart(2, "0")}`;
@@ -41,6 +34,7 @@ export function HistoryPage({
   const [draft, setDraft] = useState("");
   const [pendingClear, setPendingClear] = useState(false);
   const { busy, pendingKey, run } = useAsyncAction(onToast);
+
   const labels: Record<RecordingStatus, string> = {
     completed: t("history.status.completed"),
     failed: t("history.status.failed"),
@@ -48,6 +42,9 @@ export function HistoryPage({
     processing: t("history.status.processing"),
     cancelled: t("history.status.cancelled"),
   };
+  const formatTime = (timestamp: number) =>
+    new Intl.DateTimeFormat(dateLocale(lang), { hour: "2-digit", minute: "2-digit" }).format(timestamp);
+
   const normalized = search.toLocaleLowerCase("pl");
   const filtered = useMemo(() => recordings.filter((item) => {
     const matchesStatus = filter === "all" || item.status === filter;
@@ -56,6 +53,7 @@ export function HistoryPage({
   }), [filter, normalized, recordings]);
   const selected = filtered.find((item) => item.id === selectedId) ?? filtered[0];
   const failedCount = recordings.filter((item) => item.status === "failed").length;
+  const edited = Boolean(selected) && draft.trim() !== (selected?.text ?? "");
 
   useEffect(() => {
     if (!selectedId && recordings[0]) setSelectedId(recordings[0].id);
@@ -71,44 +69,52 @@ export function HistoryPage({
       await onRefresh();
     });
   const copy = (text: string) => run("copy", async () => {
-    if (!navigator.clipboard?.writeText) {
-      throw new Error(t("history.error.clipboard"));
-    }
+    if (!navigator.clipboard?.writeText) throw new Error(t("history.error.clipboard"));
     await navigator.clipboard.writeText(text);
   }, "history.error.copy");
 
   return (
     <section className="page history-page">
       <header className="page-header">
-        <div><p className="eyebrow">{t("history.eyebrow")}</p><h1>{t("history.title")}</h1><p>{t("history.subtitle")}</p></div>
+        <h1>{t("history.title")}</h1>
+        <p>{t("history.subtitle")}</p>
       </header>
+
       <div className="history-toolbar">
-        <label className="search-field"><Search size={17} /><span className="sr-only">{t("history.search.label")}</span><input type="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder={t("history.search.label")} /></label>
-        <select aria-label={t("history.filter.label")} value={filter} onChange={(event) => setFilter(event.target.value as RecordingStatus | "all")}>
-          <option value="all">{t("history.filter.all")}</option>
-          <option value="completed">{t("history.filter.completed")}</option>
-          <option value="failed">{t("history.filter.failed")}</option>
-          <option value="recording">{t("history.filter.recording")}</option>
-        </select>
+        <label className="search-field">
+          <Search size={16} />
+          <span className="sr-only">{t("history.search.label")}</span>
+          <input type="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder={t("history.search.label")} />
+        </label>
+        <Select
+          label={t("history.filter.label")}
+          value={filter}
+          onChange={(next) => setFilter(next as RecordingStatus | "all")}
+          options={[
+            { value: "all", label: t("history.filter.all") },
+            { value: "completed", label: t("history.filter.completed") },
+            { value: "failed", label: t("history.filter.failed") },
+            { value: "recording", label: t("history.filter.recording") },
+          ]}
+        />
         <button
-          className="history-folder-button"
+          className="toolbar-button"
           onClick={() => void action("folder", () => adapter.openRecordingsFolder())}
-          aria-label={t("history.action.openFolder")}
           title={t("history.action.openFolder")}
         >
           <FolderOpen size={15} />{t("history.action.openFolder")}
         </button>
         {failedCount > 0 && (
           <button
-            className="history-folder-button history-folder-button--danger"
+            className="toolbar-button toolbar-button--danger"
             onClick={() => setPendingClear(true)}
-            aria-label={t("history.action.clearFailed")}
             title={t("history.action.clearFailed")}
           >
             <Trash2 size={14} />{t("history.action.clearFailed")}
           </button>
         )}
       </div>
+
       <div className="history-workspace">
         <div className="history-list" aria-label={t("history.list.label")}>
           {filtered.map((item) => (
@@ -116,35 +122,45 @@ export function HistoryPage({
               key={item.id}
               className={`history-row ${selected?.id === item.id ? "history-row--selected" : ""}`}
               onClick={() => setSelectedId(item.id)}
+              aria-current={selected?.id === item.id ? "true" : undefined}
               aria-label={item.text ?? item.error ?? labels[item.status]}
             >
-              <span className={`record-status record-status--${item.status}`} title={labels[item.status]} />
-              <time>{new Intl.DateTimeFormat(dateLocale(lang), { hour: "2-digit", minute: "2-digit" }).format(item.createdAt)}</time>
-              <Waveform seed={item.id} active={item.status === "recording"} />
-              <span className="history-row__copy"><strong>{item.text ?? item.error ?? labels[item.status]}</strong><small>{item.sourceApp ?? labels[item.status]} · {formatDuration(item.durationMs)}</small></span>
+              <span className="history-row__copy">
+                <span className={`history-row__text ${item.text ? "" : "history-row__text--empty"}`}>
+                  {item.text ?? item.error ?? labels[item.status]}
+                </span>
+                <span className="history-row__meta">
+                  {item.status !== "completed" && (
+                    <span className={`record-status record-status--${item.status}`} title={labels[item.status]} />
+                  )}
+                  <time dateTime={new Date(item.createdAt).toISOString()}>{formatTime(item.createdAt)}</time>
+                  <span>{formatDuration(item.durationMs)}</span>
+                  {item.sourceApp && <span>{item.sourceApp}</span>}
+                </span>
+              </span>
+              <Waveform peaks={item.peaks} />
             </button>
           ))}
           {!filtered.length && <EmptyState icon={<Search size={18} />} title={t("history.empty.title")} description={t("history.empty.description")} />}
         </div>
+
         <aside className="record-inspector" aria-label={t("history.inspector.label")}>
           {selected ? <>
-            <div className="inspector-heading"><span className={`record-status record-status--${selected.status}`} /><div><span>{t("history.inspector.status")}</span><strong>{labels[selected.status]}</strong></div></div>
-            <dl>
-              <div><dt>{t("history.inspector.duration")}</dt><dd>{formatDuration(selected.durationMs)}</dd></div>
-              <div><dt>{t("history.inspector.model")}</dt><dd>{selected.model ?? "—"}</dd></div>
-              <div><dt>{t("history.inspector.audioSaved")}</dt><dd>{selected.audioPath ? t("history.inspector.audioYesLocal") : t("history.inspector.audioNo")}</dd></div>
-            </dl>
-             {selected.status === "completed" && <>
-              <div className="transcript-card">
-                <div className="transcript-card__head">
+            {selected.status === "completed" ? (
+              <div className="inspector-transcript">
+                <div className="inspector-transcript__head">
                   <span>{t("history.transcript.title")}</span>
-                  {draft.trim() !== (selected.text ?? "") && (
+                  {edited && (
                     <button
                       className="primary-button"
                       disabled={busy || !draft.trim()}
                       onClick={() => void action("learn", async () => {
                         const learned = await adapter.correctTranscript(selected.id, draft.trim());
-                        if (learned > 0) onToast(learned === 1 ? t("history.transcript.savedOne") : t("history.transcript.savedMany", { count: learned }), "success");
+                        if (learned > 0) {
+                          onToast(learned === 1
+                            ? t("history.transcript.savedOne")
+                            : t("history.transcript.savedMany", { count: learned }), "success");
+                        }
                       })}
                     >
                       {t("history.action.saveFix")}
@@ -158,8 +174,12 @@ export function HistoryPage({
                   onChange={(event) => setDraft(event.target.value)}
                 />
               </div>
-            </>}
+            ) : (
+              <p className="inspector-facts"><span>{labels[selected.status]}</span></p>
+            )}
+
             {selected.error && <p className="error-note">{normalizeError(selected.error)}</p>}
+
             {selected.audioPath && (
               <AudioPlayer
                 adapter={adapter}
@@ -167,29 +187,59 @@ export function HistoryPage({
                 onReveal={() => void action("reveal", () => adapter.revealRecording(selected.id))}
               />
             )}
+
+            <dl className="inspector-facts">
+              <div><dt>{t("history.inspector.duration")}</dt><dd>{formatDuration(selected.durationMs)}</dd></div>
+              <div><dt>{t("history.inspector.model")}</dt><dd>{selected.model ?? "—"}</dd></div>
+              <div>
+                <dt>{t("history.inspector.audioSaved")}</dt>
+                <dd>{selected.audioPath ? t("history.inspector.audioYesLocal") : t("history.inspector.audioNo")}</dd>
+              </div>
+            </dl>
+
             <div className="inspector-actions">
-              <button disabled={!selected.text || busy} onClick={() => void copy(selected.text ?? "")}><Copy size={15} />{pendingKey === "copy" ? t("history.action.copying") : t("history.action.copy")}</button>
-              <button disabled={!selected.text || busy} onClick={() => void action("paste", () => adapter.pasteTranscript(selected.id))}>{pendingKey === "paste" ? t("common.pasting") : t("history.action.paste")}</button>
-              {selected.status === "failed" && !selected.audioPath
-                ? <span className="retry-unavailable">{t("history.action.retryUnavailable")}</span>
-                : <button disabled={selected.status !== "failed" || !selected.audioPath || busy} onClick={() => void action("retry", () => adapter.retryTranscription(selected.id))}><RotateCcw size={15} />{pendingKey === "retry" ? t("history.action.retrying") : t("common.retry")}</button>}
+              <button className="text-button" disabled={!selected.text || busy} onClick={() => void copy(selected.text ?? "")}>
+                <Copy size={14} />{pendingKey === "copy" ? t("history.action.copying") : t("history.action.copy")}
+              </button>
+              <button className="text-button" disabled={!selected.text || busy} onClick={() => void action("paste", () => adapter.pasteTranscript(selected.id))}>
+                {pendingKey === "paste" ? t("common.pasting") : t("history.action.paste")}
+              </button>
               {selected.text && (
-                <button disabled={busy} onClick={() => void action("export", async () => {
+                <button className="text-button" disabled={busy} onClick={() => void action("export", async () => {
                   const path = await adapter.exportTranscript(selected.id);
                   onToast(t("history.action.exported", { path }), "success");
-                })}>{pendingKey === "export" ? t("history.action.exporting") : t("history.action.export")}</button>
+                })}>
+                  {pendingKey === "export" ? t("history.action.exporting") : t("history.action.export")}
+                </button>
               )}
               {selected.audioPath && (
-                <button disabled={busy} onClick={() => void action("copyPath", async () => {
+                <button className="text-button" disabled={busy} onClick={() => void action("copyPath", async () => {
+                  if (!navigator.clipboard?.writeText) throw new Error(t("history.error.clipboard"));
                   await navigator.clipboard.writeText(selected.audioPath ?? "");
                   onToast(t("history.action.copyPathDone"), "success");
-                })}>{t("history.action.copyPath")}</button>
+                })}>
+                  {t("history.action.copyPath")}
+                </button>
               )}
-              <button className="danger-button" disabled={["recording", "processing"].includes(selected.status) || busy} onClick={() => void action("delete", () => adapter.deleteHistory(selected.id))}><Trash2 size={15} />{pendingKey === "delete" ? t("common.deleting") : t("history.action.delete")}</button>
+              {selected.status === "failed" && (
+                selected.audioPath
+                  ? <button className="text-button" disabled={busy} onClick={() => void action("retry", () => adapter.retryTranscription(selected.id))}>
+                      <RotateCcw size={14} />{pendingKey === "retry" ? t("history.action.retrying") : t("common.retry")}
+                    </button>
+                  : <span className="retry-unavailable">{t("history.action.retryUnavailable")}</span>
+              )}
+              <button
+                className="danger-button"
+                disabled={["recording", "processing"].includes(selected.status) || busy}
+                onClick={() => void action("delete", () => adapter.deleteHistory(selected.id))}
+              >
+                <Trash2 size={15} />{pendingKey === "delete" ? t("common.deleting") : t("history.action.delete")}
+              </button>
             </div>
           </> : <EmptyState title={t("history.inspector.emptyTitle")} description={t("history.inspector.emptyDescription")} />}
         </aside>
       </div>
+
       <ConfirmDialog
         open={pendingClear}
         title={t("history.action.clearFailedConfirm")}

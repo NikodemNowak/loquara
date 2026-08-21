@@ -1,4 +1,6 @@
-use crate::audio::{AudioRecorder, CompletedRecording, InputDeviceInfo, cleanup_partial};
+use crate::audio::{
+    AudioRecorder, CompletedRecording, InputDeviceInfo, cleanup_partial, quantize_peaks,
+};
 use crate::domain::{DictationEvent, DictationState, transition};
 use crate::platform::{self, SystemWindows, WindowTarget, WindowsApi};
 use crate::storage::{
@@ -192,14 +194,6 @@ impl CoordinatorMachine {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ThemeChoice {
-    System,
-    Light,
-    Dark,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
 pub enum LanguageChoice {
     System,
     Pl,
@@ -223,8 +217,6 @@ pub struct AppSettings {
     pub model: String,
     #[serde(default = "default_streaming")]
     pub streaming: bool,
-    #[serde(default = "default_theme")]
-    pub theme: ThemeChoice,
     #[serde(default = "default_language")]
     pub language: LanguageChoice,
     #[serde(default = "default_dictation_language")]
@@ -255,10 +247,6 @@ fn default_active_mode() -> String {
     "clean".into()
 }
 
-const fn default_theme() -> ThemeChoice {
-    ThemeChoice::System
-}
-
 const fn default_language() -> LanguageChoice {
     LanguageChoice::System
 }
@@ -279,7 +267,6 @@ impl Default for AppSettings {
             show_overlay: default_show_overlay(),
             model: default_model(),
             streaming: default_streaming(),
-            theme: default_theme(),
             language: default_language(),
             dictation_language: default_dictation_language(),
             model_keep_alive_secs: 0,
@@ -467,6 +454,24 @@ struct WorkerDownloadProgress {
     event: String,
     downloaded_bytes: u64,
     total_bytes: Option<u64>,
+}
+
+/// A line the download script prints when the repository cannot be reached
+/// with the current credentials.
+#[derive(Debug, Deserialize)]
+struct WorkerAccessError {
+    event: String,
+    kind: String,
+    repo: String,
+}
+
+/// Turns a reported access failure into a message the interface can localize
+/// and act on. Kept stable, because `src/lib/errors.ts` matches on it.
+fn access_error_message(kind: &str, repo: &str) -> String {
+    match kind {
+        "gated" => format!("Model requires accepting its licence on Hugging Face: {repo}"),
+        _ => format!("Hugging Face rejected the access token for: {repo}"),
+    }
 }
 
 fn emit_model_progress(app: &AppHandle, model: &str, phase: &str, downloaded_bytes: u64, total_bytes: Option<u64>) {
@@ -1237,8 +1242,20 @@ pub fn warm_up_model(app: &AppHandle, state: &AppState) {
 
 fn emit_state(app: &AppHandle, state: &AppState) {
     if let Ok(snapshot) = state.snapshot() {
+        // Escape belongs to whatever the user is doing, except while there is
+        // a recording it could discard. Every state change passes through
+        // here, so this is where the key is claimed and given back.
+        let _ = platform::set_cancel_shortcut(app, holds_discardable_audio(&snapshot.dictation));
         let _ = app.emit("dictation://state", snapshot);
     }
+}
+
+/// Whether there is a recording in progress that Escape could discard.
+pub fn holds_discardable_audio(state: &DictationState) -> bool {
+    matches!(
+        state,
+        DictationState::Recording { .. } | DictationState::Cancelling { .. }
+    )
 }
 
 /// Watches the idle worker and unloads the model from GPU/RAM after the
@@ -1341,6 +1358,8 @@ pub fn start_recording_inner(app: &AppHandle, state: &AppState) -> Result<AppSna
         audio_path: Some(audio_path.clone()),
         source_app: None,
         error: None,
+        // Filled in when the capture stops and the envelope is known.
+        peaks: None,
     };
     if let Err(error) = state.storage.insert_recording(&recording) {
         let _ = state.audio.cancel();
@@ -1468,6 +1487,13 @@ fn stop_recording_committed(state: &AppState) -> Result<CompletedRecording, Stri
             return Err(message);
         }
     };
+    // Best effort: a missing envelope costs a waveform in the history list,
+    // which is not worth failing a stop that already has usable audio.
+    if !completed.peaks.is_empty() {
+        let _ = state
+            .storage
+            .store_peaks(&completed.id, &quantize_peaks(&completed.peaks));
+    }
     if let Err(error) =
         mark_processing(state.storage.as_ref(), &completed.id, completed.duration_ms)
     {
@@ -1768,6 +1794,45 @@ pub fn cancel_recording_inner(app: &AppHandle, state: &AppState) -> Result<AppSn
 #[tauri::command]
 pub fn request_cancel(app: AppHandle, state: State<'_, AppState>) -> Result<AppSnapshot, String> {
     request_cancel_inner(&app, &state)
+}
+
+/// What a press of the cancel key means, given what dictation is doing.
+///
+/// The recorder pill is shown without focus and Windows refuses to hand it
+/// focus while another window of ours is active, so keyboard handling in the
+/// pill's document cannot be relied on. The global shortcut is the only path
+/// that fires whatever has focus, which makes it the only place this decision
+/// can live.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CancelPress {
+    /// Nothing has been asked yet: put the question on screen.
+    Ask,
+    /// The question is already on screen; this press answers it.
+    Confirm,
+    /// There is nothing to cancel.
+    Ignore,
+}
+
+pub fn cancel_press_for(state: &DictationState) -> CancelPress {
+    match state {
+        DictationState::Recording { .. } => CancelPress::Ask,
+        DictationState::Cancelling { .. } => CancelPress::Confirm,
+        _ => CancelPress::Ignore,
+    }
+}
+
+/// Applies a press of the cancel key to whatever dictation is currently doing.
+pub fn handle_cancel_press(app: &AppHandle, state: &AppState) {
+    let Ok(snapshot) = state.snapshot() else { return };
+    match cancel_press_for(&snapshot.dictation) {
+        CancelPress::Ask => {
+            let _ = request_cancel_inner(app, state);
+        }
+        CancelPress::Confirm => {
+            let _ = cancel_recording_inner(app, state);
+        }
+        CancelPress::Ignore => {}
+    }
 }
 
 pub fn request_cancel_inner(app: &AppHandle, state: &AppState) -> Result<AppSnapshot, String> {
@@ -2406,6 +2471,100 @@ pub fn list_models(state: State<'_, AppState>) -> Vec<ModelDescriptor> {
         .collect()
 }
 
+
+/// The Hugging Face account name Loquara has a token for, if any.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HfAccount {
+    pub connected: bool,
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkerWhoami {
+    event: String,
+    name: String,
+}
+
+/// Runs the download script's token check and returns the account name.
+fn verify_hf_token(state: &AppState, token: &str) -> Result<String, String> {
+    let engine_dir = state
+        .worker_path
+        .parent()
+        .ok_or_else(|| "Could not determine the engine directory.".to_string())?
+        .to_path_buf();
+    let script = engine_dir.join("download_model.py");
+    if !script.is_file() {
+        return Err(format!(
+            "Nie znaleziono skryptu pobierania: {}",
+            script.display()
+        ));
+    }
+    let mut command = std::process::Command::new(&state.python.program);
+    command.env("HF_TOKEN", token);
+    no_console(
+        command
+            .args(&state.python.args)
+            .arg("-X")
+            .arg("utf8")
+            .arg(&script)
+            .arg("--verify-token")
+            .current_dir(&engine_dir),
+    );
+    let output = command.output().map_err(|error| error.to_string())?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        if let Ok(whoami) = serde_json::from_str::<WorkerWhoami>(line) {
+            if whoami.event == "whoami" {
+                return Ok(whoami.name);
+            }
+        }
+        if let Ok(failure) = serde_json::from_str::<WorkerAccessError>(line) {
+            if failure.event == "error" {
+                return Err("Hugging Face rejected the access token.".to_string());
+            }
+        }
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    Err(stderr.lines().last().unwrap_or("").trim().to_owned())
+}
+
+#[tauri::command]
+pub fn hf_account() -> HfAccount {
+    HfAccount {
+        connected: crate::hf::stored_token().is_some(),
+        name: None,
+    }
+}
+
+/// Verifies a pasted token and stores it only if Hugging Face accepts it.
+#[tauri::command]
+pub async fn connect_hf_account(
+    token: String,
+    state: State<'_, AppState>,
+) -> Result<HfAccount, String> {
+    let token = crate::hf::normalize_token(&token)?;
+    let verifying = state.inner().clone();
+    let checked = token.clone();
+    let name = tauri::async_runtime::spawn_blocking(move || verify_hf_token(&verifying, &checked))
+        .await
+        .map_err(|error| error.to_string())??;
+    crate::hf::store_token(&token).map_err(|error| error.to_string())?;
+    Ok(HfAccount {
+        connected: true,
+        name: Some(name),
+    })
+}
+
+#[tauri::command]
+pub fn disconnect_hf_account() -> Result<HfAccount, String> {
+    crate::hf::clear_token().map_err(|error| error.to_string())?;
+    Ok(HfAccount {
+        connected: false,
+        name: None,
+    })
+}
+
 #[tauri::command]
 pub async fn download_model(
     model: String,
@@ -2436,6 +2595,11 @@ pub async fn download_model(
     let progress_model = model.clone();
     let output = tauri::async_runtime::spawn_blocking(move || {
         let mut command = std::process::Command::new(&python.program);
+        // huggingface_hub reads HF_TOKEN from the environment, so a connected
+        // account needs no extra plumbing inside the script.
+        if let Some(token) = crate::hf::stored_token() {
+            command.env("HF_TOKEN", token);
+        }
         no_console(
             command
                 .args(&python.args)
@@ -2466,41 +2630,40 @@ pub async fn download_model(
             output
         });
         let reader = BufReader::new(stdout);
+        let mut access_error: Option<String> = None;
         for line in reader.lines().map_while(Result::ok) {
-            let Ok(progress) = serde_json::from_str::<WorkerDownloadProgress>(&line) else {
+            if let Ok(progress) = serde_json::from_str::<WorkerDownloadProgress>(&line) {
+                if progress.event == "progress" {
+                    emit_model_progress(
+                        &progress_app,
+                        &progress_model,
+                        "downloading",
+                        progress.downloaded_bytes,
+                        progress.total_bytes,
+                    );
+                }
                 continue;
-            };
-            if progress.event == "progress" {
-                emit_model_progress(
-                    &progress_app,
-                    &progress_model,
-                    "downloading",
-                    progress.downloaded_bytes,
-                    progress.total_bytes,
-                );
+            }
+            if let Ok(failure) = serde_json::from_str::<WorkerAccessError>(&line) {
+                if failure.event == "error" {
+                    access_error = Some(access_error_message(&failure.kind, &failure.repo));
+                }
             }
         }
         let status = child.wait().map_err(|error| error.to_string())?;
         let stderr = stderr_thread
             .join()
             .map_err(|_| "Could not read the download error.".to_string())?;
-        Ok::<_, String>((status, stderr))
+        Ok::<_, String>((status, stderr, access_error))
     })
     .await
     .map_err(|error| error.to_string())??;
-    let (status, stderr) = output;
+    let (status, stderr, access_error) = output;
     if !status.success() {
-        return if stderr.contains("gated repo")
-            || stderr.contains("GatedRepoError")
-            || stderr.contains("401")
-        {
-            Err("Model jest ograniczony (gated) na Hugging Face. "
-                .to_string()
-                + "Sign in with `huggingface-cli login`, accept the terms "
-                + "on the model page, then try again.")
-        } else {
-            Err(stderr.lines().last().unwrap_or(&stderr).trim().to_owned())
-        };
+        // The script classifies access failures itself; the stderr tail is
+        // only a fallback for faults it did not recognise.
+        return Err(access_error
+            .unwrap_or_else(|| stderr.lines().last().unwrap_or(&stderr).trim().to_owned()));
     }
     emit_model_progress(&app, &verification_model, "validating", 0, None);
     let status = model_status_from_local(&verification_home, &verification_model);
@@ -2664,6 +2827,90 @@ mod tests {
             audio_path: Some(audio_path.to_string_lossy().into_owned()),
             source_app: None,
             error: None,
+            peaks: None,
+        }
+    }
+
+    #[test]
+    fn escape_is_held_only_while_a_recording_could_be_discarded() {
+        // A global hotkey is exclusive: holding Escape permanently would stop
+        // every other application from ever seeing the key.
+        let recording = DictationState::Recording {
+            recording_id: "r".into(),
+            audio_path: "r.wav".into(),
+        };
+        let cancelling = DictationState::Cancelling {
+            recording_id: "r".into(),
+            audio_path: "r.wav".into(),
+        };
+
+        assert!(holds_discardable_audio(&recording));
+        assert!(holds_discardable_audio(&cancelling));
+    }
+
+    #[test]
+    fn escape_is_released_once_capture_is_over() {
+        for state in [
+            DictationState::Idle,
+            DictationState::Processing {
+                recording_id: "r".into(),
+                audio_path: "r.wav".into(),
+            },
+            DictationState::Pasting {
+                recording_id: "r".into(),
+                audio_path: "r.wav".into(),
+                transcript: "hello".into(),
+            },
+            DictationState::Failed {
+                recovery: RecoveryRecording {
+                    recording_id: "r".into(),
+                    audio_path: "r.wav".into(),
+                },
+                error: "boom".into(),
+            },
+        ] {
+            assert!(!holds_discardable_audio(&state), "{state:?}");
+        }
+    }
+
+    #[test]
+    fn a_cancel_press_asks_before_it_discards_audio() {
+        let recording = DictationState::Recording {
+            recording_id: "r".into(),
+            audio_path: "r.wav".into(),
+        };
+
+        assert_eq!(cancel_press_for(&recording), CancelPress::Ask);
+    }
+
+    #[test]
+    fn pressing_cancel_again_answers_the_question() {
+        // The pill has no keyboard focus, so the same global key has to both
+        // raise the question and answer it. Without this the prompt could be
+        // opened but never confirmed.
+        let cancelling = DictationState::Cancelling {
+            recording_id: "r".into(),
+            audio_path: "r.wav".into(),
+        };
+
+        assert_eq!(cancel_press_for(&cancelling), CancelPress::Confirm);
+    }
+
+    #[test]
+    fn cancel_does_nothing_when_there_is_nothing_to_discard() {
+        for state in [
+            DictationState::Idle,
+            DictationState::Processing {
+                recording_id: "r".into(),
+                audio_path: "r.wav".into(),
+            },
+            DictationState::Pasting {
+                recording_id: "r".into(),
+                audio_path: "r.wav".into(),
+                transcript: "hello".into(),
+            },
+        ] {
+            assert_eq!(cancel_press_for(&state), CancelPress::Ignore, "{state:?}");
         }
     }
 
@@ -3011,7 +3258,7 @@ mod tests {
     }
 
     #[test]
-    fn settings_from_older_versions_default_to_system_theme_and_language() {
+    fn settings_from_older_versions_default_to_system_language() {
         let settings: AppSettings = serde_json::from_value(serde_json::json!({
             "inputDevice": null,
             "shortcut": "Ctrl+Space",
@@ -3020,12 +3267,7 @@ mod tests {
         }))
         .unwrap();
 
-        assert_eq!(settings.theme, ThemeChoice::System);
         assert_eq!(settings.language, LanguageChoice::System);
-        assert_eq!(
-            serde_json::to_value(&settings).unwrap()["theme"],
-            serde_json::json!("system")
-        );
         assert_eq!(
             serde_json::to_value(&settings).unwrap()["language"],
             serde_json::json!("system")
