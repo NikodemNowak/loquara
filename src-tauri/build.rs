@@ -56,10 +56,12 @@ fn find_within(root: &Path, name: &str, depth: usize) -> Option<PathBuf> {
 
 /// Locates one engine library.
 ///
-/// `sherpa-rs-sys` copies its libraries to the profile root as a convenience,
-/// but that is a copy rather than the original: a restored build cache brings
-/// back the compiled crate without those loose files, and the search then has
-/// to go to the build tree they came from.
+/// Cargo orders build scripts against build dependencies only, so this script
+/// can run before `sherpa-rs-sys` has compiled anything. `beforeBuildCommand`
+/// builds that crate first for exactly this reason. The search still looks in
+/// two places: the profile root, where sherpa-rs-sys copies its libraries as
+/// a convenience, and the build tree they came from, which survives a
+/// restored cache when the loose copies do not.
 fn locate(profile: &Path, name: &str) -> Option<PathBuf> {
     let direct = profile.join(name);
     if direct.is_file() {

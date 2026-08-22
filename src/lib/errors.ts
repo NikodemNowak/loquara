@@ -15,8 +15,6 @@ const exactMessages: Record<string, TranslationKey> = {
   "The download finished with an incomplete model.": "errors.downloadIncomplete",
   "The model revision path is not a directory.": "errors.revisionNotDir",
   "Hugging Face rejected the access token.": "errors.tokenRejected",
-  "The Python engine is not set up.": "errors.engineMissing",
-  "Python was not found.": "errors.pythonMissing",
   "The access token is empty.": "errors.tokenEmpty",
   "The access token contains spaces.": "errors.tokenSpaces",
 };

@@ -149,7 +149,6 @@ const initialSettings: AppSettings = {
   model: "parakeet",
   streaming: false,
   language: "system",
-  dictationLanguage: "auto",
   modelKeepAliveSecs: 0,
 };
 /** A speech-shaped envelope, so the demo mode looks like real dictation. */

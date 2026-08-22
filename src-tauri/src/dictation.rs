@@ -226,8 +226,6 @@ pub struct AppSettings {
     pub streaming: bool,
     #[serde(default = "default_language")]
     pub language: LanguageChoice,
-    #[serde(default = "default_dictation_language")]
-    pub dictation_language: String,
     /// How many seconds the loaded model stays in memory after the last use.
     /// 0 means "always" (never unload).
     #[serde(default)]
@@ -258,9 +256,6 @@ const fn default_language() -> LanguageChoice {
     LanguageChoice::System
 }
 
-fn default_dictation_language() -> String {
-    "auto".into()
-}
 
 impl Default for AppSettings {
     fn default() -> Self {
@@ -276,7 +271,6 @@ impl Default for AppSettings {
             model: default_model(),
             streaming: default_streaming(),
             language: default_language(),
-            dictation_language: default_dictation_language(),
             model_keep_alive_secs: 0,
         }
     }

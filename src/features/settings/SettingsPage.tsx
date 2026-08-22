@@ -370,19 +370,6 @@ export function SettingsPage({
             />
           </label>
           <label className="setting-row">
-            <span><strong>{t("settings.dictationLanguage.label")}</strong><small>{t("settings.dictationLanguage.description")}</small></span>
-            <Select
-              label={t("settings.dictationLanguage.label")}
-              value={settings.dictationLanguage}
-              onChange={(next) => void save({ dictationLanguage: next })}
-              options={[
-                { value: "auto", label: t("settings.dictationLanguage.auto") },
-                { value: "pl", label: t("settings.dictationLanguage.pl") },
-                { value: "en", label: t("settings.dictationLanguage.en") },
-              ]}
-            />
-          </label>
-          <label className="setting-row">
             <span><strong>{t("settings.modelKeepAlive.label")}</strong><small>{t("settings.modelKeepAlive.description")}</small></span>
             <Select
               label={t("settings.modelKeepAlive.label")}

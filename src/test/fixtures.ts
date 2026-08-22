@@ -57,7 +57,6 @@ export const settings: AppSettings = {
   model: "parakeet",
   streaming: true,
   language: "system",
-  dictationLanguage: "auto",
   modelKeepAliveSecs: 0,
 };
 export const snapshot: AppSnapshot = {

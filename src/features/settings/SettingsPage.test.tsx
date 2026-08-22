@@ -194,7 +194,7 @@ describe("ustawienia", () => {
     await waitFor(() => expect(updateSettings).toHaveBeenCalled());
     expect(screen.getByRole("checkbox", { name: "Pokaż nakładkę" })).toBeEnabled();
     expect(screen.getByRole("combobox", { name: "Przechowuj nagrania" })).toBeEnabled();
-    expect(screen.getByRole("combobox", { name: "Język dyktowania" })).toBeEnabled();
+    expect(screen.getByRole("combobox", { name: "Trzymaj model w pamięci" })).toBeEnabled();
     release();
   });
 

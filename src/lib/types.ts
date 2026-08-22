@@ -33,7 +33,6 @@ export interface AppSettings {
   model: string;
   streaming: boolean;
   language: LanguageChoice;
-  dictationLanguage: string;
   modelKeepAliveSecs: number;
 }
 

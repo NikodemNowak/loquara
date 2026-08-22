@@ -15,7 +15,6 @@ const fallbackSettings: AppSettings = {
   model: "parakeet",
   streaming: true,
   language: "system",
-  dictationLanguage: "auto",
   modelKeepAliveSecs: 0,
 };
 export function useAppModel(adapter: AppAdapter, onError: (message: string) => void) {
