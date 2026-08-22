@@ -2239,8 +2239,11 @@ pub fn update_settings(
         .unwrap_or_else(std::sync::PoisonError::into_inner) = live;
     if model_changed {
         // The old model is of no further use, and holding two at once would
-        // double the memory for as long as the new one takes to load.
-        state.engine.unload();
+        // double the memory for as long as the new one takes to load. The
+        // release waits behind any load already running, so it happens off
+        // the thread that draws the window.
+        let engine = state.engine.clone();
+        std::thread::spawn(move || engine.unload());
         state.model_warm.forget();
         warm_up_model(&app, &state);
     }

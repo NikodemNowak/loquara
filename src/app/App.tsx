@@ -106,7 +106,14 @@ export function App({ adapter: adapterProp }: { adapter?: AppAdapter }) {
 
   let content;
   if (loading) {
-    content = <div className="page page-skeleton" aria-label={t("app.loading")}><span /><span /><span /></div>;
+    // A bare skeleton says only that something is happening. Naming the step
+    // is the difference between waiting and wondering whether it has hung.
+    content = (
+      <div className="page page-loading" role="status">
+        <span className="spinner" />
+        <p>{t("app.starting")}</p>
+      </div>
+    );
   } else if (page === "dictate") {
     content = <DictatePage adapter={adapter} snapshot={snapshot} recordings={history} modelReady={installed === "ready"} onSnapshot={setSnapshot} onHistory={() => setPage("history")} onSettings={() => setPage("settings")} onToast={toast} />;
   } else if (page === "history") {

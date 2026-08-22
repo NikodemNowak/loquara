@@ -80,6 +80,21 @@ struct Loaded {
 pub struct Engine {
     models_dir: PathBuf,
     loaded: Mutex<Option<Loaded>>,
+    /// What the engine is doing, readable without waiting for it.
+    ///
+    /// Loading a model takes seconds and holds `loaded` for all of them. The
+    /// interface asks what is loaded far more often than it loads anything,
+    /// and it asks from the thread that draws the window: if that question
+    /// queued behind a load, the whole app would stop repainting until the
+    /// model was ready. This lock is only ever held for a field assignment.
+    status: Mutex<Status>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct Status {
+    key: Option<String>,
+    accelerator: Option<Accelerator>,
+    loading: bool,
 }
 
 impl Engine {
@@ -87,6 +102,7 @@ impl Engine {
         Self {
             models_dir: models_dir.into(),
             loaded: Mutex::new(None),
+            status: Mutex::new(Status::default()),
         }
     }
 
@@ -104,18 +120,23 @@ impl Engine {
 
     /// The model currently held in memory, if any.
     pub fn loaded_model(&self) -> Option<String> {
-        self.loaded
-            .lock()
-            .ok()
-            .and_then(|guard| guard.as_ref().map(|loaded| loaded.key.clone()))
+        self.status.lock().ok().and_then(|status| status.key.clone())
     }
 
     /// What the loaded model is running on.
     pub fn accelerator(&self) -> Option<Accelerator> {
-        self.loaded
-            .lock()
-            .ok()
-            .and_then(|guard| guard.as_ref().map(|loaded| loaded.accelerator))
+        self.status.lock().ok().and_then(|status| status.accelerator)
+    }
+
+    /// Whether a load is in flight.
+    pub fn is_loading(&self) -> bool {
+        self.status.lock().map(|status| status.loading).unwrap_or(false)
+    }
+
+    fn set_status(&self, status: Status) {
+        if let Ok(mut guard) = self.status.lock() {
+            *guard = status;
+        }
     }
 
     /// Releases the model, returning its memory to the system.
@@ -123,6 +144,7 @@ impl Engine {
         if let Ok(mut guard) = self.loaded.lock() {
             *guard = None;
         }
+        self.set_status(Status::default());
     }
 
     /// Loads a model, or does nothing if it is already the loaded one.
@@ -137,10 +159,12 @@ impl Engine {
         let directory = self.model_dir(key);
         let files = required_files(&directory);
         if !files.iter().all(|path| path.is_file()) {
+            self.set_status(Status::default());
             return Err(EngineError::ModelIncomplete {
                 model: key.to_owned(),
             });
         }
+        self.set_status(Status { key: None, accelerator: None, loading: true });
         // Drop the previous model before building the next one, so two never
         // sit in memory at the same time.
         *guard = None;
@@ -166,11 +190,17 @@ impl Engine {
                         recogniser,
                         accelerator: *accelerator,
                     });
+                    self.set_status(Status {
+                        key: Some(key.to_owned()),
+                        accelerator: Some(*accelerator),
+                        loading: false,
+                    });
                     return Ok(());
                 }
                 Err(error) => last_error = error.to_string(),
             }
         }
+        self.set_status(Status::default());
         Err(EngineError::Load(last_error))
     }
 
@@ -270,6 +300,32 @@ fn resample(samples: Vec<f32>, from_rate: u32) -> Result<Vec<f32>, EngineError> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The interface asks these questions from the thread that draws the
+    /// window. Answering them used to mean waiting for the model to finish
+    /// loading, which froze Loquara for as long as the load took.
+    #[test]
+    fn status_is_readable_while_a_model_is_being_loaded() {
+        use std::sync::mpsc;
+        use std::sync::Arc;
+
+        let temp = tempfile::tempdir().unwrap();
+        let engine = Arc::new(Engine::new(temp.path()));
+        let held = engine.loaded.lock().unwrap();
+
+        let asking = Arc::clone(&engine);
+        let (answered, answer) = mpsc::channel();
+        std::thread::spawn(move || {
+            let status = (asking.loaded_model(), asking.accelerator(), asking.is_installed("parakeet"));
+            let _ = answered.send(status);
+        });
+
+        let status = answer
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("status must not queue behind the load lock");
+        assert_eq!(status, (None, None, false));
+        drop(held);
+    }
 
     #[test]
     fn stereo_is_averaged_into_one_channel() {

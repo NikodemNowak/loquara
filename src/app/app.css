@@ -526,6 +526,8 @@ input[type="checkbox"]:disabled { opacity: 0.45; cursor: not-allowed; }
 .toast--success { border-left-color: var(--success); }
 .toast--info { border-left-color: var(--accent); }
 
+.page-loading { display: grid; place-content: center; justify-items: center; gap: var(--s-2); height: 100%; color: var(--muted); font-size: var(--t-small); }
+.page-loading p { margin: 0; }
 .page-skeleton { display: grid; align-content: start; gap: var(--s-3); }
 .page-skeleton span { height: 56px; border-radius: var(--r-sm); background: var(--surface); animation: skeleton 1.3s ease-in-out infinite alternate; }
 .page-skeleton span:first-child { width: 40%; height: 96px; }

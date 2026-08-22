@@ -482,6 +482,24 @@ pub fn restore_foreground_to<R: Runtime>(_app: &AppHandle<R>, target: Option<Win
     }
 }
 
+/// Builds the command line that shows `path` in Windows Explorer.
+///
+/// A directory is opened; a file is revealed with its parent open and the file
+/// selected. `canonicalize` returns a verbatim `\\?\` path, which Explorer does
+/// not understand and answers by opening the default folder, so the prefix is
+/// stripped first.
+#[cfg(windows)]
+fn explorer_argument(canonical: &std::path::Path, is_dir: bool) -> String {
+    let raw = canonical.as_os_str().to_string_lossy();
+    let cleaned = raw.strip_prefix(r"\\?\").unwrap_or(&raw);
+    if is_dir {
+        format!("\"{cleaned}\"")
+    } else {
+        format!("/select,\"{cleaned}\"")
+    }
+}
+
+
 /// Reveal `path` in the system file manager (selecting the file/folder).
 ///
 /// Used by the history and settings views so the user can find a recording or
@@ -497,14 +515,13 @@ pub fn reveal_path(path: &std::path::Path) -> Result<(), PlatformError> {
     let canonical = std::fs::canonicalize(path).map_err(|error| PlatformError::Other(error.to_string()))?;
     #[cfg(windows)]
     {
+        use std::os::windows::process::CommandExt;
         use std::process::Command;
-        // canonicalize() returns a `\\?\` verbatim path which explorer.exe
-        // cannot parse and would open the default folder (Desktop) instead.
-        let raw = canonical.as_os_str().to_string_lossy();
-        let cleaned = raw.strip_prefix(r"\\?\").unwrap_or(&raw);
-        let argument = format!("/select,\"{}\"", cleaned);
+        // raw_arg, not arg: Explorer parses its own command line, and the
+        // escaping Rust applies to a normal argument leaves it with a string
+        // it cannot read — at which point it silently opens Documents.
         Command::new("explorer")
-            .arg(argument)
+            .raw_arg(explorer_argument(&canonical, path.is_dir()))
             .status()
             .map_err(|error| PlatformError::Other(error.to_string()))?;
         Ok(())
@@ -660,6 +677,30 @@ impl WindowsApi for SystemWindows {
 
 #[cfg(test)]
 mod tests {
+    /// Explorer parses its own command line, so the argument has to be
+    /// exactly what it expects: a bare quoted path opens a folder, `/select,`
+    /// reveals a file, and the verbatim prefix `canonicalize` adds means
+    /// nothing to it — left in, it silently opens Documents instead.
+    #[cfg(windows)]
+    #[test]
+    fn explorer_gets_an_argument_it_can_actually_parse() {
+        use std::path::Path;
+
+        assert_eq!(
+            super::explorer_argument(Path::new(r"\\?\C:\Users\a\models"), true),
+            r#""C:\Users\a\models""#
+        );
+        assert_eq!(
+            super::explorer_argument(Path::new(r"\\?\C:\Users\a\clip.wav"), false),
+            r#"/select,"C:\Users\a\clip.wav""#
+        );
+        // A path that was never canonicalised is passed through unharmed.
+        assert_eq!(
+            super::explorer_argument(Path::new(r"D:\sounds"), true),
+            r#""D:\sounds""#
+        );
+    }
+
     use super::*;
 
     #[test]
