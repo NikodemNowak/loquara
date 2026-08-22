@@ -33,10 +33,10 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Rust cache
-        uses: swatinem/rust-cache@v2
-        with:
-          workspaces: src-tauri
+      # No Rust cache on purpose. It restores the compiled sherpa-rs-sys
+      # without the libraries that crate's build script produced, so the
+      # bundler is handed nothing to package and the build fails on a cache
+      # hit but passes on a miss. Ten minutes of rebuilding beats that.
 
       # sherpa-onnx is built from source — the published binaries have no
       # DirectML build, and the crate refuses to pair them with it. Its CMake
@@ -79,10 +79,10 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Rust cache
-        uses: swatinem/rust-cache@v2
-        with:
-          workspaces: src-tauri
+      # No Rust cache on purpose. It restores the compiled sherpa-rs-sys
+      # without the libraries that crate's build script produced, so the
+      # bundler is handed nothing to package and the build fails on a cache
+      # hit but passes on a miss. Ten minutes of rebuilding beats that.
 
       # sherpa-onnx is built from source — the published binaries have no
       # DirectML build, and the crate refuses to pair them with it. Its CMake
