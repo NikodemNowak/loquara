@@ -80,7 +80,16 @@ pub fn run() {
                         .unwrap_or_default();
                     match platform::shortcut_role_for(shortcut, &configured) {
                         Ok(platform::ShortcutRole::Cancel) => {
-                            dictation::handle_cancel_press(&app, &state);
+                            // Off the handler thread, like the toggle below.
+                            // Handling a press means changing state, and every
+                            // state change claims or releases Escape — which
+                            // reaches back into the shortcut registry the
+                            // plugin is still holding while it calls this.
+                            // Done here, that is a deadlock: the window stops
+                            // repainting and the prompt never appears.
+                            tauri::async_runtime::spawn(async move {
+                                dictation::handle_cancel_press(&app, &state);
+                            });
                         }
                         Ok(platform::ShortcutRole::Toggle) => {
                             tauri::async_runtime::spawn(async move {
