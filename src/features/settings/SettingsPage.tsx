@@ -242,6 +242,10 @@ export function SettingsPage({
             <input type="checkbox" checked={settings.launchOnLogin} aria-label={t("settings.launchOnLogin.label")} onChange={(event) => void save({ launchOnLogin: event.target.checked })} />
           </label>
           <label className="setting-row">
+            <span><strong>{t("settings.startMinimized.label")}</strong><small>{t("settings.startMinimized.description")}</small></span>
+            <input type="checkbox" checked={settings.startMinimized} aria-label={t("settings.startMinimized.label")} onChange={(event) => void save({ startMinimized: event.target.checked })} />
+          </label>
+          <label className="setting-row">
             <span><strong>{t("settings.retention.label")}</strong><small>{t("settings.retention.description")}</small></span>
             <Select
               label={t("settings.retention.label")}

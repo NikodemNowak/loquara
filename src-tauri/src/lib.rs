@@ -187,6 +187,17 @@ pub fn run() {
                 }
             }
             tray.build(app)?;
+            // The window is configured hidden so a quiet start never flashes
+            // it on screen. It is shown here, once the tray exists to bring it
+            // back, unless the user asked to start in the tray.
+            let start_minimized = state
+                .settings
+                .read()
+                .map(|settings| settings.start_minimized)
+                .unwrap_or(false);
+            if !start_minimized {
+                platform::show_main(app.handle())?;
+            }
             let health = health_payload(
                 std::process::id(),
                 &app.config().identifier,

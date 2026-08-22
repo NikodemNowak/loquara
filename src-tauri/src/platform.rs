@@ -338,8 +338,11 @@ pub fn show_main<R: Runtime>(app: &AppHandle<R>) -> Result<(), PlatformError> {
     let window = app
         .get_webview_window("main")
         .ok_or_else(|| PlatformError::Other("main window is missing".into()))?;
+    // Hidden and minimised are different states, and a window can be in both:
+    // showing a minimised window leaves it in the taskbar.
     window
         .show()
+        .and_then(|()| window.unminimize())
         .and_then(|()| window.set_focus())
         .map_err(|error| PlatformError::Other(error.to_string()))
 }
@@ -469,8 +472,11 @@ pub fn show_overlay_with_focus<R: Runtime>(
         Ok(())
     }
     #[cfg(not(windows))]
+    // Hidden and minimised are different states, and a window can be in both:
+    // showing a minimised window leaves it in the taskbar.
     window
         .show()
+        .and_then(|()| window.unminimize())
         .and_then(|()| window.set_focus())
         .map_err(|error| PlatformError::Other(error.to_string()))
 }

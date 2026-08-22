@@ -141,6 +141,7 @@ const initialSettings: AppSettings = {
   autoPaste: true,
   retentionDays: 30,
   launchOnLogin: false,
+  startMinimized: false,
   activeMode: "clean",
   showOverlay: true,
   model: "parakeet",

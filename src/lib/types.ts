@@ -27,6 +27,7 @@ export interface AppSettings {
   autoPaste: boolean;
   retentionDays: 1 | 7 | 30 | null;
   launchOnLogin: boolean;
+  startMinimized: boolean;
   activeMode: string;
   showOverlay: boolean;
   model: string;

@@ -51,6 +51,7 @@ export const settings: AppSettings = {
   autoPaste: true,
   retentionDays: 30,
   launchOnLogin: true,
+  startMinimized: false,
   activeMode: "clean",
   showOverlay: true,
   model: "parakeet",

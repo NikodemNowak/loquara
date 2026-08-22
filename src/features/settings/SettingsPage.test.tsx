@@ -17,6 +17,19 @@ describe("ustawienia", () => {
     expect(onToast).toHaveBeenCalledWith(expect.stringContaining("Brak uprawnień"), "error");
   });
 
+  test("start w zasobniku zapisuje się jak każdy inny przełącznik", async () => {
+    const updateSettings = vi.fn(async (next: typeof settings) => ({ settings: next, warning: null }));
+    renderWithI18n(
+      <SettingsPage adapter={adapterStub({ updateSettings })} initialSettings={settings} onToast={() => undefined} />,
+    );
+
+    await userEvent.click(screen.getByRole("checkbox", { name: /Startuj w zasobniku/ }));
+
+    await waitFor(() => expect(updateSettings).toHaveBeenLastCalledWith(
+      expect.objectContaining({ startMinimized: true }),
+    ));
+  });
+
   test("po każdej zmianie odświeża ustawienia i nie nadpisuje poprzedniej", async () => {
     let persisted = { ...settings };
     const updateSettings = vi.fn(async (next: typeof settings) => {

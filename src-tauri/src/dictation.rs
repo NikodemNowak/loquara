@@ -208,6 +208,13 @@ pub struct AppSettings {
     pub retention_days: Option<u32>,
     #[serde(default = "default_launch_on_login")]
     pub launch_on_login: bool,
+    /// Start with the window in the tray rather than on screen.
+    ///
+    /// Pairs with launching on login: an app that opens itself every time the
+    /// computer starts is in the way, and Loquara is useful from the shortcut
+    /// alone.
+    #[serde(default)]
+    pub start_minimized: bool,
     #[serde(default = "default_active_mode")]
     pub active_mode: String,
     #[serde(default = "default_show_overlay")]
@@ -262,6 +269,7 @@ impl Default for AppSettings {
             auto_paste: true,
             retention_days: Some(30),
             launch_on_login: false,
+            start_minimized: false,
             active_mode: default_active_mode(),
             show_overlay: default_show_overlay(),
             model: default_model(),
@@ -2731,6 +2739,23 @@ mod tests {
     #[test]
     fn settings_default_to_not_launching_on_login() {
         assert!(!AppSettings::default().launch_on_login);
+    }
+
+    #[test]
+    fn starting_in_the_tray_is_opt_in_and_survives_older_settings() {
+        // The window is configured hidden, so a settings file written before
+        // this option existed must still open it.
+        assert!(!AppSettings::default().start_minimized);
+
+        let older: AppSettings = serde_json::from_value(serde_json::json!({
+            "inputDevice": null,
+            "shortcut": "Ctrl+Space",
+            "autoPaste": true,
+            "retentionDays": 30
+        }))
+        .unwrap();
+
+        assert!(!older.start_minimized);
     }
 
     #[test]
