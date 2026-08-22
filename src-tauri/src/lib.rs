@@ -88,7 +88,20 @@ pub fn run() {
                             // Done here, that is a deadlock: the window stops
                             // repainting and the prompt never appears.
                             tauri::async_runtime::spawn(async move {
-                                dictation::handle_cancel_press(&app, &state);
+                                dictation::handle_cancel_press(
+                                    &app,
+                                    &state,
+                                    dictation::RecorderKey::Escape,
+                                );
+                            });
+                        }
+                        Ok(platform::ShortcutRole::ConfirmCancel) => {
+                            tauri::async_runtime::spawn(async move {
+                                dictation::handle_cancel_press(
+                                    &app,
+                                    &state,
+                                    dictation::RecorderKey::Enter,
+                                );
                             });
                         }
                         Ok(platform::ShortcutRole::Toggle) => {

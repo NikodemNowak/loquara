@@ -925,7 +925,11 @@ fn emit_state(app: &AppHandle, state: &AppState) {
         // Escape belongs to whatever the user is doing, except while there is
         // a recording it could discard. Every state change passes through
         // here, so this is where the key is claimed and given back.
-        let _ = platform::set_cancel_shortcut(app, holds_discardable_audio(&snapshot.dictation));
+        let _ = platform::arm_recorder_keys(
+            app,
+            holds_discardable_audio(&snapshot.dictation),
+            awaits_cancel_answer(&snapshot.dictation),
+        );
         let _ = app.emit("dictation://state", snapshot);
     }
 }
@@ -1447,25 +1451,41 @@ pub fn request_cancel(app: AppHandle, state: State<'_, AppState>) -> Result<AppS
 pub enum CancelPress {
     /// Nothing has been asked yet: put the question on screen.
     Ask,
-    /// The question is already on screen; this press answers it.
+    /// Take the question back and carry on recording.
+    Dismiss,
+    /// Answer the question with yes and throw the recording away.
     Confirm,
     /// There is nothing to cancel.
     Ignore,
 }
 
-pub fn cancel_press_for(state: &DictationState) -> CancelPress {
-    match state {
-        DictationState::Recording { .. } => CancelPress::Ask,
-        DictationState::Cancelling { .. } => CancelPress::Confirm,
+/// The two keys the recorder answers to while it is recording.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RecorderKey {
+    Escape,
+    Enter,
+}
+
+/// Discarding a recording asks first, and the two keys answer differently:
+/// Escape opens the question and then takes it back, Enter is the only key
+/// that throws the audio away. A key that repeats a destructive answer is a
+/// key that discards a recording when it is pressed twice by accident.
+pub fn cancel_press_for(state: &DictationState, key: RecorderKey) -> CancelPress {
+    match (state, key) {
+        (DictationState::Recording { .. }, RecorderKey::Escape) => CancelPress::Ask,
+        (DictationState::Cancelling { .. }, RecorderKey::Escape) => CancelPress::Dismiss,
+        (DictationState::Cancelling { .. }, RecorderKey::Enter) => CancelPress::Confirm,
         _ => CancelPress::Ignore,
     }
 }
 
-/// Applies a press of the cancel key to whatever dictation is currently doing.
-pub fn handle_cancel_press(app: &AppHandle, state: &AppState) {
+/// Applies a press of one of those keys to whatever dictation is doing.
+pub fn handle_cancel_press(app: &AppHandle, state: &AppState, key: RecorderKey) {
     let Ok(snapshot) = state.snapshot() else { return };
-    match cancel_press_for(&snapshot.dictation) {
-        CancelPress::Ask => {
+    match cancel_press_for(&snapshot.dictation, key) {
+        // Both directions of the question are the same transition: the
+        // machine sends Cancelling back to Recording.
+        CancelPress::Ask | CancelPress::Dismiss => {
             let _ = request_cancel_inner(app, state);
         }
         CancelPress::Confirm => {
@@ -1473,6 +1493,11 @@ pub fn handle_cancel_press(app: &AppHandle, state: &AppState) {
         }
         CancelPress::Ignore => {}
     }
+}
+
+/// Whether the question is on screen waiting for an answer.
+pub fn awaits_cancel_answer(state: &DictationState) -> bool {
+    matches!(state, DictationState::Cancelling { .. })
 }
 
 pub fn request_cancel_inner(app: &AppHandle, state: &AppState) -> Result<AppSnapshot, String> {
@@ -2382,20 +2407,24 @@ mod tests {
             audio_path: "r.wav".into(),
         };
 
-        assert_eq!(cancel_press_for(&recording), CancelPress::Ask);
+        assert_eq!(cancel_press_for(&recording, RecorderKey::Escape), CancelPress::Ask);
+        // Enter means nothing until there is a question to answer.
+        assert_eq!(cancel_press_for(&recording, RecorderKey::Enter), CancelPress::Ignore);
     }
 
     #[test]
-    fn pressing_cancel_again_answers_the_question() {
-        // The pill has no keyboard focus, so the same global key has to both
-        // raise the question and answer it. Without this the prompt could be
-        // opened but never confirmed.
+    fn only_enter_answers_the_question_and_escape_takes_it_back() {
+        // Escape opened the question, so Escape must be able to close it
+        // again: a key that both asks and destroys throws a recording away on
+        // a double press.
         let cancelling = DictationState::Cancelling {
             recording_id: "r".into(),
             audio_path: "r.wav".into(),
         };
 
-        assert_eq!(cancel_press_for(&cancelling), CancelPress::Confirm);
+        assert_eq!(cancel_press_for(&cancelling, RecorderKey::Enter), CancelPress::Confirm);
+        assert_eq!(cancel_press_for(&cancelling, RecorderKey::Escape), CancelPress::Dismiss);
+        assert!(awaits_cancel_answer(&cancelling));
     }
 
     #[test]
@@ -2412,7 +2441,10 @@ mod tests {
                 transcript: "hello".into(),
             },
         ] {
-            assert_eq!(cancel_press_for(&state), CancelPress::Ignore, "{state:?}");
+            for key in [RecorderKey::Escape, RecorderKey::Enter] {
+                assert_eq!(cancel_press_for(&state, key), CancelPress::Ignore, "{state:?}");
+            }
+            assert!(!awaits_cancel_answer(&state));
         }
     }
 

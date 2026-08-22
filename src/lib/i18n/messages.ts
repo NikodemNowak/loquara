@@ -260,8 +260,9 @@ export const plMessages = {
 
   "overlay.boot": "Uruchamiam…",
   "overlay.micLevel": "Poziom mikrofonu",
-  "overlay.cancelling.title": "Anulować?",
-  "overlay.cancelling.confirm": "potwierdź",
+  "overlay.cancelling.title": "Przerwać?",
+  "overlay.cancelling.confirm": "przerwij",
+  "overlay.cancelling.dismiss": "wróć",
   "overlay.failed.title": "Nie udało się",
   "overlay.failed.retryAria": "Ponów transkrypcję",
   "overlay.initError.title": "Nie udało się uruchomić",
@@ -602,8 +603,9 @@ export const messages: {
 
     "overlay.boot": "Starting…",
     "overlay.micLevel": "Microphone level",
-    "overlay.cancelling.title": "Cancel?",
-    "overlay.cancelling.confirm": "to confirm",
+    "overlay.cancelling.title": "Discard?",
+    "overlay.cancelling.confirm": "discard",
+    "overlay.cancelling.dismiss": "keep",
     "overlay.failed.title": "Something went wrong",
     "overlay.failed.retryAria": "Retry transcription",
     "overlay.initError.title": "Failed to start",

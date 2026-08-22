@@ -579,23 +579,59 @@ body.overlay-window #root { width: 100%; height: 100%; overflow: hidden; }
 .recorder-overlay .text-button:hover { color: var(--pill-text); background: rgba(255, 255, 255, 0.08); }
 .recorder-overlay .spinner { border-color: rgba(255, 255, 255, 0.16); border-top-color: var(--pill-muted); }
 
-/* The cancel prompt: the pill widens and asks in a single row, tinted so the
- * consequence is legible before the words are read. */
-.overlay-main--confirm { justify-content: center; gap: var(--s-3); background: color-mix(in srgb, var(--pill-danger) 10%, transparent); }
-.overlay-main--confirm strong { flex: 0 0 auto; font-size: var(--t-micro); font-weight: var(--w-medium); }
-.overlay-keys { display: flex; align-items: center; gap: 4px; }
-.overlay-keys kbd {
-  padding: 2px 5px;
-  border: 1px solid rgba(255, 255, 255, 0.16);
-  border-radius: 4px;
-  background: rgba(255, 255, 255, 0.07);
+/* The cancel prompt: the pill widens and asks in a single row. The question
+ * sits left and reads as a sentence; the two answers sit right as keycaps,
+ * with the destructive one carrying the only colour on the pill. Nothing here
+ * inherits a browser default — at 42px tall, an unstyled kbd is the thing
+ * that makes the whole pill look unfinished.
+ */
+.overlay-main--confirm {
+  justify-content: space-between;
+  gap: var(--s-3);
+  padding: 0 10px;
+  background: color-mix(in srgb, var(--pill-danger) 9%, transparent);
+}
+.overlay-main--confirm strong {
+  flex: 0 0 auto;
+  color: var(--pill-text);
+  font-size: 12.5px;
+  font-weight: var(--w-bold);
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+}
+.overlay-answers { display: flex; flex: 0 0 auto; align-items: center; gap: 9px; }
+.overlay-answer {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--pill-muted);
+  font-size: 10.5px;
+  font-weight: var(--w-medium);
+  white-space: nowrap;
+}
+.overlay-answer kbd {
+  display: grid;
+  place-items: center;
+  min-width: 19px;
+  height: 18px;
+  padding: 0 4px;
+  /* The heavier bottom edge is what reads as a key rather than a chip. */
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-bottom-width: 2px;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.06);
   color: var(--pill-text);
   font-family: inherit;
-  font-size: 9px;
-  font-weight: var(--w-medium);
+  font-size: 10px;
+  font-weight: var(--w-bold);
+  line-height: 1;
 }
-.overlay-keys em { margin-right: var(--s-2); color: var(--pill-muted); font-size: 9px; font-style: normal; }
-.overlay-keys em:last-child { margin-right: 0; }
+.overlay-answer--discard { color: var(--pill-danger); }
+.overlay-answer--discard kbd {
+  border-color: color-mix(in srgb, var(--pill-danger) 42%, transparent);
+  background: color-mix(in srgb, var(--pill-danger) 16%, transparent);
+  color: var(--pill-danger);
+}
 /* Shows how long is left before the prompt withdraws itself. */
 .recorder-overlay--cancelling::after { content: ""; position: absolute; bottom: 0; left: 0; height: 2px; background: var(--pill-danger); opacity: 0.5; animation: countdown 10s linear forwards; }
 

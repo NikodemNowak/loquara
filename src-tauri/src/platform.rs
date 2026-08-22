@@ -143,7 +143,10 @@ pub fn copy_and_paste(
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ShortcutRole {
     Toggle,
+    /// Escape: asks to discard, or takes the question back.
     Cancel,
+    /// Enter: answers the question with yes.
+    ConfirmCancel,
     Ignore,
 }
 
@@ -161,13 +164,18 @@ pub fn shortcut_role_for(
     let configured = configured_toggle
         .parse::<RegisteredShortcut>()
         .map_err(|error| PlatformError::InvalidShortcut(error.to_string()))?;
-    let cancel = "Escape"
+    let cancel = CANCEL_SHORTCUT
+        .parse::<RegisteredShortcut>()
+        .map_err(|error| PlatformError::InvalidShortcut(error.to_string()))?;
+    let confirm = CONFIRM_SHORTCUT
         .parse::<RegisteredShortcut>()
         .map_err(|error| PlatformError::InvalidShortcut(error.to_string()))?;
     Ok(if *event == configured {
         ShortcutRole::Toggle
     } else if *event == cancel {
         ShortcutRole::Cancel
+    } else if *event == confirm {
+        ShortcutRole::ConfirmCancel
     } else {
         ShortcutRole::Ignore
     })
@@ -277,30 +285,44 @@ pub fn register_shortcuts<R: Runtime>(
         .map_err(|error| PlatformError::ShortcutRegistration(error.to_string()))
 }
 
-/// The key that discards a recording in progress.
+/// The key that asks to discard a recording, and takes the question back.
 pub const CANCEL_SHORTCUT: &str = "Escape";
+/// The key that answers that question with yes.
+pub const CONFIRM_SHORTCUT: &str = "Enter";
 
-/// Claims or releases Escape.
+/// Claims or releases the keys the recorder answers to.
 ///
 /// A global hotkey is exclusive: while it is held, no other application sees
-/// that key at all. Escape is far too important to hold permanently — doing so
-/// breaks dialogs, menus and games system-wide — so it is claimed only while a
-/// recording exists to discard, and released the moment one does not.
+/// that key at all. Escape and Enter are far too important to hold
+/// permanently — doing so breaks dialogs, menus and games system-wide — so
+/// each is claimed only while it has something to do. Escape lives as long as
+/// there is a recording to discard; Enter only while the question is on
+/// screen waiting for an answer.
 ///
-/// Both directions are idempotent, because this is driven from every state
-/// change and most of those do not cross the boundary.
-pub fn set_cancel_shortcut<R: Runtime>(
+/// Every direction is idempotent, because this is driven from every state
+/// change and most of those do not cross a boundary.
+pub fn arm_recorder_keys<R: Runtime>(
     app: &AppHandle<R>,
+    cancel: bool,
+    confirm: bool,
+) -> Result<(), PlatformError> {
+    set_shortcut(app, CANCEL_SHORTCUT, cancel)?;
+    set_shortcut(app, CONFIRM_SHORTCUT, confirm)
+}
+
+fn set_shortcut<R: Runtime>(
+    app: &AppHandle<R>,
+    accelerator: &str,
     armed: bool,
 ) -> Result<(), PlatformError> {
     let manager = app.global_shortcut();
-    if armed == manager.is_registered(CANCEL_SHORTCUT) {
+    if armed == manager.is_registered(accelerator) {
         return Ok(());
     }
     let result = if armed {
-        manager.register(CANCEL_SHORTCUT)
+        manager.register(accelerator)
     } else {
-        manager.unregister(CANCEL_SHORTCUT)
+        manager.unregister(accelerator)
     };
     result.map_err(|error| PlatformError::ShortcutRegistration(error.to_string()))
 }
@@ -806,6 +828,10 @@ mod tests {
         assert_eq!(
             shortcut_role("Escape", "Ctrl+Escape").unwrap(),
             ShortcutRole::Cancel
+        );
+        assert_eq!(
+            shortcut_role("Enter", "Ctrl+Escape").unwrap(),
+            ShortcutRole::ConfirmCancel
         );
         assert_eq!(
             shortcut_role("Alt+Escape", "Ctrl+Escape").unwrap(),

@@ -108,7 +108,18 @@ describe("nakładka dyktowania", () => {
     vi.useRealTimers();
 
     expect(await screen.findByRole("alert")).toHaveTextContent("Mikrofon nie odpowiada");
-    expect(screen.getByText("Anulować?")).toBeVisible();
+    expect(screen.getByText("Przerwać?")).toBeVisible();
+  });
+
+  test("pytanie o przerwanie pokazuje obie odpowiedzi z ich klawiszami", async () => {
+    // Enter jest jedynym klawiszem, który odrzuca nagranie; Escape, który
+    // pytanie otworzył, musi umieć je zamknąć.
+    overlay({ status: "cancelling", recordingId: "a", audioPath: "a.wav" });
+
+    expect(await screen.findByText("Przerwać?")).toBeVisible();
+    expect(screen.getByText("przerwij")).toBeVisible();
+    expect(screen.getByText("wróć")).toBeVisible();
+    expect(screen.getByText("Esc")).toBeVisible();
   });
 
   test("sprząta opóźnione listenery po odmontowaniu", async () => {

@@ -16,8 +16,8 @@ const PILL_WIDTH = 80;
 const PILL_HEIGHT = 42;
 /** Width for the states that carry words rather than a meter. */
 const WORD_WIDTH = 168;
-/** The cancel question needs room for two key hints beside it. */
-const CONFIRM_WIDTH = 208;
+/** The cancel question needs room for the question and both answers. */
+const CONFIRM_WIDTH = 262;
 
 /**
  * The window size each state needs.
@@ -134,7 +134,11 @@ export function RecorderOverlay({ adapter }: { adapter: AppAdapter }) {
   // taskbar. If the platform refuses to resize, nothing moves and `grown`
   // stays false, so the cancel prompt renders inside the pill instead.
   const wanted = sizeFor(status, Boolean(initError));
-  const applied = useRef({ width: PILL_WIDTH, height: PILL_HEIGHT });
+  // Nothing is assumed about the size the window was created at: the first
+  // render applies the size this state wants. Assuming it already matched
+  // left the recording pill at whatever width it happened to open with, and
+  // the first prompt then shrank it — the same pill, two sizes.
+  const applied = useRef({ width: 0, height: 0 });
   useEffect(() => {
     if (!isTauri) return;
     if (applied.current.width === wanted.width && applied.current.height === wanted.height) return;
@@ -254,8 +258,13 @@ export function RecorderOverlay({ adapter }: { adapter: AppAdapter }) {
       ) : cancelling ? (
         <div className="overlay-main overlay-main--confirm" role="alertdialog" aria-label={t("overlay.cancelling.title")}>
           <strong>{t("overlay.cancelling.title")}</strong>
-          <span className="overlay-keys">
-            <kbd>Esc</kbd><em>{t("overlay.cancelling.confirm")}</em>
+          <span className="overlay-answers">
+            <span className="overlay-answer overlay-answer--discard">
+              <kbd>Enter</kbd>{t("overlay.cancelling.confirm")}
+            </span>
+            <span className="overlay-answer">
+              <kbd>Esc</kbd>{t("overlay.cancelling.dismiss")}
+            </span>
           </span>
         </div>
       ) : state.status === "recording" ? (
