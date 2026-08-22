@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 
-import { cssColor, prepareCanvas } from "../lib/waveform";
+import { aboveRoom, cssColor, mixColour, prepareCanvas, trackRoom } from "../lib/waveform";
 
 /** Loudness is perceived closer to a power curve than to raw amplitude. */
 const LOUDNESS_EXPONENT = 0.45;
@@ -22,6 +22,9 @@ const IDLE_LEVEL = 0.2;
 const CENTER_DROP = 0.28;
 /** Floor of the per-bar shimmer, so bars stay tall instead of flickering low. */
 const SHIMMER_FLOOR = 0.8;
+/** Where the bars change colour, and how fast they get there. */
+const VOICE_THRESHOLD = 0.18;
+const VOICE_EASE = 0.07;
 
 /**
  * Fixed per-bar phases and speeds.
@@ -54,8 +57,10 @@ export interface LevelMeterProps {
   gap?: number;
   className?: string;
   label?: string;
-  /** CSS custom property holding the bar colour. */
+  /** CSS custom property holding the bar colour while someone is talking. */
   colorToken?: string;
+  /** Bar colour when the microphone is only hearing the room. */
+  quietToken?: string;
 }
 
 /**
@@ -79,6 +84,7 @@ export function LevelMeter({
   className = "",
   label,
   colorToken = "--accent",
+  quietToken = "--pill-muted",
 }: LevelMeterProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const levelRef = useRef(level);
@@ -116,18 +122,27 @@ export function LevelMeter({
     const middle = (count - 1) / 2;
     const heights = new Array<number>(count).fill(IDLE_LEVEL);
     const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const loud = cssColor(colorToken, "#4c8dff");
+    const quiet = cssColor(quietToken, "#8d96a1");
     let energy = 0;
+    let floor = 0;
+    let voice = 0;
     let raf = 0;
 
     const draw = (now: number) => {
       const time = reduceMotion ? 0 : now / 1000;
+      const raw = Math.max(0, levelRef.current);
+      floor = trackRoom(raw, floor);
+      // Only the part that stands out from the room counts as a signal.
+      const excess = aboveRoom(raw, floor);
       const shaped = mode === "thinking"
         ? 0.6
-        : Math.min(1, Math.pow(Math.max(0, levelRef.current) * GAIN, LOUDNESS_EXPONENT));
+        : Math.min(1, Math.pow(excess * GAIN, LOUDNESS_EXPONENT));
       energy += (shaped - energy) * (shaped > energy ? ATTACK : RELEASE);
+      voice += ((mode === "live" && shaped > VOICE_THRESHOLD ? 1 : 0) - voice) * VOICE_EASE;
 
       context.clearRect(0, 0, width, height);
-      context.fillStyle = cssColor(colorToken, "#4c8dff");
+      context.fillStyle = mode === "live" ? mixColour(quiet, loud, voice) : loud;
 
       // How many bars are still alight. The meter keeps working underneath —
       // the microphone is still open — so only the extinguished tail is still.
@@ -178,7 +193,7 @@ export function LevelMeter({
     };
     raf = requestAnimationFrame(draw);
     return () => cancelAnimationFrame(raf);
-  }, [mode, height, barWidth, gap, colorToken, width]);
+  }, [mode, height, barWidth, gap, colorToken, quietToken, width]);
 
   return (
     <canvas

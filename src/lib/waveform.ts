@@ -113,3 +113,55 @@ export function cssColor(name: string, fallback: string): string {
   const value = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
   return value || fallback;
 }
+
+/** Parses `#rrggbb` into channels; anything else comes back as null. */
+function channels(colour: string): [number, number, number] | null {
+  const hex = colour.trim();
+  if (!/^#[0-9a-f]{6}$/i.test(hex)) return null;
+  return [
+    parseInt(hex.slice(1, 3), 16),
+    parseInt(hex.slice(3, 5), 16),
+    parseInt(hex.slice(5, 7), 16),
+  ];
+}
+
+/**
+ * Blends two colours, `t` of the way from the first to the second.
+ *
+ * Used to move a meter between "the room" and "you", which is a gradual
+ * thing: switching colours outright would strobe on every breath.
+ */
+export function mixColour(from: string, to: string, t: number): string {
+  const a = channels(from);
+  const b = channels(to);
+  if (!a || !b) return t > 0.5 ? to : from;
+  const ratio = Math.max(0, Math.min(1, t));
+  const channel = (index: number) => Math.round(a[index] + (b[index] - a[index]) * ratio);
+  return `rgb(${channel(0)}, ${channel(1)}, ${channel(2)})`;
+}
+
+/**
+ * How fast the room's own level is learned.
+ *
+ * A microphone in a normal room is never at zero: fans, traffic, the machine
+ * itself. Metering raw loudness therefore shows a meter that is always half
+ * up and cannot tell being spoken to from being switched on. The quietest
+ * level lately is taken as the room, and only what rises above it counts.
+ * It drops to a new quiet quickly and creeps up slowly, so a pause between
+ * sentences is not mistaken for a quieter room.
+ */
+const FLOOR_FALL = 0.08;
+const FLOOR_RISE = 0.0015;
+/** How far above the room a level has to sit before it reads as a voice. */
+const VOICE_MARGIN = 1.6;
+
+/** The room's level after hearing `level`. */
+export function trackRoom(level: number, floor: number): number {
+  const heard = Math.max(0, level);
+  return floor + (heard - floor) * (heard < floor ? FLOOR_FALL : FLOOR_RISE);
+}
+
+/** How far `level` stands out from the room; zero when it does not. */
+export function aboveRoom(level: number, floor: number): number {
+  return Math.max(0, Math.max(0, level) - floor * VOICE_MARGIN);
+}

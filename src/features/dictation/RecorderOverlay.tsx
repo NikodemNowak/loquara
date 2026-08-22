@@ -13,13 +13,13 @@ const isTauri = "__TAURI_INTERNALS__" in window;
  * The window is not resizable by the user; only this code changes its size,
  * which needs core:window:allow-set-size in the capability file. */
 const PILL_WIDTH = 68;
-const PILL_HEIGHT = 42;
+const PILL_HEIGHT = 36;
 /** Width for the states that carry words rather than a meter. */
 const WORD_WIDTH = 168;
 /** The question is a card above the pill, so the window holds both plus the
  *  transparent gap between them. */
 const ASK_WIDTH = 164;
-const ASK_HEIGHT = 140;
+const ASK_HEIGHT = 134;
 
 /**
  * The window size each state needs.
@@ -44,7 +44,7 @@ function sizeFor(status: string | undefined, initError: boolean) {
 /** How long the cancel prompt waits before withdrawing itself. */
 const CONFIRM_TIMEOUT_MS = 10_000;
 
-const WAVE_HEIGHT = 32;
+const WAVE_HEIGHT = 26;
 
 const DRAG_IGNORE = "button, input, a, select, textarea, [role='button']";
 
@@ -139,6 +139,11 @@ export function RecorderOverlay({ adapter }: { adapter: AppAdapter }) {
   // taskbar. If the platform refuses to resize, nothing moves and `grown`
   // stays false, so the cancel prompt renders inside the pill instead.
   const wanted = sizeFor(status, Boolean(initError));
+  // Which side of the pill the question stands on. Above by default, because
+  // the pill normally lives at the bottom of the screen — but a pill dragged
+  // to the top has nothing above it, and the card would open off-screen.
+  const [below, setBelow] = useState(false);
+  const placedBelow = useRef(false);
   // Nothing is assumed about the size the window was created at: the first
   // render applies the size this state wants. Assuming it already matched
   // left the recording pill at whatever width it happened to open with, and
@@ -149,11 +154,21 @@ export function RecorderOverlay({ adapter }: { adapter: AppAdapter }) {
     if (applied.current.width === wanted.width && applied.current.height === wanted.height) return;
     applied.current = wanted;
     let active = true;
-    void import("@tauri-apps/api/window").then(async ({ getCurrentWindow, LogicalSize }) => {
+    void import("@tauri-apps/api/window").then(async ({ getCurrentWindow, LogicalSize, currentMonitor }) => {
       if (!active) return;
       const overlay = getCurrentWindow();
       const position = await overlay.outerPosition();
       const before = await overlay.innerSize();
+      // Growing means the window needs room somewhere. Ask the screen whether
+      // there is any above the pill before deciding to open upwards.
+      const monitor = await currentMonitor().catch(() => null);
+      const scale = monitor?.scaleFactor ?? 1;
+      const growth = (wanted.height - PILL_HEIGHT) * scale;
+      if (growth > 0) {
+        const roomAbove = position.y - (monitor?.position.y ?? 0);
+        placedBelow.current = Boolean(monitor) && roomAbove < growth + 8;
+        setBelow(placedBelow.current);
+      }
       selfMoving.current = true;
       try {
         await overlay.setSize(new LogicalSize(wanted.width, wanted.height));
@@ -165,12 +180,19 @@ export function RecorderOverlay({ adapter }: { adapter: AppAdapter }) {
         const taller = after.height - before.height;
         const wider = after.width - before.width;
         if (taller !== 0 || wider !== 0) {
-          // The pill sits at the bottom centre of the window, so growing the
-          // window has to move it up and left by half — otherwise the pill
-          // slides sideways the moment the question appears.
-          position.y -= taller;
+          // The pill is centred horizontally, so half of any width change has
+          // to be given back — otherwise it slides sideways the moment the
+          // question appears. Vertically it depends on which way the window
+          // grew: opening upwards moves the top edge, opening downwards
+          // leaves it exactly where it is.
+          if (!placedBelow.current) {
+            position.y -= taller;
+          }
           position.x -= Math.round(wider / 2);
           await overlay.setPosition(position);
+        }
+        if (taller < 0) {
+          placedBelow.current = false;
         }
       } catch {
         // The pill keeps its previous size; the prompt still reads correctly,
@@ -242,7 +264,7 @@ export function RecorderOverlay({ adapter }: { adapter: AppAdapter }) {
   const state = snapshot?.dictation;
   return (
     <main
-      className={`recorder-overlay recorder-overlay--${initError ? "init-error" : state?.status ?? "initializing"}${cancelling ? " recorder-overlay--asking" : ""}`}
+      className={`recorder-overlay recorder-overlay--${initError ? "init-error" : state?.status ?? "initializing"}${cancelling ? " recorder-overlay--asking" : ""}${cancelling && below ? " recorder-overlay--below" : ""}`}
       aria-live="polite"
       data-tauri-drag-region
       onMouseDown={startDrag}
