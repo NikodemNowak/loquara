@@ -395,6 +395,8 @@ pub struct ModelSummary {
     pub display: String,
     pub provider: String,
     pub installed: bool,
+    /// What it will cost to fetch, so the interface can say so before asking.
+    pub total_bytes: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -772,6 +774,7 @@ impl AppState {
             display: spec.map(|spec| spec.display.to_owned()).unwrap_or_else(|| key.clone()),
             provider: spec.map(|spec| spec.provider.to_owned()).unwrap_or_default(),
             installed: self.engine.is_installed(&key),
+            total_bytes: spec.map(|spec| spec.total_bytes()).unwrap_or(0),
             key,
         }
     }

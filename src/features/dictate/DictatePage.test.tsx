@@ -117,7 +117,7 @@ describe("ekran Dyktuj", () => {
     // żaden model nie był pobrany, więc skrót mógł się tylko wysypać.
     renderWithI18n(<DictatePage
       adapter={adapterStub()}
-      snapshot={{ dictation: { status: "idle" }, settings, modelLoading: false }}
+      snapshot={{ dictation: { status: "idle" }, settings, model: { key: "parakeet", display: "Parakeet TDT 0.6B v3", provider: "NVIDIA", installed: false, totalBytes: 670_478_772 }, modelLoading: false }}
       recordings={[]}
       modelReady={false}
       onSnapshot={() => undefined}
@@ -126,17 +126,21 @@ describe("ekran Dyktuj", () => {
       onToast={() => undefined}
     />);
 
-    expect(screen.getByRole("heading", { name: "Brak modelu" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "Potrzebny jest model" })).toBeVisible();
+    expect(screen.getByText("Parakeet TDT 0.6B v3 · 670 MB · NVIDIA")).toBeVisible();
     expect(screen.queryByRole("heading", { name: "Gotowy" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Zacznij nagrywać" })).not.toBeInTheDocument();
   });
 
-  test("bez modelu kieruje do ustawień zamiast uruchamiać nagrywanie", async () => {
+  test("bez modelu pobiera go na miejscu, bez wysyłania gdzie indziej", async () => {
+    // Przycisk prowadził do Ustawień, gdzie sekcja modeli była poniżej
+    // zgięcia — klikało się i pozornie nic się nie działo.
     const startRecording = vi.fn();
+    const downloadModel = vi.fn(async () => undefined);
     const onSettings = vi.fn();
     renderWithI18n(<DictatePage
-      adapter={adapterStub({ startRecording })}
-      snapshot={{ dictation: { status: "idle" }, settings, modelLoading: false }}
+      adapter={adapterStub({ startRecording, downloadModel })}
+      snapshot={{ dictation: { status: "idle" }, settings, model: { key: "parakeet", display: "Parakeet TDT 0.6B v3", provider: "NVIDIA", installed: false, totalBytes: 670_478_772 }, modelLoading: false }}
       recordings={[]}
       modelReady={false}
       onSnapshot={() => undefined}
@@ -145,9 +149,14 @@ describe("ekran Dyktuj", () => {
       onToast={() => undefined}
     />);
 
-    await userEvent.click(screen.getByRole("button", { name: "Wybierz i pobierz model" }));
+    await userEvent.click(screen.getByRole("button", { name: "Pobierz model" }));
 
-    expect(onSettings).toHaveBeenCalledOnce();
+    expect(downloadModel).toHaveBeenCalledWith("parakeet");
+    expect(onSettings).not.toHaveBeenCalled();
     expect(startRecording).not.toHaveBeenCalled();
+
+    // Wyjście do pełnej listy zostaje, ale nie jest już jedyną drogą.
+    await userEvent.click(screen.getByRole("button", { name: "Inne modele w ustawieniach" }));
+    expect(onSettings).toHaveBeenCalledOnce();
   });
 });

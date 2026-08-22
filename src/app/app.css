@@ -531,6 +531,20 @@ input[type="checkbox"]:disabled { opacity: 0.45; cursor: not-allowed; }
 .page-skeleton { display: grid; align-content: start; gap: var(--s-3); }
 .page-skeleton span { height: 56px; border-radius: var(--r-sm); background: var(--surface); animation: skeleton 1.3s ease-in-out infinite alternate; }
 .page-skeleton span:first-child { width: 40%; height: 96px; }
+/* First run: the model arrives here rather than somewhere else.
+ * The bar is the only wide element on an otherwise centred column, so it
+ * carries the progress without needing a number beside every step.
+ */
+.model-setup { display: grid; justify-items: center; gap: var(--s-3); width: 100%; max-width: 340px; margin: 0 auto; }
+.model-setup__meta { margin: 0; color: var(--muted); font-size: var(--t-small); }
+.model-setup__progress { display: grid; gap: var(--s-2); width: 100%; }
+.model-setup__track { width: 100%; height: 6px; overflow: hidden; border-radius: var(--r-full); background: var(--surface-active); }
+.model-setup__track span { display: block; height: 100%; border-radius: inherit; background: var(--accent); transition: width var(--medium) var(--ease); }
+.model-setup__numbers { display: flex; justify-content: space-between; gap: var(--s-3); margin: 0; font-size: var(--t-small); }
+.model-setup__numbers strong { font-weight: var(--w-medium); font-variant-numeric: tabular-nums; }
+.model-setup__numbers span { color: var(--muted); font-variant-numeric: tabular-nums; }
+.model-setup__error { margin: 0; color: var(--danger); font-size: var(--t-small); }
+
 .empty-state { display: grid; justify-items: center; gap: var(--s-1); padding: var(--s-7) var(--s-5); text-align: center; }
 .empty-state__icon { display: grid; place-items: center; width: 36px; height: 36px; margin-bottom: var(--s-2); border-radius: var(--r-sm); color: var(--faint); background: var(--surface-hover); }
 .empty-state strong { font-size: var(--t-body); font-weight: var(--w-medium); }

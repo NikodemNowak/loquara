@@ -79,6 +79,8 @@ export interface ModelSummary {
   display: string;
   provider: string;
   installed: boolean;
+  /** What fetching it will cost, so the size can be shown before asking. */
+  totalBytes: number;
 }
 
 export interface AppSnapshot {

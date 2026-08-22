@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useState } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 
 import { LevelMeter } from "../../components/LevelMeter";
 import { Waveform } from "../../components/Waveform";
@@ -7,6 +7,80 @@ import type { AppAdapter } from "../../lib/tauri";
 import type { AppSnapshot, Recording } from "../../lib/types";
 import { normalizeError } from "../../lib/errors";
 import { dateLocale, useI18n, type TranslationKey } from "../../lib/i18n";
+import { formatBytes } from "../../lib/bytes";
+
+/**
+ * Fetches the model and reports how it is going.
+ *
+ * The rate is measured over the last few seconds rather than the whole
+ * transfer, so it settles quickly at the start and reacts when the line
+ * changes — an average since the first byte would read as far too slow for
+ * the first half of a download that is actually running fine.
+ */
+const RATE_WINDOW_MS = 4000;
+
+function useModelDownload(adapter: AppAdapter, model: string | undefined, enabled: boolean) {
+  const [running, setRunning] = useState(false);
+  const [done, setDone] = useState(0);
+  const [total, setTotal] = useState(0);
+  const [rate, setRate] = useState(0);
+  const [error, setError] = useState("");
+  // Oldest sample still inside the window, kept out of state: it changes on
+  // every progress message and nothing renders from it directly.
+  const mark = useRef<{ at: number; bytes: number }>({ at: 0, bytes: 0 });
+
+  useEffect(() => {
+    if (!enabled) return;
+    let active = true;
+    let unlisten: (() => void) | undefined;
+    void adapter.onModelProgress((progress) => {
+      if (!active || progress.model !== model) return;
+      setDone(progress.downloadedBytes);
+      setTotal(progress.totalBytes ?? 0);
+      const now = Date.now();
+      const since = now - mark.current.at;
+      if (!mark.current.at || progress.downloadedBytes < mark.current.bytes) {
+        mark.current = { at: now, bytes: progress.downloadedBytes };
+      } else if (since >= RATE_WINDOW_MS) {
+        setRate(Math.round(((progress.downloadedBytes - mark.current.bytes) * 1000) / since));
+        mark.current = { at: now, bytes: progress.downloadedBytes };
+      }
+    }).then((dispose) => {
+      if (active) unlisten = dispose;
+      else dispose();
+    });
+    return () => { active = false; unlisten?.(); };
+  }, [adapter, model, enabled]);
+
+  const start = useCallback(async () => {
+    if (!model) return;
+    setError("");
+    setDone(0);
+    setRate(0);
+    mark.current = { at: Date.now(), bytes: 0 };
+    setRunning(true);
+    try {
+      await adapter.downloadModel(model);
+    } catch (failure) {
+      setError(normalizeError(failure));
+    } finally {
+      setRunning(false);
+    }
+  }, [adapter, model]);
+
+  const fraction = total ? Math.min(1, done / total) : 0;
+  const remaining = total - done;
+  return {
+    running,
+    done,
+    total,
+    rate,
+    error,
+    fraction,
+    eta: rate > 0 && remaining > 0 ? Math.round(remaining / rate) : 0,
+    start,
+  };
+}
 
 function formatClock(totalSeconds: number) {
   const minutes = String(Math.floor(totalSeconds / 60)).padStart(2, "0");
@@ -119,6 +193,9 @@ export function DictatePage({
     ? { state: "dictate.state.noModel", hint: "dictate.hint.noModel", action: "dictate.action.getModel" } as Readout
     : READOUTS[status] ?? READOUTS.idle;
   const loadingModel = status === "processing" && snapshot.modelLoading;
+  const model = snapshot.model;
+  const setup = status === "idle" && !modelReady;
+  const download = useModelDownload(adapter, model?.key, setup);
 
   useEffect(() => {
     if (status !== "recording" && status !== "cancelling") {
@@ -197,17 +274,57 @@ export function DictatePage({
           </p>
         )}
 
-        {readout.action && (
-          <div className="dictate__actions">
-            {status === "idle" && !modelReady ? (
-              <button className="primary-button" onClick={() => onSettings?.()}>
-                {t(readout.action)}
-              </button>
+        {setup && model && (
+          <div className="model-setup">
+            <p className="model-setup__meta">
+              {t("dictate.model.meta", {
+                model: model.display,
+                size: formatBytes(model.totalBytes),
+                provider: model.provider,
+              })}
+            </p>
+            {download.running ? (
+              <div className="model-setup__progress" role="status">
+                <div className="model-setup__track">
+                  <span style={{ width: `${Math.round(download.fraction * 100)}%` }} />
+                </div>
+                <p className="model-setup__numbers">
+                  <strong>{t("dictate.model.progress", {
+                    done: formatBytes(download.done),
+                    total: formatBytes(download.total || model.totalBytes),
+                  })}</strong>
+                  <span>
+                    {download.rate
+                      ? download.eta
+                        ? t("dictate.model.rate", { rate: formatBytes(download.rate), eta: formatClock(download.eta) })
+                        : t("dictate.model.rateUnknown", { rate: formatBytes(download.rate) })
+                      : t("dictate.model.downloading")}
+                  </span>
+                </p>
+              </div>
             ) : (
-              <button className="secondary-button" disabled={busy} onClick={() => void act()}>
-                {busy ? t("dictate.action.working") : t(readout.action)}
-              </button>
+              <div className="dictate__actions">
+                <button className="primary-button" onClick={() => void download.start()}>
+                  {t(download.error ? "dictate.model.retry" : "dictate.action.getModel")}
+                </button>
+              </div>
             )}
+            {download.error && (
+              <p className="model-setup__error" role="alert">
+                {t("dictate.model.failed", { error: download.error })}
+              </p>
+            )}
+            <button className="text-button" onClick={() => onSettings?.()}>
+              {t("dictate.model.otherModels")}
+            </button>
+          </div>
+        )}
+
+        {readout.action && !setup && (
+          <div className="dictate__actions">
+            <button className="secondary-button" disabled={busy} onClick={() => void act()}>
+              {busy ? t("dictate.action.working") : t(readout.action)}
+            </button>
           </div>
         )}
       </div>

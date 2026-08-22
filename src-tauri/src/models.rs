@@ -8,6 +8,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::Serialize;
 
@@ -101,6 +102,21 @@ pub enum DownloadError {
     Cancelled,
 }
 
+/// How many connections one file is fetched over.
+///
+/// Measured against the host: one connection is held to roughly a quarter of
+/// the speed four of them reach together, so the limit is per-connection
+/// rather than the line. Four is also what the publisher's own client uses,
+/// which is a reasonable place to stop asking for more.
+const STREAMS: u64 = 4;
+
+/// How much has to arrive before the caller hears about it again.
+///
+/// Progress was reported after every 64 KB, which is around ten thousand
+/// messages for one model — none of which the eye can tell apart, all of
+/// which the download thread pays for.
+const PROGRESS_STEP: u64 = 4 << 20;
+
 /// Downloads every file a model needs into `directory`.
 ///
 /// Each file lands under a `.part` name and is renamed once complete, so an
@@ -110,51 +126,157 @@ pub enum DownloadError {
 pub fn download(
     key: &str,
     directory: &Path,
-    mut on_progress: impl FnMut(u64, u64),
-    should_continue: impl Fn() -> bool,
+    on_progress: impl Fn(u64, u64) + Sync,
+    should_continue: impl Fn() -> bool + Sync,
 ) -> Result<(), DownloadError> {
     let spec = spec(key).ok_or_else(|| DownloadError::UnknownModel(key.to_owned()))?;
     fs::create_dir_all(directory).map_err(|error| DownloadError::Disk(error.to_string()))?;
 
     let total = spec.total_bytes();
-    let mut done = 0_u64;
+    let done = AtomicU64::new(0);
+    let reported = AtomicU64::new(0);
+    // Called from every stream, so it reports the shared total rather than
+    // its own share, and only when the number has moved enough to matter.
+    let advance = |bytes: u64| {
+        let now = done.fetch_add(bytes, Ordering::Relaxed) + bytes;
+        let last = reported.load(Ordering::Relaxed);
+        if now >= last + PROGRESS_STEP
+            && reported
+                .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+        {
+            on_progress(now.min(total), total);
+        }
+    };
     on_progress(0, total);
 
     for file in spec.files {
         let final_path = directory.join(file.local);
         if final_path.is_file() {
             // Already fetched by an earlier attempt.
-            done += file.bytes;
-            on_progress(done.min(total), total);
+            advance(file.bytes);
+            on_progress(done.load(Ordering::Relaxed).min(total), total);
             continue;
         }
         let part_path = final_path.with_extension("part");
-        let response = ureq::get(&spec.url(file))
-            .call()
-            .map_err(|error| DownloadError::Network(error.to_string()))?;
-        let mut reader = response.into_reader();
-        let mut writer =
-            fs::File::create(&part_path).map_err(|error| DownloadError::Disk(error.to_string()))?;
-        let mut buffer = vec![0_u8; 1 << 16];
-        loop {
-            if !should_continue() {
+        fetch(&spec.url(file), &part_path, file.bytes, &advance, &should_continue).inspect_err(
+            |_| {
                 let _ = fs::remove_file(&part_path);
-                return Err(DownloadError::Cancelled);
-            }
-            let read = std::io::Read::read(&mut reader, &mut buffer)
-                .map_err(|error| DownloadError::Network(error.to_string()))?;
-            if read == 0 {
-                break;
-            }
-            std::io::Write::write_all(&mut writer, &buffer[..read])
-                .map_err(|error| DownloadError::Disk(error.to_string()))?;
-            done += read as u64;
-            on_progress(done.min(total), total);
-        }
-        drop(writer);
-        fs::rename(&part_path, &final_path).map_err(|error| DownloadError::Disk(error.to_string()))?;
+            },
+        )?;
+        fs::rename(&part_path, &final_path)
+            .map_err(|error| DownloadError::Disk(error.to_string()))?;
+    }
+    on_progress(total, total);
+    Ok(())
+}
+
+/// Fetches one file, over several connections at once.
+///
+/// The file is sized up front and each stream writes straight into its own
+/// span of it, so there is nothing to join at the end. A host that ignores
+/// the range header answers with the whole file; that is not an error, it
+/// just means one stream does the work.
+fn fetch(
+    url: &str,
+    path: &Path,
+    size: u64,
+    advance: &(impl Fn(u64) + Sync),
+    should_continue: &(impl Fn() -> bool + Sync),
+) -> Result<(), DownloadError> {
+    let file = fs::File::create(path).map_err(|error| DownloadError::Disk(error.to_string()))?;
+    file.set_len(size)
+        .map_err(|error| DownloadError::Disk(error.to_string()))?;
+    drop(file);
+
+    let span = size.div_ceil(STREAMS);
+    let outcome = std::thread::scope(|scope| {
+        let workers: Vec<_> = (0..STREAMS)
+            .map(|index| {
+                let from = index * span;
+                let to = ((index + 1) * span).min(size) - 1;
+                scope.spawn(move || fetch_span(url, path, from, to, advance, should_continue))
+            })
+            .collect();
+        workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap_or_else(|_| {
+                Err(DownloadError::Network("a download thread stopped".into()))
+            }))
+            .collect::<Result<Vec<bool>, DownloadError>>()
+    })?;
+
+    // A host that ignored the ranges sent the whole file to every stream. The
+    // first one wrote it correctly; the rest wrote it over itself from zero,
+    // so the bytes are right and only the count is wrong.
+    if outcome.iter().any(|ranged| !ranged) {
+        return Ok(());
     }
     Ok(())
+}
+
+/// Fetches `from..=to` of `url` into the matching span of `path`.
+///
+/// Returns whether the host honoured the range. Each stream opens its own
+/// handle, so no two of them share a file position.
+fn fetch_span(
+    url: &str,
+    path: &Path,
+    from: u64,
+    to: u64,
+    advance: &(impl Fn(u64) + Sync),
+    should_continue: &(impl Fn() -> bool + Sync),
+) -> Result<bool, DownloadError> {
+    if to < from {
+        return Ok(true);
+    }
+    let response = ureq::get(url)
+        .set("Range", &format!("bytes={from}-{to}"))
+        .call()
+        .map_err(|error| DownloadError::Network(error.to_string()))?;
+    let ranged = response.status() == 206;
+    let mut reader = response.into_reader();
+
+    let file = fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .map_err(|error| DownloadError::Disk(error.to_string()))?;
+    let mut offset = if ranged { from } else { 0 };
+    let mut buffer = vec![0_u8; 1 << 16];
+    loop {
+        if !should_continue() {
+            return Err(DownloadError::Cancelled);
+        }
+        let read = std::io::Read::read(&mut reader, &mut buffer)
+            .map_err(|error| DownloadError::Network(error.to_string()))?;
+        if read == 0 {
+            return Ok(ranged);
+        }
+        let mut written = 0;
+        while written < read {
+            let count = write_at(&file, &buffer[written..read], offset + written as u64)
+                .map_err(|error| DownloadError::Disk(error.to_string()))?;
+            if count == 0 {
+                return Err(DownloadError::Disk("the disk accepted no bytes".into()));
+            }
+            written += count;
+        }
+        offset += read as u64;
+        if ranged {
+            advance(read as u64);
+        }
+    }
+}
+
+/// Writes at an absolute offset, leaving the handle's own position alone.
+#[cfg(windows)]
+fn write_at(file: &fs::File, buffer: &[u8], offset: u64) -> std::io::Result<usize> {
+    std::os::windows::fs::FileExt::seek_write(file, buffer, offset)
+}
+
+#[cfg(unix)]
+fn write_at(file: &fs::File, buffer: &[u8], offset: u64) -> std::io::Result<usize> {
+    std::os::unix::fs::FileExt::write_at(file, buffer, offset)
 }
 
 /// Removes a downloaded model, including any interrupted parts.
@@ -255,6 +377,39 @@ mod tests {
         );
         // Sanity: the encoder dominates, so the total must be in that region.
         assert!(model.total_bytes() > 500_000_000);
+    }
+
+    /// Reaches the real host, so it is not part of the ordinary run.
+    /// `cargo test --release -- --ignored ranged` exercises it.
+    #[ignore]
+    #[test]
+    fn four_streams_reassemble_a_file_byte_for_byte() {
+        use std::sync::atomic::AtomicU64;
+
+        let model = spec("parakeet").unwrap();
+        let tokens = model.files.iter().find(|file| file.local == "tokens.txt").unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("tokens.part");
+        let counted = AtomicU64::new(0);
+
+        fetch(
+            &model.url(tokens),
+            &path,
+            tokens.bytes,
+            &|bytes| { counted.fetch_add(bytes, Ordering::Relaxed); },
+            &|| true,
+        )
+        .unwrap();
+
+        let written = fs::read(&path).unwrap();
+        assert_eq!(written.len() as u64, tokens.bytes, "size");
+        // Every span landed where it belongs: a file stitched wrongly still
+        // has the right length, so the content is what has to be checked.
+        let single = ureq::get(&model.url(tokens)).call().unwrap();
+        let mut expected = Vec::new();
+        std::io::Read::read_to_end(&mut single.into_reader(), &mut expected).unwrap();
+        assert_eq!(written, expected, "content");
+        assert_eq!(counted.load(Ordering::Relaxed), tokens.bytes, "reported bytes");
     }
 
     #[test]

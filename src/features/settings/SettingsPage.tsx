@@ -9,6 +9,7 @@ import type { ToastKind } from "../../components/Toast";
 import type { AppAdapter } from "../../lib/tauri";
 import type { AppSettings, InputDeviceInfo, ModelDescriptor, ModelDownloadProgress, ModelStatus } from "../../lib/types";
 import { normalizeError } from "../../lib/errors";
+import { formatBytes as formatSize } from "../../lib/bytes";
 import { useI18n } from "../../lib/i18n";
 
 function ProviderMark({ provider }: { provider: string }) {
@@ -60,17 +61,8 @@ export function SettingsPage({
   const [pendingDelete, setPendingDelete] = useState<ModelDescriptor>();
   const [downloadProgress, setDownloadProgress] = useState<ModelDownloadProgress>();
 
-  const formatBytes = (bytes: number | null | undefined) => {
-    if (!bytes) return t("settings.models.notDownloadedBytes");
-    const units = ["B", "KB", "MB", "GB", "TB"];
-    let value = bytes;
-    let unit = 0;
-    while (value >= 1000 && unit < units.length - 1) {
-      value /= 1000;
-      unit += 1;
-    }
-    return `${value >= 10 || unit === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[unit]}`;
-  };
+  const formatBytes = (bytes: number | null | undefined) =>
+    formatSize(bytes, t("settings.models.notDownloadedBytes"));
 
   useEffect(() => setSettings(initialSettings), [initialSettings]);
   useEffect(() => {
@@ -202,93 +194,6 @@ export function SettingsPage({
       </header>
 
       <div className="settings-column">
-        <section className="settings-group">
-          <div className="group-heading">
-            <h2>{t("settings.recording.title")}</h2>
-          </div>
-          <label className="setting-row">
-            <span><strong>{t("settings.mic.label")}</strong><small>{deviceError || t("settings.mic.description")}</small></span>
-            <Select
-              label={t("settings.mic.label")}
-              disabled={Boolean(deviceError)}
-              value={settings.inputDevice ?? SYSTEM_DEFAULT_DEVICE}
-              onChange={(next) => void save({ inputDevice: next === SYSTEM_DEFAULT_DEVICE ? null : next })}
-              options={[
-                { value: SYSTEM_DEFAULT_DEVICE, label: t("settings.mic.default") },
-                ...devices.map((device) => ({ value: device.id, label: device.name })),
-              ]}
-            />
-          </label>
-          <div className="setting-row">
-            <span><strong>{t("settings.shortcut.label")}</strong><small>{t("settings.shortcut.description")}</small></span>
-            <ShortcutCapture value={settings.shortcut} onCapture={(combo) => void save({ shortcut: combo })} onActiveChange={(active) => { void adapter.setShortcutSuspended(active).catch(() => undefined); }} />
-          </div>
-        </section>
-
-        <section className="settings-group">
-          <div className="group-heading">
-            <h2>{t("settings.behavior.title")}</h2>
-          </div>
-          <label className="setting-row">
-            <span><strong>{t("settings.autoPaste.label")}</strong><small>{t("settings.autoPaste.description")}</small></span>
-            <input type="checkbox" checked={settings.autoPaste} aria-label={t("settings.autoPaste.label")} onChange={(event) => void save({ autoPaste: event.target.checked })} />
-          </label>
-          <label className="setting-row">
-            <span><strong>{t("settings.showOverlay.label")}</strong><small>{t("settings.showOverlay.description")}</small></span>
-            <input type="checkbox" checked={settings.showOverlay} aria-label={t("settings.showOverlay.label")} onChange={(event) => void save({ showOverlay: event.target.checked })} />
-          </label>
-          <label className="setting-row">
-            <span><strong>{t("settings.launchOnLogin.label")}</strong><small>{t("settings.launchOnLogin.description")}</small></span>
-            <input type="checkbox" checked={settings.launchOnLogin} aria-label={t("settings.launchOnLogin.label")} onChange={(event) => void save({ launchOnLogin: event.target.checked })} />
-          </label>
-          <label className="setting-row">
-            <span><strong>{t("settings.startMinimized.label")}</strong><small>{t("settings.startMinimized.description")}</small></span>
-            <input type="checkbox" checked={settings.startMinimized} aria-label={t("settings.startMinimized.label")} onChange={(event) => void save({ startMinimized: event.target.checked })} />
-          </label>
-          <label className="setting-row">
-            <span><strong>{t("settings.retention.label")}</strong><small>{t("settings.retention.description")}</small></span>
-            <Select
-              label={t("settings.retention.label")}
-              value={settings.retentionDays === null ? "forever" : String(settings.retentionDays)}
-              onChange={(next) => void save({ retentionDays: next === "forever" ? null : Number(next) as 1 | 7 | 30 })}
-              options={[
-                { value: "1", label: t("settings.retention.1") },
-                { value: "7", label: t("settings.retention.7") },
-                { value: "30", label: t("settings.retention.30") },
-                { value: "forever", label: t("settings.retention.forever") },
-              ]}
-            />
-          </label>
-          <label className="setting-row">
-            <span><strong>{t("settings.dictationLanguage.label")}</strong><small>{t("settings.dictationLanguage.description")}</small></span>
-            <Select
-              label={t("settings.dictationLanguage.label")}
-              value={settings.dictationLanguage}
-              onChange={(next) => void save({ dictationLanguage: next })}
-              options={[
-                { value: "auto", label: t("settings.dictationLanguage.auto") },
-                { value: "pl", label: t("settings.dictationLanguage.pl") },
-                { value: "en", label: t("settings.dictationLanguage.en") },
-              ]}
-            />
-          </label>
-          <label className="setting-row">
-            <span><strong>{t("settings.modelKeepAlive.label")}</strong><small>{t("settings.modelKeepAlive.description")}</small></span>
-            <Select
-              label={t("settings.modelKeepAlive.label")}
-              value={String(settings.modelKeepAliveSecs)}
-              onChange={(next) => void save({ modelKeepAliveSecs: Number(next) })}
-              options={[
-                { value: "0", label: t("settings.modelKeepAlive.always") },
-                { value: "60", label: t("settings.modelKeepAlive.min1") },
-                { value: "180", label: t("settings.modelKeepAlive.min3") },
-                { value: "300", label: t("settings.modelKeepAlive.min5") },
-                { value: "600", label: t("settings.modelKeepAlive.min10") },
-              ]}
-            />
-          </label>
-        </section>
-
         <section className="settings-group" aria-busy={!models.length}>
           <div className="group-heading group-heading--split">
             <div>
@@ -390,6 +295,93 @@ export function SettingsPage({
             ? <p className="model-card__message">{modelStatus?.message ?? selectedModel?.message}</p>
             : null}
         </section>
+        <section className="settings-group">
+          <div className="group-heading">
+            <h2>{t("settings.recording.title")}</h2>
+          </div>
+          <label className="setting-row">
+            <span><strong>{t("settings.mic.label")}</strong><small>{deviceError || t("settings.mic.description")}</small></span>
+            <Select
+              label={t("settings.mic.label")}
+              disabled={Boolean(deviceError)}
+              value={settings.inputDevice ?? SYSTEM_DEFAULT_DEVICE}
+              onChange={(next) => void save({ inputDevice: next === SYSTEM_DEFAULT_DEVICE ? null : next })}
+              options={[
+                { value: SYSTEM_DEFAULT_DEVICE, label: t("settings.mic.default") },
+                ...devices.map((device) => ({ value: device.id, label: device.name })),
+              ]}
+            />
+          </label>
+          <div className="setting-row">
+            <span><strong>{t("settings.shortcut.label")}</strong><small>{t("settings.shortcut.description")}</small></span>
+            <ShortcutCapture value={settings.shortcut} onCapture={(combo) => void save({ shortcut: combo })} onActiveChange={(active) => { void adapter.setShortcutSuspended(active).catch(() => undefined); }} />
+          </div>
+        </section>
+
+        <section className="settings-group">
+          <div className="group-heading">
+            <h2>{t("settings.behavior.title")}</h2>
+          </div>
+          <label className="setting-row">
+            <span><strong>{t("settings.autoPaste.label")}</strong><small>{t("settings.autoPaste.description")}</small></span>
+            <input type="checkbox" checked={settings.autoPaste} aria-label={t("settings.autoPaste.label")} onChange={(event) => void save({ autoPaste: event.target.checked })} />
+          </label>
+          <label className="setting-row">
+            <span><strong>{t("settings.showOverlay.label")}</strong><small>{t("settings.showOverlay.description")}</small></span>
+            <input type="checkbox" checked={settings.showOverlay} aria-label={t("settings.showOverlay.label")} onChange={(event) => void save({ showOverlay: event.target.checked })} />
+          </label>
+          <label className="setting-row">
+            <span><strong>{t("settings.launchOnLogin.label")}</strong><small>{t("settings.launchOnLogin.description")}</small></span>
+            <input type="checkbox" checked={settings.launchOnLogin} aria-label={t("settings.launchOnLogin.label")} onChange={(event) => void save({ launchOnLogin: event.target.checked })} />
+          </label>
+          <label className="setting-row">
+            <span><strong>{t("settings.startMinimized.label")}</strong><small>{t("settings.startMinimized.description")}</small></span>
+            <input type="checkbox" checked={settings.startMinimized} aria-label={t("settings.startMinimized.label")} onChange={(event) => void save({ startMinimized: event.target.checked })} />
+          </label>
+          <label className="setting-row">
+            <span><strong>{t("settings.retention.label")}</strong><small>{t("settings.retention.description")}</small></span>
+            <Select
+              label={t("settings.retention.label")}
+              value={settings.retentionDays === null ? "forever" : String(settings.retentionDays)}
+              onChange={(next) => void save({ retentionDays: next === "forever" ? null : Number(next) as 1 | 7 | 30 })}
+              options={[
+                { value: "1", label: t("settings.retention.1") },
+                { value: "7", label: t("settings.retention.7") },
+                { value: "30", label: t("settings.retention.30") },
+                { value: "forever", label: t("settings.retention.forever") },
+              ]}
+            />
+          </label>
+          <label className="setting-row">
+            <span><strong>{t("settings.dictationLanguage.label")}</strong><small>{t("settings.dictationLanguage.description")}</small></span>
+            <Select
+              label={t("settings.dictationLanguage.label")}
+              value={settings.dictationLanguage}
+              onChange={(next) => void save({ dictationLanguage: next })}
+              options={[
+                { value: "auto", label: t("settings.dictationLanguage.auto") },
+                { value: "pl", label: t("settings.dictationLanguage.pl") },
+                { value: "en", label: t("settings.dictationLanguage.en") },
+              ]}
+            />
+          </label>
+          <label className="setting-row">
+            <span><strong>{t("settings.modelKeepAlive.label")}</strong><small>{t("settings.modelKeepAlive.description")}</small></span>
+            <Select
+              label={t("settings.modelKeepAlive.label")}
+              value={String(settings.modelKeepAliveSecs)}
+              onChange={(next) => void save({ modelKeepAliveSecs: Number(next) })}
+              options={[
+                { value: "0", label: t("settings.modelKeepAlive.always") },
+                { value: "60", label: t("settings.modelKeepAlive.min1") },
+                { value: "180", label: t("settings.modelKeepAlive.min3") },
+                { value: "300", label: t("settings.modelKeepAlive.min5") },
+                { value: "600", label: t("settings.modelKeepAlive.min10") },
+              ]}
+            />
+          </label>
+        </section>
+
 
         <section className="settings-group">
           <div className="group-heading">
