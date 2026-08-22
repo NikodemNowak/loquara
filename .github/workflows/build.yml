@@ -10,12 +10,13 @@ on:
 # Loquara is a Windows application. The engine links sherpa-onnx with the
 # DirectML provider and the platform layer talks to the Win32 API directly,
 # so there is no Linux build to keep green — only one that would fail.
-env:
-  CMAKE_GENERATOR: Ninja
-
+# Pinned rather than `windows-latest`: sherpa-onnx asks the operating system
+# what it is by running `wmic`, which newer Windows images no longer ship, and
+# its CMake dies on the empty answer. The same image also carries a Visual
+# Studio that CMake 3.x knows how to drive.
 jobs:
   test:
-    runs-on: windows-latest
+    runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
 
@@ -37,19 +38,10 @@ jobs:
         with:
           workspaces: src-tauri
 
-      # sherpa-onnx builds with CMake and needs a careful pair of decisions.
-      # Its scripts do not survive CMake 4 — `string(REPLACE)` is handed an
-      # empty variable and configuring dies before a file compiles — so CMake
-      # stays on the 3.x line the library is written against. That line in
-      # turn knows nothing about the Visual Studio the runner ships, which
-      # moves without warning, so the build goes through Ninja instead and
-      # stops caring which Visual Studio is installed.
-      - name: Setup MSVC
-        uses: ilammy/msvc-dev-cmd@v1
-
-      - name: Setup Ninja
-        uses: seanmiddleditch/gha-setup-ninja@v6
-
+      # sherpa-onnx is built from source — the published binaries have no
+      # DirectML build, and the crate refuses to pair them with it. Its CMake
+      # scripts also do not survive CMake 4, where `string(REPLACE)` is handed
+      # an empty variable and configuring dies before a file compiles.
       - name: Setup CMake
         uses: jwlawson/actions-setup-cmake@v2
         with:
@@ -70,7 +62,7 @@ jobs:
           cargo test --release -- --ignored --skip transcribes
 
   build:
-    runs-on: windows-latest
+    runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
 
@@ -92,19 +84,10 @@ jobs:
         with:
           workspaces: src-tauri
 
-      # sherpa-onnx builds with CMake and needs a careful pair of decisions.
-      # Its scripts do not survive CMake 4 — `string(REPLACE)` is handed an
-      # empty variable and configuring dies before a file compiles — so CMake
-      # stays on the 3.x line the library is written against. That line in
-      # turn knows nothing about the Visual Studio the runner ships, which
-      # moves without warning, so the build goes through Ninja instead and
-      # stops caring which Visual Studio is installed.
-      - name: Setup MSVC
-        uses: ilammy/msvc-dev-cmd@v1
-
-      - name: Setup Ninja
-        uses: seanmiddleditch/gha-setup-ninja@v6
-
+      # sherpa-onnx is built from source — the published binaries have no
+      # DirectML build, and the crate refuses to pair them with it. Its CMake
+      # scripts also do not survive CMake 4, where `string(REPLACE)` is handed
+      # an empty variable and configuring dies before a file compiles.
       - name: Setup CMake
         uses: jwlawson/actions-setup-cmake@v2
         with:
