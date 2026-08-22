@@ -20,6 +20,27 @@ use sherpa_rs::transducer::{TransducerConfig, TransducerRecognizer};
 /// Every model Loquara ships is trained on 16 kHz mono audio.
 pub const TARGET_SAMPLE_RATE: u32 = 16_000;
 
+/// Which processor actually ran the last model load.
+///
+/// Reported to the interface so the user can see whether their graphics card
+/// is being used, without the app having to ask them what hardware they own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Accelerator {
+    /// A DirectX 12 graphics card: NVIDIA, AMD or Intel alike.
+    Gpu,
+    Cpu,
+}
+
+/// Providers to try, best first.
+///
+/// Loquara does not inspect the hardware. Detecting graphics cards means
+/// keeping a list of what counts, which is wrong on the day a new card ships;
+/// asking the provider to start and seeing whether it does is the same answer
+/// with none of the guesswork. DirectML covers every DirectX 12 card, so one
+/// attempt serves NVIDIA, AMD and Intel, and the CPU below it always works.
+const PROVIDERS: &[(&str, Accelerator)] = &[("directml", Accelerator::Gpu), ("cpu", Accelerator::Cpu)];
+
 /// Threads to give ONNX Runtime.
 ///
 /// Measured on this workload, four threads reach the same speed as eight and
@@ -49,6 +70,7 @@ pub enum EngineError {
 struct Loaded {
     key: String,
     recogniser: TransducerRecognizer,
+    accelerator: Accelerator,
 }
 
 /// Holds at most one loaded model.
@@ -88,6 +110,14 @@ impl Engine {
             .and_then(|guard| guard.as_ref().map(|loaded| loaded.key.clone()))
     }
 
+    /// What the loaded model is running on.
+    pub fn accelerator(&self) -> Option<Accelerator> {
+        self.loaded
+            .lock()
+            .ok()
+            .and_then(|guard| guard.as_ref().map(|loaded| loaded.accelerator))
+    }
+
     /// Releases the model, returning its memory to the system.
     pub fn unload(&self) {
         if let Ok(mut guard) = self.loaded.lock() {
@@ -115,24 +145,33 @@ impl Engine {
         // sit in memory at the same time.
         *guard = None;
 
-        let config = TransducerConfig {
-            encoder: files[0].to_string_lossy().into_owned(),
-            decoder: files[1].to_string_lossy().into_owned(),
-            joiner: files[2].to_string_lossy().into_owned(),
-            tokens: files[3].to_string_lossy().into_owned(),
-            model_type: "nemo_transducer".into(),
-            num_threads: decode_threads(),
-            decoding_method: "greedy_search".into(),
-            debug: false,
-            ..Default::default()
-        };
-        let recogniser =
-            TransducerRecognizer::new(config).map_err(|error| EngineError::Load(error.to_string()))?;
-        *guard = Some(Loaded {
-            key: key.to_owned(),
-            recogniser,
-        });
-        Ok(())
+        let mut last_error = String::from("no provider was tried");
+        for (provider, accelerator) in PROVIDERS {
+            let config = TransducerConfig {
+                encoder: files[0].to_string_lossy().into_owned(),
+                decoder: files[1].to_string_lossy().into_owned(),
+                joiner: files[2].to_string_lossy().into_owned(),
+                tokens: files[3].to_string_lossy().into_owned(),
+                model_type: "nemo_transducer".into(),
+                num_threads: decode_threads(),
+                decoding_method: "greedy_search".into(),
+                provider: Some((*provider).to_owned()),
+                debug: false,
+                ..Default::default()
+            };
+            match TransducerRecognizer::new(config) {
+                Ok(recogniser) => {
+                    *guard = Some(Loaded {
+                        key: key.to_owned(),
+                        recogniser,
+                        accelerator: *accelerator,
+                    });
+                    return Ok(());
+                }
+                Err(error) => last_error = error.to_string(),
+            }
+        }
+        Err(EngineError::Load(last_error))
     }
 
     /// Transcribes a recording, loading the model first if necessary.
@@ -272,6 +311,19 @@ mod tests {
     }
 
     #[test]
+    fn the_graphics_card_is_tried_before_the_processor() {
+        assert_eq!(PROVIDERS.first().map(|(_, kind)| *kind), Some(Accelerator::Gpu));
+    }
+
+    #[test]
+    fn the_processor_is_always_the_last_resort() {
+        // Whatever the machine has, one entry in this list cannot fail to
+        // start, or a user without a supported card would be left with an app
+        // that refuses to load anything.
+        assert_eq!(PROVIDERS.last().map(|(name, kind)| (*name, *kind)), Some(("cpu", Accelerator::Cpu)));
+    }
+
+    #[test]
     fn decode_threads_never_exceed_the_measured_sweet_spot() {
         // Sixteen threads measured slower than four on this workload.
         assert!((1..=4).contains(&decode_threads()));
@@ -319,6 +371,7 @@ mod tests {
         let second = started.elapsed();
 
         println!("first: {first:?}  second: {second:?}");
+        println!("accelerator: {:?}", engine.accelerator());
         println!("text: {text}");
         assert!(!text.is_empty());
         assert_eq!(text, again);

@@ -16,85 +16,6 @@ use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent}
 use tauri::{Emitter, Manager, WindowEvent};
 use tauri_plugin_global_shortcut::ShortcutState;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum WorkerResolutionMode {
-    Debug,
-    Release,
-}
-
-fn worker_path_candidates(
-    current: &Path,
-    resources: &Path,
-    mode: WorkerResolutionMode,
-) -> Vec<PathBuf> {
-    let mut candidates = Vec::new();
-    if mode == WorkerResolutionMode::Debug {
-        candidates.extend([
-            current.join("engine").join("parakeet_worker.py"),
-            current
-                .parent()
-                .unwrap_or(current)
-                .join("engine")
-                .join("parakeet_worker.py"),
-        ]);
-    }
-    candidates.push(resources.join("engine").join("parakeet_worker.py"));
-    candidates.push(
-        resources
-            .join("_up_")
-            .join("engine")
-            .join("parakeet_worker.py"),
-    );
-    candidates
-}
-
-fn select_worker_path(
-    candidates: &[PathBuf],
-    trusted_root: Option<&Path>,
-    mut canonicalize: impl FnMut(&Path) -> std::io::Result<PathBuf>,
-    mut is_file: impl FnMut(&Path) -> bool,
-) -> Option<PathBuf> {
-    let trusted_root = trusted_root.and_then(|path| canonicalize(path).ok());
-    candidates.iter().find_map(|candidate| {
-        let canonical = canonicalize(candidate).ok()?;
-        if trusted_root
-            .as_ref()
-            .is_some_and(|root| !canonical.starts_with(root))
-            || !is_file(&canonical)
-        {
-            return None;
-        }
-        Some(canonical)
-    })
-}
-
-fn resolve_worker_path(
-    current: &Path,
-    resources: &Path,
-    mode: WorkerResolutionMode,
-) -> Result<PathBuf, std::io::Error> {
-    let candidates = worker_path_candidates(current, resources, mode);
-    let trusted_root = (mode == WorkerResolutionMode::Release).then_some(resources);
-    select_worker_path(
-        &candidates,
-        trusted_root,
-        |path| std::fs::canonicalize(path),
-        |path| path.is_file(),
-    )
-    .ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            format!(
-                "nie znaleziono workera Parakeet; sprawdzono: {}",
-                candidates
-                    .iter()
-                    .map(|path| path.display().to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
-        )
-    })
-}
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -103,25 +24,18 @@ struct HealthStatus {
     tray_initialized: bool,
     identifier: String,
     version: String,
-    resource_worker_exists: bool,
 }
 
 fn health_path(data_dir: &Path) -> PathBuf {
     data_dir.join("health.json")
 }
 
-fn health_payload(
-    pid: u32,
-    identifier: &str,
-    version: &str,
-    resource_worker_exists: bool,
-) -> HealthStatus {
+fn health_payload(pid: u32, identifier: &str, version: &str) -> HealthStatus {
     HealthStatus {
         pid,
         tray_initialized: true,
         identifier: identifier.to_owned(),
         version: version.to_owned(),
-        resource_worker_exists,
     }
 }
 
@@ -180,15 +94,6 @@ pub fn run() {
         )
         .setup(|app| {
             let current_dir = std::env::current_dir()?;
-            let resource_dir = app.path().resource_dir()?;
-            let resolution_mode = if cfg!(debug_assertions) {
-                WorkerResolutionMode::Debug
-            } else {
-                WorkerResolutionMode::Release
-            };
-            let worker_path =
-                resolve_worker_path(&current_dir, &resource_dir, resolution_mode)?;
-            let resource_worker_exists = worker_path.is_file();
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
             let health_marker = health_path(&data_dir);
@@ -286,7 +191,6 @@ pub fn run() {
                 std::process::id(),
                 &app.config().identifier,
                 &app.package_info().version.to_string(),
-                resource_worker_exists,
             );
             write_health_atomically(&health_marker, &health)?;
             Ok(())
@@ -436,139 +340,3 @@ pub fn rebuild_tray_menu(app: &tauri::AppHandle, state: &AppState, locale: &str)
         .expect("failed to update tray menu");
 }
 
-#[cfg(test)]
-mod packaging_tests {
-    use super::*;
-
-    #[test]
-    fn worker_candidates_prefer_dev_repo_then_bundled_resource_layouts() {
-        let current = PathBuf::from(r"C:\kod\mów");
-        let resources = PathBuf::from(r"C:\Program Files\Mów");
-
-        assert_eq!(
-            worker_path_candidates(
-                &current,
-                &resources,
-                WorkerResolutionMode::Debug,
-            ),
-            vec![
-                current.join("engine").join("parakeet_worker.py"),
-                current
-                    .parent()
-                    .unwrap()
-                    .join("engine")
-                    .join("parakeet_worker.py"),
-                resources.join("engine").join("parakeet_worker.py"),
-                resources
-                    .join("_up_")
-                    .join("engine")
-                    .join("parakeet_worker.py"),
-            ]
-        );
-    }
-
-    #[test]
-    fn worker_selection_handles_unicode_and_uses_first_existing_candidate() {
-        let candidates = vec![
-            PathBuf::from(r"C:\źródła\Mów\engine\parakeet_worker.py"),
-            PathBuf::from(r"C:\Program Files\Mów\_up_\engine\parakeet_worker.py"),
-        ];
-
-        let selected = select_worker_path(
-            &candidates,
-            None,
-            |path| Ok(path.to_owned()),
-            |path| path == candidates[1].as_path(),
-        );
-
-        assert_eq!(selected, Some(candidates[1].clone()));
-    }
-
-    #[test]
-    fn release_worker_candidates_ignore_malicious_current_directory() {
-        let current = PathBuf::from(r"C:\attacker\engine");
-        let resources = PathBuf::from(r"C:\Program Files\Mów");
-
-        let candidates = worker_path_candidates(
-            &current,
-            &resources,
-            WorkerResolutionMode::Release,
-        );
-
-        assert_eq!(
-            candidates,
-            vec![
-                resources.join("engine").join("parakeet_worker.py"),
-                resources
-                    .join("_up_")
-                    .join("engine")
-                    .join("parakeet_worker.py"),
-            ]
-        );
-        assert!(candidates.iter().all(|path| !path.starts_with(&current)));
-    }
-
-    #[test]
-    fn release_worker_rejects_canonical_path_outside_resource_root() {
-        let resources = PathBuf::from(r"C:\Program Files\Mów");
-        let candidate = resources.join("engine").join("parakeet_worker.py");
-        let candidates = vec![candidate.clone()];
-
-        let selected = select_worker_path(
-            &candidates,
-            Some(&resources),
-            |path| {
-                if path == resources {
-                    Ok(resources.clone())
-                } else {
-                    Ok(PathBuf::from(r"C:\attacker\parakeet_worker.py"))
-                }
-            },
-            |_| true,
-        );
-
-        assert_eq!(selected, None);
-    }
-
-    #[test]
-    fn health_contract_uses_app_data_and_explicit_tray_evidence() {
-        let data_dir = PathBuf::from(r"C:\Users\Ada\AppData\Roaming\pl.mow.desktop");
-
-        assert_eq!(health_path(&data_dir), data_dir.join("health.json"));
-        assert_eq!(
-            health_payload(42, "pl.mow.desktop", "0.1.0", true),
-            HealthStatus {
-                pid: 42,
-                tray_initialized: true,
-                identifier: "pl.mow.desktop".into(),
-                version: "0.1.0".into(),
-                resource_worker_exists: true,
-            }
-        );
-    }
-
-    #[test]
-    fn resolved_language_maps_choice_with_stubbed_system_language() {
-        let system_en = || "en";
-        let system_pl = || "pl";
-
-        let pl = AppSettings {
-            language: LanguageChoice::Pl,
-            ..Default::default()
-        };
-        assert_eq!(resolve_language_with(&pl, system_en), "pl");
-
-        let en = AppSettings {
-            language: LanguageChoice::En,
-            ..Default::default()
-        };
-        assert_eq!(resolve_language_with(&en, system_pl), "en");
-
-        let system = AppSettings {
-            language: LanguageChoice::System,
-            ..Default::default()
-        };
-        assert_eq!(resolve_language_with(&system, system_pl), "pl");
-        assert_eq!(resolve_language_with(&system, system_en), "en");
-    }
-}

@@ -13,23 +13,25 @@
     "security": {
       "assetProtocol": {
         "enable": true,
-        "scope": ["$APPDATA/recordings/**"]
+        "scope": [
+          "$APPDATA/recordings/**"
+        ]
       }
     },
     "windows": [
       {
         "label": "main",
         "title": "Loquara",
-         "width": 1080,
-         "height": 720,
+        "width": 1080,
+        "height": 720,
         "decorations": false
       },
       {
         "label": "overlay",
         "title": "Loquara — dyktowanie",
         "url": "index.html?window=overlay",
-         "width": 80,
-         "height": 42,
+        "width": 80,
+        "height": 42,
         "decorations": false,
         "resizable": false,
         "alwaysOnTop": true,
@@ -54,6 +56,9 @@
       "nsis": {
         "installMode": "currentUser"
       }
+    },
+    "resources": {
+      "lib/*.dll": "./"
     }
   }
 }

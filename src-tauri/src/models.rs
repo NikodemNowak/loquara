@@ -57,7 +57,7 @@ pub const CATALOGUE: &[ModelSpec] = &[ModelSpec {
     languages: "25 języków",
     repo: "csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8",
     files: &[
-        ModelFile { remote: "encoder.int8.onnx", local: "encoder.int8.onnx", bytes: 561_880_064 },
+        ModelFile { remote: "encoder.int8.onnx", local: "encoder.int8.onnx", bytes: 652_184_281 },
         ModelFile { remote: "decoder.int8.onnx", local: "decoder.int8.onnx", bytes: 11_845_275 },
         ModelFile { remote: "joiner.int8.onnx", local: "joiner.int8.onnx", bytes: 6_355_277 },
         ModelFile { remote: "tokens.txt", local: "tokens.txt", bytes: 93_939 },
@@ -70,6 +70,15 @@ pub fn spec(key: &str) -> Option<&'static ModelSpec> {
 
 pub fn default_model() -> &'static str {
     CATALOGUE[0].key
+}
+
+/// Maps a stored model key onto one that still exists.
+///
+/// Settings outlive the catalogue: an installation that was configured for a
+/// model Loquara no longer offers would otherwise sit there warming a model
+/// that cannot be found, reporting nothing and transcribing nothing.
+pub fn resolve(key: &str) -> &'static str {
+    spec(key).map(|model| model.key).unwrap_or_else(default_model)
 }
 
 /// Progress of a download in flight.
@@ -190,6 +199,27 @@ pub fn model_dir(root: &Path, key: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_model_that_no_longer_exists_falls_back_to_the_default() {
+        // Upgrades carry old settings forward; "cohere" was offered by an
+        // earlier version and would otherwise leave the app with nothing.
+        assert_eq!(resolve("cohere"), default_model());
+        assert_eq!(resolve(""), default_model());
+    }
+
+    #[test]
+    fn a_known_model_is_left_alone() {
+        assert_eq!(resolve("parakeet"), "parakeet");
+    }
+
+    #[test]
+    fn the_declared_size_matches_what_the_host_serves() {
+        // Taken from the published Content-Length; a number copied from a
+        // half-finished download would make progress run past 100%.
+        let model = spec("parakeet").unwrap();
+        assert_eq!(model.total_bytes(), 670_478_772);
+    }
 
     #[test]
     fn the_default_model_is_in_the_catalogue() {

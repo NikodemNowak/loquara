@@ -1038,11 +1038,16 @@ impl AppState {
         model_home: impl Into<PathBuf>,
     ) -> Self {
         let model_home = model_home.into();
-        let settings = storage
+        let mut settings = storage
             .get_setting::<AppSettings>("app")
             .ok()
             .flatten()
             .unwrap_or_default();
+        let resolved = crate::models::resolve(&settings.model);
+        if resolved != settings.model {
+            settings.model = resolved.to_owned();
+            let _ = storage.set_setting("app", &settings);
+        }
         Self {
             machine: Arc::new(Mutex::new(CoordinatorMachine::default())),
             audio: Arc::new(audio),
