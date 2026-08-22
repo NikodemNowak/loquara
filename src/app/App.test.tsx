@@ -12,6 +12,22 @@ function renderApp(adapter = adapterStub()) {
 }
 
 describe("główna nawigacja", () => {
+  test("nazwa i gotowość modelu przychodzą ze snapshotu, nie z osobnego zapytania", async () => {
+    // Osobne zapytanie potrafi nie dojść — np. gdy okno zdąży o nie poprosić,
+    // zanim backend jest gotowy. Wtedy panel twierdził, że modelu nie ma,
+    // choć model był na dysku i dyktowanie działało.
+    const adapter = adapterStub({
+      getModelStatus: async () => { throw new Error("zapytanie nie doszło"); },
+      listModels: async () => { throw new Error("zapytanie nie doszło"); },
+    });
+
+    renderApp(adapter);
+
+    expect(await screen.findByText("Parakeet TDT 0.6B v3")).toBeVisible();
+    expect(await screen.findByRole("heading", { name: "Gotowy" })).toBeVisible();
+    expect(screen.queryByRole("heading", { name: "Brak modelu" })).toBeNull();
+  });
+
   test("przechodzi klawiaturą między wszystkimi sekcjami", async () => {
     const user = userEvent.setup();
     renderApp();

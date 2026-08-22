@@ -72,9 +72,19 @@ export interface PlatformError {
   message?: string;
 }
 
+/** Name, maker and readiness of the selected model, as the backend sees it. */
+export interface ModelSummary {
+  key: string;
+  display: string;
+  provider: string;
+  installed: boolean;
+}
+
 export interface AppSnapshot {
   dictation: DictationState;
   settings: AppSettings;
+  /** Absent only until the first snapshot arrives, which reads as "checking". */
+  model?: ModelSummary;
   modelLoading: boolean;
   recordingStartedAt?: number | null;
 }

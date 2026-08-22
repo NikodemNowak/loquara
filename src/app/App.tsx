@@ -9,7 +9,6 @@ import { DictatePage } from "../features/dictate/DictatePage";
 import { HistoryPage } from "../features/history/HistoryPage";
 import { SettingsPage } from "../features/settings/SettingsPage";
 import { getAdapter, type AppAdapter } from "../lib/tauri";
-import type { ModelStatus } from "../lib/types";
 import { useI18n, type TranslationKey } from "../lib/i18n";
 import { useAppModel } from "./useAppModel";
 
@@ -42,36 +41,17 @@ export function App({ adapter: adapterProp }: { adapter?: AppAdapter }) {
     window.setTimeout(() => setToasts((items) => items.filter((item) => item.id !== id)), 5000);
   }, []);
   const { snapshot, setSnapshot, history, refreshHistory, loading } = useAppModel(adapter, toast);
-  /** Name and readiness of the selected model, from one source so the two
-   *  can never disagree in the same panel. */
-  const [model, setModel] = useState<{ display: string; state: ModelStatus["state"] | "checking" }>({
-    display: "",
-    state: "checking",
-  });
-  /** The provider glyph, which is decoration: its absence must not blank the name. */
-  const [provider, setProvider] = useState("");
-  const [reload, setReload] = useState(0);
-  useEffect(() => {
-    let active = true;
-    // Readiness is a fact about the disk, not something that can be inferred
-    // from the app being idle: claiming "ready" with no model installed is
-    // exactly the state a first run is in.
-    void adapter.getModelStatus()
-      .then((status) => {
-        if (active) setModel({ display: status.model, state: status.state });
-      })
-      .catch(() => {
-        if (active) setModel({ display: snapshot.settings.model, state: "error" });
-      });
-    void adapter.listModels()
-      .then((models) => {
-        const current = models.find((item) => item.key === snapshot.settings.model);
-        if (active && current) setProvider(current.provider);
-      })
-      .catch(() => {});
-    return () => { active = false; };
-  }, [adapter, snapshot.settings.model, reload]);
-  const installed = model.state;
+  // Name, maker and readiness all ride on the snapshot, which is broadcast on
+  // every state change. Asking for them separately meant a query that missed
+  // once — before the window was ready — left the panel insisting there was
+  // no model while one was loading.
+  const model = snapshot.model;
+  const installed: "ready" | "missing" | "checking" = model
+    ? model.installed
+      ? "ready"
+      : "missing"
+    : "checking";
+
 
   const engine: { state: string; label: TranslationKey } =
     snapshot.dictation.status === "recording" || snapshot.dictation.status === "cancelling"
@@ -82,9 +62,7 @@ export function App({ adapter: adapterProp }: { adapter?: AppAdapter }) {
           ? { state: "checking", label: "engine.checking" }
           : installed === "ready"
             ? { state: "ready", label: "engine.ready" }
-            : installed === "error"
-              ? { state: "error", label: "engine.error" }
-              : { state: "missing", label: "engine.missing" };
+            : { state: "missing", label: "engine.missing" };
   useEffect(() => {
     // Loquara is dark-only; tell the OS so the window frame and native
     // scrollbars match rather than flashing a light chrome on launch.
@@ -119,7 +97,7 @@ export function App({ adapter: adapterProp }: { adapter?: AppAdapter }) {
   } else if (page === "history") {
     content = <HistoryPage adapter={adapter} recordings={history} onRefresh={refreshHistory} onToast={toast} />;
   } else {
-    content = <SettingsPage adapter={adapter} initialSettings={snapshot.settings} onSettingsChange={(settings) => setSnapshot((current) => ({ ...current, settings }))} onModelsChanged={() => setReload((value) => value + 1)} onToast={toast} />;
+    content = <SettingsPage adapter={adapter} initialSettings={snapshot.settings} onSettingsChange={(settings) => setSnapshot((current) => ({ ...current, settings }))} onModelsChanged={() => { void adapter.getAppSnapshot().then(setSnapshot).catch(() => {}); }} onToast={toast} />;
   }
 
   return (
@@ -156,14 +134,14 @@ export function App({ adapter: adapterProp }: { adapter?: AppAdapter }) {
           <button
             className={`engine-chip engine-chip--${engine.state}`}
             onClick={() => setPage("settings")}
-            aria-label={t("engine.openSettings", { model: model.display })}
-            title={t("engine.openSettings", { model: model.display })}
+            aria-label={t("engine.openSettings", { model: model?.display ?? "" })}
+            title={t("engine.openSettings", { model: model?.display ?? "" })}
           >
             <span className="engine-chip__mark">
-              {provider ? <BrandLogo provider={provider} /> : null}
+              {model?.provider ? <BrandLogo provider={model.provider} /> : null}
             </span>
             <span className="engine-chip__copy">
-              <strong>{model.display}</strong>
+              <strong>{model?.display ?? t("engine.checking")}</strong>
               <span className="engine-chip__state"><i aria-hidden="true" />{t(engine.label)}</span>
             </span>
           </button>

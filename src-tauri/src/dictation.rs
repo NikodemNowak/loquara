@@ -366,10 +366,27 @@ pub fn cleanup_retention(state: &AppState) -> Result<usize, String> {
 pub struct AppSnapshot {
     pub dictation: DictationState,
     pub settings: AppSettings,
+    /// Name, maker and readiness of the selected model.
+    ///
+    /// Carried by the snapshot rather than fetched on its own because the
+    /// snapshot is broadcast on every state change: a one-off query that
+    /// misses — because it ran before the window was ready, say — leaves the
+    /// interface claiming there is no model while one is loading.
+    pub model: ModelSummary,
     pub model_loading: bool,
     /// Epoch ms when the active recording started, so the UI can keep an
     /// accurate elapsed-time counter even across page remounts.
     pub recording_started_at: Option<i64>,
+}
+
+/// What the interface needs to say about the selected model.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelSummary {
+    pub key: String,
+    pub display: String,
+    pub provider: String,
+    pub installed: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -736,6 +753,21 @@ impl AppState {
     }
 
 
+    fn model_summary(&self) -> ModelSummary {
+        let key = self
+            .settings
+            .read()
+            .map(|settings| settings.model.clone())
+            .unwrap_or_else(|_| default_model());
+        let spec = crate::models::spec(&key);
+        ModelSummary {
+            display: spec.map(|spec| spec.display.to_owned()).unwrap_or_else(|| key.clone()),
+            provider: spec.map(|spec| spec.provider.to_owned()).unwrap_or_default(),
+            installed: self.engine.is_installed(&key),
+            key,
+        }
+    }
+
     fn snapshot(&self) -> Result<AppSnapshot, String> {
         let dictation = self
             .machine
@@ -759,6 +791,7 @@ impl AppState {
                 .read()
                 .map_err(|_| "settings lock poisoned")?
                 .clone(),
+            model: self.model_summary(),
             model_loading: self.model_warm.is_loading(),
             recording_started_at,
         })

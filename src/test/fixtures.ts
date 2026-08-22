@@ -62,6 +62,7 @@ export const settings: AppSettings = {
 export const snapshot: AppSnapshot = {
   dictation: { status: "idle" },
   settings,
+  model: { key: "parakeet", display: "Parakeet TDT 0.6B v3", provider: "NVIDIA", installed: true },
   modelLoading: false,
 };
 export function adapterStub(overrides: Partial<AppAdapter> = {}): AppAdapter {
