@@ -108,7 +108,7 @@ describe("nakładka dyktowania", () => {
     vi.useRealTimers();
 
     expect(await screen.findByRole("alert")).toHaveTextContent("Mikrofon nie odpowiada");
-    expect(screen.getByText("Przerwać?")).toBeVisible();
+    expect(screen.getByText("Przerwać dyktowanie?")).toBeVisible();
   });
 
   test("pytanie o przerwanie pokazuje obie odpowiedzi z ich klawiszami", async () => {
@@ -116,9 +116,10 @@ describe("nakładka dyktowania", () => {
     // pytanie otworzył, musi umieć je zamknąć.
     overlay({ status: "cancelling", recordingId: "a", audioPath: "a.wav" });
 
-    expect(await screen.findByText("Przerwać?")).toBeVisible();
-    expect(screen.getByText("przerwij")).toBeVisible();
-    expect(screen.getByText("wróć")).toBeVisible();
+    expect(await screen.findByText("Przerwać dyktowanie?")).toBeVisible();
+    expect(screen.getByText("wyrzuć nagranie")).toBeVisible();
+    expect(screen.getByText("nagrywaj dalej")).toBeVisible();
+    expect(screen.getByText("Enter")).toBeVisible();
     expect(screen.getByText("Esc")).toBeVisible();
   });
 

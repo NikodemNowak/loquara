@@ -360,13 +360,19 @@ pub fn show_main<R: Runtime>(app: &AppHandle<R>) -> Result<(), PlatformError> {
     let window = app
         .get_webview_window("main")
         .ok_or_else(|| PlatformError::Other("main window is missing".into()))?;
-    // Hidden and minimised are different states, and a window can be in both:
-    // showing a minimised window leaves it in the taskbar.
+    // Showing the window is the part that must work; the rest is manners.
+    // Windows refuses to hand focus to a process that is not the foreground
+    // one, which is ordinary rather than exceptional — and chaining it made
+    // that refusal fail the whole call. At startup that left the window
+    // hidden and the app running with nothing on screen.
     window
         .show()
-        .and_then(|()| window.unminimize())
-        .and_then(|()| window.set_focus())
-        .map_err(|error| PlatformError::Other(error.to_string()))
+        .map_err(|error| PlatformError::Other(error.to_string()))?;
+    // Hidden and minimised are different states, and a window can be in both:
+    // showing a minimised window leaves it in the taskbar.
+    let _ = window.unminimize();
+    let _ = window.set_focus();
+    Ok(())
 }
 
 pub fn hide_overlay<R: Runtime>(app: &AppHandle<R>) {

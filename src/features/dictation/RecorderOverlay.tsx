@@ -12,12 +12,14 @@ const isTauri = "__TAURI_INTERNALS__" in window;
 /* Pill geometry. Mirrored in tauri.conf.json, which sets the initial size.
  * The window is not resizable by the user; only this code changes its size,
  * which needs core:window:allow-set-size in the capability file. */
-const PILL_WIDTH = 80;
+const PILL_WIDTH = 68;
 const PILL_HEIGHT = 42;
 /** Width for the states that carry words rather than a meter. */
 const WORD_WIDTH = 168;
-/** The cancel question needs room for the question and both answers. */
-const CONFIRM_WIDTH = 262;
+/** The question is a card above the pill, so the window holds both plus the
+ *  transparent gap between them. */
+const ASK_WIDTH = 164;
+const ASK_HEIGHT = 140;
 
 /**
  * The window size each state needs.
@@ -31,7 +33,7 @@ function sizeFor(status: string | undefined, initError: boolean) {
   if (initError) return { width: WORD_WIDTH, height: PILL_HEIGHT };
   switch (status) {
     case "cancelling":
-      return { width: CONFIRM_WIDTH, height: PILL_HEIGHT };
+      return { width: ASK_WIDTH, height: ASK_HEIGHT };
     case "pasting":
     case "failed":
       return { width: WORD_WIDTH, height: PILL_HEIGHT };
@@ -120,9 +122,12 @@ export function RecorderOverlay({ adapter }: { adapter: AppAdapter }) {
   const cancelling = status === "cancelling";
 
   // Withdrawing the question is the safe default, so it is the one thing the
-  // pill still decides for itself.
+  // pill still decides for itself. The deadline is shared with the meter,
+  // which spends its bars against it.
+  const [askDeadline, setAskDeadline] = useState(0);
   useEffect(() => {
     if (!cancelling) return;
+    setAskDeadline(Date.now() + CONFIRM_TIMEOUT_MS);
     const timer = window.setTimeout(() => {
       void action(() => adapter.requestCancel());
     }, CONFIRM_TIMEOUT_MS);
@@ -157,9 +162,14 @@ export function RecorderOverlay({ adapter }: { adapter: AppAdapter }) {
         // call anyway, and moving on that promise would shift the pill for a
         // change that never happened.
         const after = await overlay.innerSize();
-        const difference = after.height - before.height;
-        if (difference !== 0) {
-          position.y -= difference;
+        const taller = after.height - before.height;
+        const wider = after.width - before.width;
+        if (taller !== 0 || wider !== 0) {
+          // The pill sits at the bottom centre of the window, so growing the
+          // window has to move it up and left by half — otherwise the pill
+          // slides sideways the moment the question appears.
+          position.y -= taller;
+          position.x -= Math.round(wider / 2);
           await overlay.setPosition(position);
         }
       } catch {
@@ -232,11 +242,23 @@ export function RecorderOverlay({ adapter }: { adapter: AppAdapter }) {
   const state = snapshot?.dictation;
   return (
     <main
-      className={`recorder-overlay recorder-overlay--${initError ? "init-error" : state?.status ?? "initializing"}`}
+      className={`recorder-overlay recorder-overlay--${initError ? "init-error" : state?.status ?? "initializing"}${cancelling ? " recorder-overlay--asking" : ""}`}
       aria-live="polite"
       data-tauri-drag-region
       onMouseDown={startDrag}
     >
+      {cancelling && (
+        <div className="ask-card" role="alertdialog" aria-label={t("overlay.cancelling.title")}>
+          <strong className="ask-card__question">{t("overlay.cancelling.title")}</strong>
+          <dl className="ask-card__answers">
+            <dt><kbd>Enter</kbd></dt>
+            <dd className="ask-card__discard">{t("overlay.cancelling.confirm")}</dd>
+            <dt><kbd>Esc</kbd></dt>
+            <dd>{t("overlay.cancelling.dismiss")}</dd>
+          </dl>
+        </div>
+      )}
+      <div className="overlay-pill">
       {initError ? (
         <div className="overlay-main" title={initError}>
           <div className="overlay-copy overlay-copy--alert" role="alert">
@@ -256,20 +278,23 @@ export function RecorderOverlay({ adapter }: { adapter: AppAdapter }) {
           <span className="spinner" aria-hidden="true" />
         </div>
       ) : cancelling ? (
-        <div className="overlay-main overlay-main--confirm" role="alertdialog" aria-label={t("overlay.cancelling.title")}>
-          <strong>{t("overlay.cancelling.title")}</strong>
-          <span className="overlay-answers">
-            <span className="overlay-answer overlay-answer--discard">
-              <kbd>Enter</kbd>{t("overlay.cancelling.confirm")}
-            </span>
-            <span className="overlay-answer">
-              <kbd>Esc</kbd>{t("overlay.cancelling.dismiss")}
-            </span>
-          </span>
+        <div className="overlay-main">
+          <LevelMeter
+            level={level}
+            mode="countdown"
+            deadline={askDeadline}
+            span={CONFIRM_TIMEOUT_MS}
+            height={WAVE_HEIGHT}
+            barWidth={3}
+            gap={2}
+            className="overlay-wave"
+            label={t("overlay.cancelling.countdown")}
+            colorToken="--pill-accent"
+          />
         </div>
       ) : state.status === "recording" ? (
         <div className="overlay-main">
-          <LevelMeter level={cancelling ? 0 : level} height={WAVE_HEIGHT} barWidth={3} gap={2} className="overlay-wave" label={t("overlay.micLevel")} colorToken="--pill-accent" />
+          <LevelMeter level={level} height={WAVE_HEIGHT} barWidth={3} gap={2} className="overlay-wave" label={t("overlay.micLevel")} colorToken="--pill-accent" />
         </div>
       ) : state.status === "processing" ? (
         <div className="overlay-main">
@@ -298,6 +323,7 @@ export function RecorderOverlay({ adapter }: { adapter: AppAdapter }) {
 
 
       {actionError && <span className="overlay-note overlay-note--error" role="alert">{actionError}</span>}
+      </div>
     </main>
   );
 }

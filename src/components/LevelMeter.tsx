@@ -41,8 +41,14 @@ const BARS = Array.from({ length: 64 }, (_, index) => {
 export interface LevelMeterProps {
   /** Current microphone level, `0..=1`. */
   level: number;
-  /** `thinking` shows activity with no microphone signal behind it. */
-  mode?: "live" | "thinking";
+  /** `thinking` shows activity with no microphone signal behind it.
+   *  `countdown` keeps metering but puts the bars out from the right as a
+   *  deadline approaches. */
+  mode?: "live" | "thinking" | "countdown";
+  /** `countdown` only: epoch ms the last bar goes out at. */
+  deadline?: number;
+  /** `countdown` only: how long the whole row stands for, in ms. */
+  span?: number;
   height: number;
   barWidth?: number;
   gap?: number;
@@ -65,6 +71,8 @@ export interface LevelMeterProps {
 export function LevelMeter({
   level,
   mode = "live",
+  deadline = 0,
+  span = 1,
   height,
   barWidth = 3,
   gap = 3,
@@ -75,6 +83,12 @@ export function LevelMeter({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const levelRef = useRef(level);
   levelRef.current = level;
+  // Read inside the animation loop rather than through the effect, so time
+  // passing never costs a React render.
+  const deadlineRef = useRef(deadline);
+  deadlineRef.current = deadline;
+  const spanRef = useRef(span);
+  spanRef.current = span;
   // The window is resizable, so bar layout has to be recomputed when the
   // canvas box changes or the drawing ends up stretched.
   const [width, setWidth] = useState(0);
@@ -115,6 +129,15 @@ export function LevelMeter({
       context.clearRect(0, 0, width, height);
       context.fillStyle = cssColor(colorToken, "#4c8dff");
 
+      // How many bars are still alight. The meter keeps working underneath —
+      // the microphone is still open — so only the extinguished tail is still.
+      const remaining = spanRef.current > 0
+        ? (deadlineRef.current - Date.now()) / spanRef.current
+        : 0;
+      const lit = mode === "countdown"
+        ? Math.max(0, Math.min(count, Math.ceil(remaining * count)))
+        : count;
+
       for (let index = 0; index < count; index += 1) {
         const { phase, speed } = BARS[index];
         let target: number;
@@ -134,6 +157,10 @@ export function LevelMeter({
           const breathing = IDLE_LEVEL * (0.45 + 0.55 * Math.sin(time * 1.6 + phase));
           target = Math.max(breathing, energy * shape * shimmer);
         }
+        const spent = index >= lit;
+        if (spent) {
+          target = 0;
+        }
         // Per-bar smoothing on top of the shared envelope keeps neighbours
         // from snapping to the same value on a loud syllable.
         heights[index] += (target - heights[index]) * 0.35;
@@ -141,7 +168,7 @@ export function LevelMeter({
         const barHeight = Math.max(barWidth, Math.min(1, heights[index]) * height);
         const x = offset + index * step;
         const y = (height - barHeight) / 2;
-        context.globalAlpha = 0.5 + 0.5 * (barHeight / height);
+        context.globalAlpha = spent ? 0.18 : 0.5 + 0.5 * (barHeight / height);
         context.beginPath();
         context.roundRect(x, y, barWidth, barHeight, barWidth / 2);
         context.fill();
