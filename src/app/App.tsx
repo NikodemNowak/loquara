@@ -42,31 +42,36 @@ export function App({ adapter: adapterProp }: { adapter?: AppAdapter }) {
     window.setTimeout(() => setToasts((items) => items.filter((item) => item.id !== id)), 5000);
   }, []);
   const { snapshot, setSnapshot, history, refreshHistory, loading } = useAppModel(adapter, toast);
-  const [model, setModel] = useState<{ display: string; provider: string }>();
-  /** Whether the selected model is actually present on this machine. */
-  const [installed, setInstalled] = useState<ModelStatus["state"] | "checking">("checking");
+  /** Name and readiness of the selected model, from one source so the two
+   *  can never disagree in the same panel. */
+  const [model, setModel] = useState<{ display: string; state: ModelStatus["state"] | "checking" }>({
+    display: "",
+    state: "checking",
+  });
+  /** The provider glyph, which is decoration: its absence must not blank the name. */
+  const [provider, setProvider] = useState("");
   const [reload, setReload] = useState(0);
   useEffect(() => {
     let active = true;
-    void adapter.listModels()
-      .then((models) => {
-        if (!active) return;
-        const current = models.find((item) => item.key === snapshot.settings.model);
-        setModel(current
-          ? { display: current.display, provider: current.provider }
-          : { display: snapshot.settings.model, provider: snapshot.settings.model });
-      })
-      .catch(() => {
-        if (active) setModel({ display: snapshot.settings.model, provider: snapshot.settings.model });
-      });
     // Readiness is a fact about the disk, not something that can be inferred
     // from the app being idle: claiming "ready" with no model installed is
     // exactly the state a first run is in.
     void adapter.getModelStatus()
-      .then((status) => { if (active) setInstalled(status.state); })
-      .catch(() => { if (active) setInstalled("error"); });
+      .then((status) => {
+        if (active) setModel({ display: status.model, state: status.state });
+      })
+      .catch(() => {
+        if (active) setModel({ display: snapshot.settings.model, state: "error" });
+      });
+    void adapter.listModels()
+      .then((models) => {
+        const current = models.find((item) => item.key === snapshot.settings.model);
+        if (active && current) setProvider(current.provider);
+      })
+      .catch(() => {});
     return () => { active = false; };
   }, [adapter, snapshot.settings.model, reload]);
+  const installed = model.state;
 
   const engine: { state: string; label: TranslationKey } =
     snapshot.dictation.status === "recording" || snapshot.dictation.status === "cancelling"
@@ -144,14 +149,14 @@ export function App({ adapter: adapterProp }: { adapter?: AppAdapter }) {
           <button
             className={`engine-chip engine-chip--${engine.state}`}
             onClick={() => setPage("settings")}
-            aria-label={t("engine.openSettings", { model: model?.display ?? "" })}
-            title={t("engine.openSettings", { model: model?.display ?? "" })}
+            aria-label={t("engine.openSettings", { model: model.display })}
+            title={t("engine.openSettings", { model: model.display })}
           >
             <span className="engine-chip__mark">
-              {model ? <BrandLogo provider={model.provider} /> : null}
+              {provider ? <BrandLogo provider={provider} /> : null}
             </span>
             <span className="engine-chip__copy">
-              <strong>{model?.display ?? ""}</strong>
+              <strong>{model.display}</strong>
               <span className="engine-chip__state"><i aria-hidden="true" />{t(engine.label)}</span>
             </span>
           </button>

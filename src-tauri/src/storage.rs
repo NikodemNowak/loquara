@@ -895,7 +895,7 @@ fn apply_vocabulary(mut processed: String, vocabulary: &[VocabularyEntry]) -> St
     processed
 }
 
-fn fuzzy_apply_vocabulary(mut text: String, entry: &VocabularyEntry) -> String {
+fn fuzzy_apply_vocabulary(text: String, entry: &VocabularyEntry) -> String {
     let heard = entry.heard.trim().to_lowercase();
     if heard.is_empty() {
         return text;
@@ -903,7 +903,7 @@ fn fuzzy_apply_vocabulary(mut text: String, entry: &VocabularyEntry) -> String {
     let replacement = entry.replacement.trim();
     let mut rebuilt = String::with_capacity(text.len());
     let mut word = String::new();
-    let mut flush = |word: &mut String, rebuilt: &mut String| {
+    let flush = |word: &mut String, rebuilt: &mut String| {
         if word.is_empty() {
             return;
         }

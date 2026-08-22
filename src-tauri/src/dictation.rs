@@ -8,13 +8,11 @@ use crate::storage::{
     HistoryQuery, Mode, Recording, RecordingStatus, Retention, Storage, StorageError,
     VocabularyEntry, postprocess_for_mode,
 };
-use crate::transcription::{
-    TranscriptionResult, no_console,
-};
+use crate::transcription::TranscriptionResult;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeSet;
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, Read};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -241,7 +239,7 @@ const fn default_streaming() -> bool {
 }
 
 fn default_model() -> String {
-    MODEL_KEYS[0].to_string()
+    crate::models::default_model().to_owned()
 }
 
 fn default_active_mode() -> String {
@@ -275,38 +273,6 @@ impl Default for AppSettings {
     }
 }
 
-pub const MODEL_ID: &str = "nvidia/parakeet-tdt-0.6b-v3";
-pub const MODEL_REVISION: &str = "7c35754d166cca382ad1e53e68b01e7c575f3a1d";
-
-pub const MODEL_KEYS: &[&str] = &[
-    "parakeet",
-    "whisper-turbo",
-    "whisper-small",
-    "cohere",
-];
-
-pub fn is_supported_model(key: &str) -> bool {
-    MODEL_KEYS.contains(&key)
-}
-
-pub fn model_revision(key: &str) -> &'static str {
-    match key {
-        "whisper-turbo" => "41f01f3fe87f28c78e2fbf8b568835947dd65ed9",
-        "whisper-small" => "973afd24965f72e36ca33b3055d56a652f456b4d",
-        "cohere" => "d114f701a80b2150943f5dbae71458f4d1fcb37b",
-        _ => MODEL_REVISION,
-    }
-}
-
-pub fn model_id(key: &str) -> &'static str {
-    match key {
-        "whisper-turbo" => "openai/whisper-large-v3-turbo",
-        "whisper-small" => "openai/whisper-small",
-        "cohere" => "AEmotionStudio/cohere-transcribe-03-2026-models",
-        _ => MODEL_ID,
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelDescriptor {
@@ -323,104 +289,6 @@ pub struct ModelDescriptor {
     pub status: ModelStatusState,
     pub installed_size_bytes: Option<u64>,
     pub message: Option<String>,
-}
-
-fn estimated_model_size_bytes(key: &str) -> u64 {
-    const MB: u64 = 1_000_000;
-    match key {
-        "whisper-small" => 1_000 * MB,
-        "whisper-turbo" => 1_600 * MB,
-        "cohere" => 4_132 * MB,
-        _ => 2_500 * MB,
-    }
-}
-
-fn snapshot_size_bytes(path: &Path) -> Result<u64, String> {
-    if !path.is_dir() {
-        return Ok(0);
-    }
-    let mut total = 0u64;
-    for entry in std::fs::read_dir(path).map_err(|error| error.to_string())? {
-        let entry = entry.map_err(|error| error.to_string())?;
-        let file_type = entry.file_type().map_err(|error| error.to_string())?;
-        let entry_path = entry.path();
-        if file_type.is_dir() {
-            total = total
-                .checked_add(snapshot_size_bytes(&entry_path)?)
-                .ok_or_else(|| "Rozmiar modelu przekracza limit.".to_string())?;
-        } else if file_type.is_file() || file_type.is_symlink() {
-            let size = std::fs::metadata(&entry_path)
-                .map_err(|error| error.to_string())?
-                .len();
-            total = total
-                .checked_add(size)
-                .ok_or_else(|| "Rozmiar modelu przekracza limit.".to_string())?;
-        }
-    }
-    Ok(total)
-}
-
-pub fn model_descriptors() -> Vec<ModelDescriptor> {
-    let definitions: &[(&str, &str, &str, &str, &str, f32, f32, &str)] = &[
-        (
-            "parakeet",
-            "Parakeet TDT 0.6B v3",
-            "NVIDIA",
-            "local",
-            "auto (PL/EN)",
-            3.0,
-            8.0,
-            "nvidia/parakeet-tdt-0.6b-v3",
-        ),
-        (
-            "whisper-turbo",
-            "Whisper Large v3 Turbo",
-            "OpenAI",
-            "local",
-            "auto (99)",
-            4.0,
-            8.0,
-            "openai/whisper-large-v3-turbo",
-        ),
-        (
-            "whisper-small",
-            "Whisper Small",
-            "OpenAI",
-            "local",
-            "auto (99)",
-            1.5,
-            4.0,
-            "openai/whisper-small",
-        ),
-        (
-            "cohere",
-            "Cohere Transcribe 2B",
-            "Cohere",
-            "local",
-            "pl/en/fr/de/...",
-            5.0,
-            8.0,
-            "AEmotionStudio/cohere-transcribe-03-2026-models",
-        ),
-    ];
-    definitions
-        .iter()
-        .map(|(key, display, provider, source, languages, vram, ram, id)| ModelDescriptor {
-            key: (*key).to_string(),
-            id: (*id).to_string(),
-            provider: (*provider).to_string(),
-            source: (*source).to_string(),
-            revision: model_revision(key).to_string(),
-            display: (*display).to_string(),
-            min_vram_gb: *vram,
-            min_ram_gb: *ram,
-            languages: (*languages).to_string(),
-            estimated_size_bytes: estimated_model_size_bytes(key),
-            status: ModelStatusState::NotInstalled,
-            installed_size_bytes: None,
-            message: None,
-        })
-        .collect()
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -468,202 +336,6 @@ fn emit_model_progress(app: &AppHandle, model: &str, phase: &str, downloaded_byt
             total_bytes,
         },
     );
-}
-
-#[cfg(test)]
-fn model_cache_root(
-    explicit_hub: Option<&str>,
-    hf_home: Option<&str>,
-    user_home: &Path,
-) -> PathBuf {
-    explicit_hub
-        .map(PathBuf::from)
-        .or_else(|| hf_home.map(|path| PathBuf::from(path).join("hub")))
-        .unwrap_or_else(|| user_home.join(".cache").join("huggingface").join("hub"))
-}
-
-#[cfg(test)]
-fn model_snapshot_path(hub: &Path) -> PathBuf {
-    hub.join("models--nvidia--parakeet-tdt-0.6b-v3")
-        .join("snapshots")
-        .join(MODEL_REVISION)
-}
-
-#[cfg(test)]
-fn snapshot_path_for(hub: &Path, id: &str, revision: &str) -> PathBuf {
-    let folder = id.replace('/', "--");
-    hub.join(format!("models--{folder}"))
-        .join("snapshots")
-        .join(revision)
-}
-
-fn nonempty_file(path: &Path) -> Result<bool, std::io::Error> {
-    match std::fs::metadata(path) {
-        Ok(metadata) => Ok(metadata.is_file() && metadata.len() > 0),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(error),
-    }
-}
-
-fn model_weight_artifacts(snapshot: &Path) -> Result<Vec<String>, String> {
-    for name in ["model.safetensors", "pytorch_model.bin"] {
-        if nonempty_file(&snapshot.join(name)).map_err(|error| error.to_string())? {
-            return Ok(Vec::new());
-        }
-    }
-
-    for index_name in [
-        "model.safetensors.index.json",
-        "pytorch_model.bin.index.json",
-    ] {
-        let index_path = snapshot.join(index_name);
-        if !nonempty_file(&index_path).map_err(|error| error.to_string())? {
-            continue;
-        }
-        let bytes = std::fs::read(&index_path).map_err(|error| error.to_string())?;
-        let index: Value = serde_json::from_slice(&bytes)
-            .map_err(|error| format!("Invalid {index_name}: {error}"))?;
-        let weight_map = index
-            .get("weight_map")
-            .and_then(Value::as_object)
-            .filter(|map| !map.is_empty())
-            .ok_or_else(|| format!("{index_name} nie zawiera niepustego weight_map"))?;
-        let mut shards = BTreeSet::new();
-        for value in weight_map.values() {
-            let shard = value
-                .as_str()
-                .filter(|value| !value.is_empty())
-                .ok_or_else(|| format!("{index_name} contains an invalid shard name"))?;
-            let shard_path = Path::new(shard);
-            if shard_path.is_absolute()
-                || !shard_path
-                    .components()
-                    .all(|component| matches!(component, Component::Normal(_)))
-            {
-                return Err(format!(
-                    "{index_name} contains a disallowed shard path: {shard}"
-                ));
-            }
-            shards.insert(shard.to_owned());
-        }
-        let mut missing = Vec::new();
-        for shard in shards {
-            if !nonempty_file(&snapshot.join(&shard)).map_err(|error| error.to_string())? {
-                missing.push(shard);
-            }
-        }
-        return Ok(missing);
-    }
-
-    Ok(vec!["model.safetensors lub pytorch_model.bin".into()])
-}
-
-#[cfg(test)]
-fn model_status_from_hub(hub: &Path) -> ModelStatus {
-    model_status_from_hub_for(hub, MODEL_ID, MODEL_REVISION)
-}
-
-#[cfg(test)]
-fn model_status_from_hub_for(hub: &Path, id: &str, revision: &str) -> ModelStatus {
-    let snapshot = snapshot_path_for(hub, id, revision);
-    model_status_from_snapshot(&snapshot, id, revision)
-}
-
-fn model_status_from_snapshot(snapshot: &Path, id: &str, revision: &str) -> ModelStatus {
-    let artifact = |names: &[&str]| -> Result<bool, std::io::Error> {
-        for name in names {
-            let path = snapshot.join(name);
-            match std::fs::metadata(&path) {
-                Ok(metadata) if metadata.is_file() && metadata.len() > 0 => return Ok(true),
-                Ok(_) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error),
-            }
-        }
-        Ok(false)
-    };
-    let required = [
-        (&["config.json"][..], "config.json"),
-        (
-            &["processor_config.json", "preprocessor_config.json"][..],
-            "processor_config.json / preprocessor_config.json",
-        ),
-        (
-            &["tokenizer.json", "tokenizer.model", "vocab.json"][..],
-            "artefakt tokenizera",
-        ),
-    ];
-    let (state, message) = match snapshot.try_exists() {
-        Ok(false) => (
-            ModelStatusState::NotInstalled,
-            Some("Nie znaleziono wymaganej rewizji modelu.".into()),
-        ),
-        Ok(true) if !snapshot.is_dir() => (
-            ModelStatusState::NotInstalled,
-            Some("The model revision path is not a directory.".into()),
-        ),
-        Ok(true) => {
-            let mut missing = Vec::new();
-            let mut error = None;
-            for (names, label) in required {
-                match artifact(names) {
-                    Ok(true) => {}
-                    Ok(false) => missing.push(label.to_owned()),
-                    Err(io_error) => {
-                        error = Some(io_error.to_string());
-                        break;
-                    }
-                }
-            }
-            if error.is_none() {
-                match model_weight_artifacts(&snapshot) {
-                    Ok(weight_missing) => missing.extend(weight_missing),
-                    Err(weight_error) => error = Some(weight_error),
-                }
-            }
-            if let Some(error) = error {
-                (
-                    ModelStatusState::Error,
-                    Some(format!("Could not check model artifacts: {error}")),
-                )
-            } else if missing.is_empty() {
-                (ModelStatusState::Ready, None)
-            } else {
-                (
-                    ModelStatusState::NotInstalled,
-                    Some(format!(
-                        "Missing or empty files: {}.",
-                        missing.join(", ")
-                    )),
-                )
-            }
-        }
-        Err(error) => (
-            ModelStatusState::Error,
-            Some(format!(
-                "Could not inspect the local model cache: {error}"
-            )),
-        ),
-    };
-    ModelStatus {
-        state,
-        model: id.into(),
-        revision: revision.into(),
-        device: None,
-        message,
-    }
-}
-
-fn local_model_snapshot_path(home: &Path, model: &str) -> PathBuf {
-    home.join(model).join(model_revision(model))
-}
-
-fn model_status_from_local(home: &Path, model: &str) -> ModelStatus {
-    model_status_from_snapshot(
-        &local_model_snapshot_path(home, model),
-        model_id(model),
-        model_revision(model),
-    )
 }
 
 fn retention_policy(days: Option<u32>) -> Result<Retention, String> {
@@ -1287,14 +959,11 @@ pub fn start_recording_inner(app: &AppHandle, state: &AppState) -> Result<AppSna
         .map_err(|_| "settings lock poisoned")?
         .model
         .clone();
-    let model_status = model_status_from_local(&state.model_home, &selected_model);
-    if model_status.state != ModelStatusState::Ready {
-        return Err(model_status
-            .message
-            .unwrap_or_else(|| "Najpierw pobierz wybrany model.".into()));
+    if !state.engine.is_installed(&selected_model) {
+        return Err("Najpierw pobierz wybrany model.".into());
     }
-    // Warm the model while the user talks so transcription does not pay the
-    // Python/torch startup cost right after the user stops.
+    // Warm the model while the user talks, so transcription does not pay the
+    // load cost the moment they stop.
     warm_up_model(app, state);
     let mut windows = SystemWindows;
     let target = windows.foreground_window();
@@ -1828,11 +1497,10 @@ pub fn retry_transcription(
             .map_err(|_| "settings lock poisoned")?
             .model
             .clone();
-        if let Some(message) = (model_status_from_local(&state.model_home, &selected_model).state
-            != ModelStatusState::Ready)
-            .then(|| format!("The selected model is not ready. Download it before retrying: {selected_model}."))
-        {
-            return Err(message);
+        if !state.engine.is_installed(&selected_model) {
+            return Err(format!(
+                "The selected model is not ready. Download it before retrying: {selected_model}."
+            ));
         }
         match state.storage.mark_retrying(&recording_id) {
             Ok(true) => {}
@@ -2066,10 +1734,10 @@ pub fn reveal_recordings_dir(state: State<'_, AppState>) -> Result<(), String> {
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn reveal_model_dir(model: String, state: State<'_, AppState>) -> Result<(), String> {
-    if !is_supported_model(&model) {
+    if crate::models::spec(&model).is_none() {
         return Err(format!("Nieznany model: {model}."));
     }
-    let path = state.model_home.join(&model);
+    let path = state.engine.model_dir(&model);
     platform::reveal_path(&path).map_err(|error| error.to_string())
 }
 
@@ -2457,7 +2125,7 @@ pub async fn download_model(
 
 #[tauri::command]
 pub fn delete_model(model: String, state: State<'_, AppState>) -> Result<(), String> {
-    if !is_supported_model(&model) {
+    if crate::models::spec(&model).is_none() {
         return Err(format!("Nieznany model: {model}."));
     }
     match state.snapshot()?.dictation {
@@ -2493,7 +2161,7 @@ pub fn get_model_status(state: State<'_, AppState>) -> ModelStatus {
         .read()
         .map(|settings| settings.model.clone())
         .unwrap_or_else(|_| default_model());
-    if !is_supported_model(&model) {
+    let Some(spec) = crate::models::spec(&model) else {
         return ModelStatus {
             state: ModelStatusState::Error,
             model: model.clone(),
@@ -2501,8 +2169,24 @@ pub fn get_model_status(state: State<'_, AppState>) -> ModelStatus {
             device: None,
             message: Some(format!("Nieznany model: {model}.")),
         };
+    };
+    let installed = state.engine.is_installed(&model);
+    ModelStatus {
+        state: if installed {
+            ModelStatusState::Ready
+        } else {
+            ModelStatusState::NotInstalled
+        },
+        model: spec.display.to_owned(),
+        revision: String::new(),
+        // Reported so the interface can say whether the graphics card is in
+        // use without asking the user what hardware they have.
+        device: state
+            .engine
+            .accelerator()
+            .map(|kind| format!("{kind:?}").to_lowercase()),
+        message: None,
     }
-    model_status_from_local(&state.model_home, &model)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -2512,7 +2196,7 @@ pub fn update_settings(
     state: State<'_, AppState>,
 ) -> Result<SettingsUpdateResult, String> {
     let retention = retention_policy(settings.retention_days)?;
-    if !is_supported_model(&settings.model) {
+    if crate::models::spec(&settings.model).is_none() {
         return Err(format!("Nieznany model: {}.", settings.model));
     }
     let _update_guard = state
@@ -3045,191 +2729,6 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&settings).unwrap()["language"],
             serde_json::json!("system")
-        );
-    }
-
-    fn write_artifact(path: &Path, name: &str) {
-        std::fs::write(path.join(name), b"x").unwrap();
-    }
-
-    #[test]
-    fn model_status_requires_complete_nonempty_artifacts() {
-        let temp = tempfile::tempdir().unwrap();
-        let hub = temp.path().join("hub");
-        let snapshot = model_snapshot_path(&hub);
-        std::fs::create_dir_all(&snapshot).unwrap();
-
-        let empty = model_status_from_hub(&hub);
-        assert_eq!(empty.state, ModelStatusState::NotInstalled);
-        assert!(empty.message.unwrap().contains("config.json"));
-
-        write_artifact(&snapshot, "config.json");
-        write_artifact(&snapshot, "processor_config.json");
-        let partial = model_status_from_hub(&hub);
-        assert_eq!(partial.state, ModelStatusState::NotInstalled);
-        assert!(partial.message.unwrap().contains("model.safetensors"));
-
-        write_artifact(&snapshot, "model.safetensors");
-        write_artifact(&snapshot, "tokenizer.json");
-        assert_eq!(
-            model_status_from_hub(&hub),
-            ModelStatus {
-                state: ModelStatusState::Ready,
-                model: MODEL_ID.into(),
-                revision: MODEL_REVISION.into(),
-                device: None,
-                message: None,
-            }
-        );
-    }
-
-    #[test]
-    fn model_status_rejects_wrong_revision_and_zero_length_artifact() {
-        let temp = tempfile::tempdir().unwrap();
-        let hub = temp.path().join("hub");
-        let snapshot = model_snapshot_path(&hub);
-        std::fs::create_dir_all(&snapshot).unwrap();
-        std::fs::write(snapshot.join("config.json"), []).unwrap();
-        write_artifact(&snapshot, "preprocessor_config.json");
-        write_artifact(&snapshot, "pytorch_model.bin");
-        write_artifact(&snapshot, "tokenizer_config.json");
-
-        let zero_length = model_status_from_hub(&hub);
-        assert_eq!(zero_length.state, ModelStatusState::NotInstalled);
-        assert!(zero_length.message.unwrap().contains("config.json"));
-
-        std::fs::remove_dir_all(&snapshot).unwrap();
-        std::fs::create_dir_all(
-            hub.join("models--nvidia--parakeet-tdt-0.6b-v3")
-                .join("snapshots")
-                .join("wrong-revision"),
-        )
-        .unwrap();
-        assert_eq!(
-            model_status_from_hub(&hub).state,
-            ModelStatusState::NotInstalled
-        );
-    }
-
-    #[test]
-    fn model_status_rejects_tokenizer_config_without_tokenizer_data() {
-        let temp = tempfile::tempdir().unwrap();
-        let hub = temp.path().join("hub");
-        let snapshot = model_snapshot_path(&hub);
-        std::fs::create_dir_all(&snapshot).unwrap();
-        write_artifact(&snapshot, "config.json");
-        write_artifact(&snapshot, "processor_config.json");
-        write_artifact(&snapshot, "model.safetensors");
-        write_artifact(&snapshot, "tokenizer_config.json");
-
-        let status = model_status_from_hub(&hub);
-        assert_eq!(status.state, ModelStatusState::NotInstalled);
-        assert!(status.message.unwrap().contains("tokenizera"));
-    }
-
-    fn write_model_index(snapshot: &Path, weight_map: serde_json::Value) {
-        std::fs::write(
-            snapshot.join("model.safetensors.index.json"),
-            serde_json::to_vec(&serde_json::json!({ "weight_map": weight_map })).unwrap(),
-        )
-        .unwrap();
-    }
-
-    fn write_non_weight_model_artifacts(snapshot: &Path) {
-        write_artifact(snapshot, "config.json");
-        write_artifact(snapshot, "processor_config.json");
-        write_artifact(snapshot, "tokenizer.json");
-    }
-
-    #[test]
-    fn model_status_rejects_weight_index_with_missing_shard() {
-        let temp = tempfile::tempdir().unwrap();
-        let hub = temp.path().join("hub");
-        let snapshot = model_snapshot_path(&hub);
-        std::fs::create_dir_all(&snapshot).unwrap();
-        write_non_weight_model_artifacts(&snapshot);
-        write_model_index(
-            &snapshot,
-            serde_json::json!({
-                "encoder": "model-00001-of-00002.safetensors",
-                "decoder": "model-00002-of-00002.safetensors"
-            }),
-        );
-        write_artifact(&snapshot, "model-00001-of-00002.safetensors");
-
-        let status = model_status_from_hub(&hub);
-        assert_eq!(status.state, ModelStatusState::NotInstalled);
-        assert!(
-            status
-                .message
-                .unwrap()
-                .contains("model-00002-of-00002.safetensors")
-        );
-    }
-
-    #[test]
-    fn model_status_accepts_weight_index_when_every_unique_shard_is_nonempty() {
-        let temp = tempfile::tempdir().unwrap();
-        let hub = temp.path().join("hub");
-        let snapshot = model_snapshot_path(&hub);
-        std::fs::create_dir_all(&snapshot).unwrap();
-        write_non_weight_model_artifacts(&snapshot);
-        write_model_index(
-            &snapshot,
-            serde_json::json!({
-                "encoder.layer.0": "model-00001-of-00002.safetensors",
-                "encoder.layer.1": "model-00001-of-00002.safetensors",
-                "decoder": "model-00002-of-00002.safetensors"
-            }),
-        );
-        write_artifact(&snapshot, "model-00001-of-00002.safetensors");
-        write_artifact(&snapshot, "model-00002-of-00002.safetensors");
-
-        assert_eq!(model_status_from_hub(&hub).state, ModelStatusState::Ready);
-    }
-
-    #[test]
-    fn model_status_rejects_weight_index_path_traversal() {
-        let temp = tempfile::tempdir().unwrap();
-        let hub = temp.path().join("hub");
-        let snapshot = model_snapshot_path(&hub);
-        std::fs::create_dir_all(&snapshot).unwrap();
-        write_non_weight_model_artifacts(&snapshot);
-        write_model_index(
-            &snapshot,
-            serde_json::json!({ "encoder": "../outside.safetensors" }),
-        );
-        write_artifact(snapshot.parent().unwrap(), "outside.safetensors");
-
-        assert_ne!(model_status_from_hub(&hub).state, ModelStatusState::Ready);
-    }
-
-    #[test]
-    fn model_status_rejects_invalid_weight_index_json() {
-        let temp = tempfile::tempdir().unwrap();
-        let hub = temp.path().join("hub");
-        let snapshot = model_snapshot_path(&hub);
-        std::fs::create_dir_all(&snapshot).unwrap();
-        write_non_weight_model_artifacts(&snapshot);
-        std::fs::write(snapshot.join("model.safetensors.index.json"), b"{").unwrap();
-
-        assert_eq!(model_status_from_hub(&hub).state, ModelStatusState::Error);
-    }
-
-    #[test]
-    fn model_cache_root_prefers_explicit_hub_then_hf_home() {
-        let home = std::path::Path::new("C:/Users/test");
-        assert_eq!(
-            model_cache_root(Some("D:/hub"), Some("E:/hf"), home),
-            std::path::PathBuf::from("D:/hub")
-        );
-        assert_eq!(
-            model_cache_root(None, Some("E:/hf"), home),
-            std::path::PathBuf::from("E:/hf").join("hub")
-        );
-        assert_eq!(
-            model_cache_root(None, None, home),
-            home.join(".cache").join("huggingface").join("hub")
         );
     }
 

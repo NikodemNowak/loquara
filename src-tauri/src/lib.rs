@@ -93,7 +93,7 @@ pub fn run() {
                 .build(),
         )
         .setup(|app| {
-            let current_dir = std::env::current_dir()?;
+            let _current_dir = std::env::current_dir()?;
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
             let health_marker = health_path(&data_dir);

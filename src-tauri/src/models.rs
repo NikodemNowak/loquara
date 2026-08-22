@@ -7,7 +7,6 @@
 //! wrong.
 
 use std::fs;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
@@ -142,8 +141,7 @@ pub fn download(
                 let _ = fs::remove_file(&part_path);
                 return Err(DownloadError::Cancelled);
             }
-            let read = reader
-                .read(&mut buffer)
+            let read = std::io::Read::read(&mut reader, &mut buffer)
                 .map_err(|error| DownloadError::Network(error.to_string()))?;
             if read == 0 {
                 break;
