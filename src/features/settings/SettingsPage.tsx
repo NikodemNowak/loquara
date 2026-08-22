@@ -7,7 +7,7 @@ import { ShortcutCapture } from "./ShortcutCapture";
 import { Select } from "../../components/Select";
 import type { ToastKind } from "../../components/Toast";
 import type { AppAdapter } from "../../lib/tauri";
-import type { AppSettings, InputDeviceInfo, ModelDescriptor, ModelDownloadProgress, ModelStatus } from "../../lib/types";
+import type { AppSettings, DownloadStatus, InputDeviceInfo, ModelDescriptor, ModelDownloadProgress, ModelStatus } from "../../lib/types";
 import { normalizeError } from "../../lib/errors";
 import { formatBytes as formatSize } from "../../lib/bytes";
 import { useI18n } from "../../lib/i18n";
@@ -38,12 +38,15 @@ function isAccessFailure(error: unknown): boolean {
 export function SettingsPage({
   adapter,
   initialSettings,
+  download: activeDownload,
   onSettingsChange,
   onModelsChanged,
   onToast,
 }: {
   adapter: AppAdapter;
   initialSettings: AppSettings;
+  /** The transfer the app has in flight, whichever screen started it. */
+  download?: DownloadStatus | null;
   onSettingsChange?: (settings: AppSettings) => void;
   /** Lets the shell re-check readiness after a model is added or removed. */
   onModelsChanged?: () => void;
@@ -56,7 +59,9 @@ export function SettingsPage({
   const [modelStatus, setModelStatus] = useState<ModelStatus>();
   const [models, setModels] = useState<ModelDescriptor[]>([]);
   const [systemMemory, setSystemMemory] = useState<{ vramGb: number; ramGb: number; cpuCores: number }>({ vramGb: 0, ramGb: 0, cpuCores: 0 });
-  const [downloading, setDownloading] = useState("");
+  // Whether something is downloading is the app's business, not this
+  // screen's: this screen can be left and re-entered mid-transfer.
+  const downloading = activeDownload?.model ?? "";
   const [deleting, setDeleting] = useState("");
   const [pendingDelete, setPendingDelete] = useState<ModelDescriptor>();
   const [downloadProgress, setDownloadProgress] = useState<ModelDownloadProgress>();
@@ -144,7 +149,6 @@ export function SettingsPage({
 
 
   const download = async (key: string) => {
-    setDownloading(key);
     setDownloadProgress({ model: key, phase: "preparing", downloadedBytes: 0, totalBytes: null });
     try {
       await adapter.downloadModel(key);
@@ -157,7 +161,6 @@ export function SettingsPage({
     } catch (error) {
       onToast(t("settings.models.downloadError", { error: normalizeError(error) }), "error");
     } finally {
-      setDownloading("");
       setDownloadProgress(undefined);
     }
   };
@@ -211,7 +214,21 @@ export function SettingsPage({
               const disabled = lacksRam;
               const selected = settings.model === model.key;
               const isDownloading = downloading === model.key;
-              const progress = isDownloading && downloadProgress?.model === model.key ? downloadProgress : undefined;
+              // Live events while this screen is open, the app's own record
+              // when it was opened mid-transfer — either way the bar is the
+              // transfer that is actually running.
+              const progress = !isDownloading
+                ? undefined
+                : downloadProgress?.model === model.key
+                  ? downloadProgress
+                  : activeDownload && activeDownload.model === model.key
+                    ? {
+                        model: activeDownload.model,
+                        phase: "downloading",
+                        downloadedBytes: activeDownload.downloadedBytes,
+                        totalBytes: activeDownload.totalBytes,
+                      }
+                    : undefined;
               const progressPercent = progress?.totalBytes && progress.totalBytes > 0
                 ? Math.min(100, Math.round((progress.downloadedBytes / progress.totalBytes) * 100))
                 : null;

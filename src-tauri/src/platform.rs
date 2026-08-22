@@ -509,6 +509,37 @@ pub fn show_overlay_with_focus<R: Runtime>(
         .map_err(|error| PlatformError::Other(error.to_string()))
 }
 
+/// Bytes still free on the volume `path` lives on.
+///
+/// `None` when the platform will not say, which callers treat as "no reason
+/// to refuse" rather than as zero.
+#[cfg(windows)]
+pub fn free_space_bytes(path: &std::path::Path) -> Option<u64> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+
+    let wide: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut available: u64 = 0;
+    let ok = unsafe {
+        GetDiskFreeSpaceExW(
+            wide.as_ptr(),
+            &mut available,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    (ok != 0).then_some(available)
+}
+
+#[cfg(not(windows))]
+pub fn free_space_bytes(_path: &std::path::Path) -> Option<u64> {
+    None
+}
+
 pub fn restore_foreground_to<R: Runtime>(_app: &AppHandle<R>, target: Option<WindowTarget>) {
     if let Some(target) = target {
         let mut windows = SystemWindows;

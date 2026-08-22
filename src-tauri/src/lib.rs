@@ -123,6 +123,9 @@ pub fn run() {
             let recordings_dir = data_dir.join("recordings");
             let storage = storage::Storage::open(data_dir.join("loquara.sqlite3"), &recordings_dir)
                 .map_err(|error| error.to_string())?;
+            // A transfer that was interrupted by a closing app leaves parts
+            // behind; nothing resumes them, so nothing should keep them.
+            let _ = models::sweep_parts(&data_dir.join("models"));
             let state = AppState::new(
                 audio::AudioRecorder::new(recordings_dir),
                 storage,
@@ -268,6 +271,7 @@ pub fn run() {
             dictation::get_model_status,
             dictation::list_models,
             dictation::download_model,
+            dictation::cancel_download,
             dictation::delete_model,
             dictation::update_settings,
             dictation::update_setting_value,

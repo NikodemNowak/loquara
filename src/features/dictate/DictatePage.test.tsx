@@ -132,6 +132,34 @@ describe("ekran Dyktuj", () => {
     expect(screen.queryByRole("button", { name: "Zacznij nagrywać" })).not.toBeInTheDocument();
   });
 
+  test("pobieranie zaczęte gdzie indziej widać po powrocie na ekran", async () => {
+    // Stan pobierania należy do aplikacji, nie do ekranu. Trzymany w
+    // komponencie znikał po wyjściu, a przycisk wracał gotowy do klikania —
+    // i drugie pobieranie pisało po plikach pierwszego.
+    const model = { key: "parakeet", display: "Parakeet TDT 0.6B v3", provider: "NVIDIA", installed: false, totalBytes: 670_478_772 };
+    const downloadModel = vi.fn(async () => undefined);
+    renderWithI18n(<DictatePage
+      adapter={adapterStub({ downloadModel })}
+      snapshot={{
+        dictation: { status: "idle" },
+        settings,
+        model,
+        download: { model: "parakeet", downloadedBytes: 335_000_000, totalBytes: 670_478_772 },
+        modelLoading: false,
+      }}
+      recordings={[]}
+      modelReady={false}
+      onSnapshot={() => undefined}
+      onHistory={() => undefined}
+      onSettings={() => undefined}
+      onToast={() => undefined}
+    />);
+
+    expect(await screen.findByText("335 MB z 670 MB")).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Pobierz model" })).toBeNull();
+    expect(downloadModel).not.toHaveBeenCalled();
+  });
+
   test("bez modelu pobiera go na miejscu, bez wysyłania gdzie indziej", async () => {
     // Przycisk prowadził do Ustawień, gdzie sekcja modeli była poniżej
     // zgięcia — klikało się i pozornie nic się nie działo.
@@ -155,8 +183,7 @@ describe("ekran Dyktuj", () => {
     expect(onSettings).not.toHaveBeenCalled();
     expect(startRecording).not.toHaveBeenCalled();
 
-    // Wyjście do pełnej listy zostaje, ale nie jest już jedyną drogą.
-    await userEvent.click(screen.getByRole("button", { name: "Inne modele w ustawieniach" }));
-    expect(onSettings).toHaveBeenCalledOnce();
+    // Katalog ma dziś jeden model, więc ekran tego nie ukrywa.
+    expect(screen.getByText("Na razie jeden model. Kolejne wkrótce.")).toBeVisible();
   });
 });

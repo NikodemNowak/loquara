@@ -83,9 +83,17 @@ export interface ModelSummary {
   totalBytes: number;
 }
 
+/** A model transfer in flight, owned by the backend so any screen can show it. */
+export interface DownloadStatus {
+  model: string;
+  downloadedBytes: number;
+  totalBytes: number;
+}
+
 export interface AppSnapshot {
   dictation: DictationState;
   settings: AppSettings;
+  download?: DownloadStatus | null;
   /** Absent only until the first snapshot arrives, which reads as "checking". */
   model?: ModelSummary;
   modelLoading: boolean;

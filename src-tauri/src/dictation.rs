@@ -14,6 +14,7 @@ use serde_json::Value;
 use std::collections::BTreeSet;
 use std::io::{BufRead, Read};
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -374,6 +375,9 @@ pub fn cleanup_retention(state: &AppState) -> Result<usize, String> {
 pub struct AppSnapshot {
     pub dictation: DictationState,
     pub settings: AppSettings,
+    /// The download in flight, so a screen shows it even when it was started
+    /// somewhere else or before the screen existed.
+    pub download: Option<DownloadStatus>,
     /// Name, maker and readiness of the selected model.
     ///
     /// Carried by the snapshot rather than fetched on its own because the
@@ -385,6 +389,28 @@ pub struct AppSnapshot {
     /// Epoch ms when the active recording started, so the UI can keep an
     /// accurate elapsed-time counter even across page remounts.
     pub recording_started_at: Option<i64>,
+}
+
+/// A download in progress.
+///
+/// `cancel` is shared with the threads doing the fetching, which check it
+/// between chunks.
+#[derive(Debug, Clone)]
+pub struct ActiveDownload {
+    pub model: String,
+    pub downloaded_bytes: u64,
+    pub total_bytes: u64,
+    pub cancel: Arc<AtomicBool>,
+}
+
+/// The part of a download the interface needs, in every snapshot, so any
+/// screen can show it however it was arrived at.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DownloadStatus {
+    pub model: String,
+    pub downloaded_bytes: u64,
+    pub total_bytes: u64,
 }
 
 /// What the interface needs to say about the selected model.
@@ -418,6 +444,10 @@ pub struct AppState {
     pub target_window: Arc<Mutex<Option<WindowTarget>>>,
     pub settings: Arc<RwLock<AppSettings>>,
     pub model_warm: Arc<ModelWarmup>,
+    /// The download in flight, if any. One model at a time, owned here rather
+    /// than by whichever screen happened to start it — a screen can be left,
+    /// and leaving one must not lose the transfer or let a second one begin.
+    pub download: Arc<Mutex<Option<ActiveDownload>>>,
     lifecycle: Arc<Mutex<()>>,
     settings_update: Arc<Mutex<()>>,
     model_home: PathBuf,
@@ -756,12 +786,24 @@ impl AppState {
             target_window: Arc::new(Mutex::new(None)),
             settings: Arc::new(RwLock::new(settings)),
             model_warm: Arc::new(ModelWarmup::default()),
+            download: Arc::new(Mutex::new(None)),
             lifecycle: Arc::new(Mutex::new(())),
             settings_update: Arc::new(Mutex::new(())),
             model_home,
         }
     }
 
+
+    fn download_status(&self) -> Option<DownloadStatus> {
+        self.download
+            .lock()
+            .ok()
+            .and_then(|guard| guard.as_ref().map(|active| DownloadStatus {
+                model: active.model.clone(),
+                downloaded_bytes: active.downloaded_bytes,
+                total_bytes: active.total_bytes,
+            }))
+    }
 
     fn model_summary(&self) -> ModelSummary {
         let key = self
@@ -802,6 +844,7 @@ impl AppState {
                 .read()
                 .map_err(|_| "settings lock poisoned")?
                 .clone(),
+            download: self.download_status(),
             model: self.model_summary(),
             model_loading: self.model_warm.is_loading(),
             recording_started_at,
@@ -2156,39 +2199,129 @@ pub fn list_models(state: State<'_, AppState>) -> Vec<ModelDescriptor> {
 
 
 
+/// Answer to a request to start downloading.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Claim {
+    /// The slot was free and is now held.
+    Started,
+    /// This very model is already arriving; asking twice is not an error.
+    AlreadyRunning,
+    /// Something else is arriving. Names it, so the refusal can say what.
+    Busy(String),
+}
+
+/// Takes the download slot, or explains why it cannot be taken.
+///
+/// Two downloads of one model write the same files from four threads each,
+/// which does not produce a model — it produces files of the right size full
+/// of the wrong bytes. One slot, claimed before any byte moves.
+pub fn claim_download(
+    slot: &Mutex<Option<ActiveDownload>>,
+    model: &str,
+    total: u64,
+    cancel: Arc<AtomicBool>,
+) -> Claim {
+    let Ok(mut guard) = slot.lock() else {
+        return Claim::Busy(model.to_owned());
+    };
+    if let Some(active) = guard.as_ref() {
+        return if active.model == model {
+            Claim::AlreadyRunning
+        } else {
+            Claim::Busy(active.model.clone())
+        };
+    }
+    *guard = Some(ActiveDownload {
+        model: model.to_owned(),
+        downloaded_bytes: 0,
+        total_bytes: total,
+        cancel,
+    });
+    Claim::Started
+}
+
 #[tauri::command]
 pub async fn download_model(
     model: String,
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let spec =
-        crate::models::spec(&model).ok_or_else(|| format!("Nieznany model: {model}."))?;
-    let directory = state.engine.model_dir(&model);
+    let spec = crate::models::spec(&model).ok_or_else(|| format!("Nieznany model: {model}."))?;
     let total = spec.total_bytes();
+    let cancel = Arc::new(AtomicBool::new(false));
+
+    // Refuse before the transfer rather than after 600 MB of it. The margin
+    // covers the rest of the model plus room for the disk not to be left
+    // completely full.
+    let room = total + (64 << 20);
+    if let Some(free) = platform::free_space_bytes(&state.model_home)
+        && free < room
+    {
+        return Err(format!(
+            "Za mało miejsca na dysku: model potrzebuje {} MB, wolne jest {} MB.",
+            room / (1 << 20),
+            free / (1 << 20)
+        ));
+    }
+
+    match claim_download(&state.download, &model, total, cancel.clone()) {
+        Claim::Started => {}
+        Claim::AlreadyRunning => return Ok(()),
+        Claim::Busy(other) => return Err(format!("Trwa już pobieranie modelu {other}.")),
+    }
+    emit_model_progress(&app, &model, "downloading", 0, Some(total));
+    emit_state(&app, &state);
+
+    let directory = state.engine.model_dir(&model);
     let progress_app = app.clone();
     let progress_model = model.clone();
-    emit_model_progress(&app, &model, "downloading", 0, Some(total));
-
+    let progress_slot = state.download.clone();
     let fetch_model = model.clone();
-    tauri::async_runtime::spawn_blocking(move || {
+    let fetch_cancel = cancel.clone();
+    let outcome = tauri::async_runtime::spawn_blocking(move || {
         crate::models::download(
             &fetch_model,
             &directory,
             |done, total| {
+                if let Ok(mut guard) = progress_slot.lock()
+                    && let Some(active) = guard.as_mut()
+                {
+                    active.downloaded_bytes = done;
+                }
                 emit_model_progress(&progress_app, &progress_model, "downloading", done, Some(total));
             },
-            || true,
+            || !fetch_cancel.load(Ordering::Relaxed),
         )
     })
     .await
-    .map_err(|error| error.to_string())?
     .map_err(|error| error.to_string())?;
 
-    // A model that has just arrived is the one the user means to dictate with,
-    // so it is worth loading before they press the shortcut.
-    warm_up_model(&app, &state);
+    if let Ok(mut guard) = state.download.lock() {
+        *guard = None;
+    }
+    let result = outcome.map_err(|error| error.to_string());
+    // The interface is told either way: a snapshot with no download in it is
+    // how every screen learns the transfer is over.
+    if result.is_ok() {
+        // A model that has just arrived is the one the user means to dictate
+        // with, so it is worth loading before they press the shortcut.
+        warm_up_model(&app, &state);
+    }
     emit_state(&app, &state);
+    result
+}
+
+/// Stops the download in flight, if there is one.
+#[tauri::command]
+pub fn cancel_download(state: State<'_, AppState>) -> Result<(), String> {
+    if let Some(active) = state
+        .download
+        .lock()
+        .map_err(|_| "download lock poisoned".to_owned())?
+        .as_ref()
+    {
+        active.cancel.store(true, Ordering::Relaxed);
+    }
     Ok(())
 }
 
@@ -2196,6 +2329,11 @@ pub async fn download_model(
 pub fn delete_model(model: String, state: State<'_, AppState>) -> Result<(), String> {
     if crate::models::spec(&model).is_none() {
         return Err(format!("Nieznany model: {model}."));
+    }
+    if let Ok(guard) = state.download.lock()
+        && guard.as_ref().is_some_and(|active| active.model == model)
+    {
+        return Err("Ten model właśnie się pobiera.".to_owned());
     }
     match state.snapshot()?.dictation {
         DictationState::Recording { .. }
@@ -2769,6 +2907,33 @@ mod tests {
                 audio_path: "history-one.wav".into(),
             }
         );
+    }
+
+    #[test]
+    fn a_second_download_never_starts_on_top_of_the_first() {
+        // Leaving the dictation screen mid-download and pressing Download in
+        // Settings used to start a second transfer over the first one's
+        // files. Both wrote the same bytes from four threads each.
+        let slot = Mutex::new(None);
+        let cancel = Arc::new(AtomicBool::new(false));
+
+        assert_eq!(
+            claim_download(&slot, "parakeet", 100, cancel.clone()),
+            Claim::Started
+        );
+        assert_eq!(
+            claim_download(&slot, "parakeet", 100, cancel.clone()),
+            Claim::AlreadyRunning,
+            "asking again for what is already arriving is not an error"
+        );
+        assert_eq!(
+            claim_download(&slot, "inny", 100, cancel.clone()),
+            Claim::Busy("parakeet".into()),
+            "and a different model has to wait its turn"
+        );
+
+        *slot.lock().unwrap() = None;
+        assert_eq!(claim_download(&slot, "inny", 100, cancel), Claim::Started);
     }
 
     #[test]

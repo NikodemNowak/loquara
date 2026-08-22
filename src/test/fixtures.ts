@@ -141,6 +141,7 @@ export function adapterStub(overrides: Partial<AppAdapter> = {}): AppAdapter {
       { key: "cohere", id: "AEmotionStudio/cohere-transcribe-03-2026-models", provider: "Cohere", source: "local", revision: "d114f701a80b2150943f5dbae71458f4d1fcb37b", display: "Cohere Transcribe 2B", minVramGb: 5, minRamGb: 8, languages: "pl/en/fr/de/...", estimatedSizeBytes: 4_132_000_000, status: "not_installed", installedSizeBytes: null, message: null },
     ],
     downloadModel: async () => undefined,
+    cancelDownload: async () => undefined,
     deleteModel: async () => undefined,
     updateSettings: async (next) => {
       currentSettings = { ...next };

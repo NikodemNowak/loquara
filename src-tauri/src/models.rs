@@ -279,6 +279,33 @@ fn write_at(file: &fs::File, buffer: &[u8], offset: u64) -> std::io::Result<usiz
     std::os::unix::fs::FileExt::write_at(file, buffer, offset)
 }
 
+/// Clears half-written files left by a download that never finished.
+///
+/// Closing the app mid-transfer leaves `.part` files behind. They are never
+/// mistaken for a model — only the final names count — but they hold the disk
+/// space of a download nobody is waiting for any more.
+pub fn sweep_parts(root: &Path) -> u64 {
+    let Ok(entries) = fs::read_dir(root) else {
+        return 0;
+    };
+    let mut freed = 0;
+    for model in entries.flatten() {
+        let Ok(files) = fs::read_dir(model.path()) else {
+            continue;
+        };
+        for file in files.flatten() {
+            let path = file.path();
+            if path.extension().is_some_and(|extension| extension == "part") {
+                let size = fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
+                if fs::remove_file(&path).is_ok() {
+                    freed += size;
+                }
+            }
+        }
+    }
+    freed
+}
+
 /// Removes a downloaded model, including any interrupted parts.
 pub fn remove(key: &str, directory: &Path) -> Result<(), DownloadError> {
     let spec = spec(key).ok_or_else(|| DownloadError::UnknownModel(key.to_owned()))?;
@@ -433,6 +460,21 @@ mod tests {
 
         assert!(!directory.join("tokens.txt").exists());
         assert!(!directory.join("encoder.int8.part").exists());
+    }
+
+    #[test]
+    fn interrupted_parts_are_swept_and_finished_files_left_alone() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().join("parakeet");
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(directory.join("tokens.txt"), vec![0_u8; 10]).unwrap();
+        fs::write(directory.join("encoder.int8.part"), vec![0_u8; 250]).unwrap();
+
+        let freed = sweep_parts(temp.path());
+
+        assert_eq!(freed, 250);
+        assert!(!directory.join("encoder.int8.part").exists());
+        assert!(directory.join("tokens.txt").exists(), "a finished file is not a leftover");
     }
 
     #[test]

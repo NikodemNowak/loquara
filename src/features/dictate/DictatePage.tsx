@@ -4,7 +4,7 @@ import { LevelMeter } from "../../components/LevelMeter";
 import { Waveform } from "../../components/Waveform";
 import type { ToastKind } from "../../components/Toast";
 import type { AppAdapter } from "../../lib/tauri";
-import type { AppSnapshot, Recording } from "../../lib/types";
+import type { AppSnapshot, DownloadStatus, Recording } from "../../lib/types";
 import { normalizeError } from "../../lib/errors";
 import { dateLocale, useI18n, type TranslationKey } from "../../lib/i18n";
 import { formatBytes } from "../../lib/bytes";
@@ -19,24 +19,35 @@ import { formatBytes } from "../../lib/bytes";
  */
 const RATE_WINDOW_MS = 4000;
 
-function useModelDownload(adapter: AppAdapter, model: string | undefined, enabled: boolean) {
-  const [running, setRunning] = useState(false);
-  const [done, setDone] = useState(0);
-  const [total, setTotal] = useState(0);
-  const [rate, setRate] = useState(0);
+function useModelDownload(adapter: AppAdapter, model: string | undefined, active: DownloadStatus | null | undefined) {
+  const mine = active && active.model === model ? active : undefined;
+  // Between the click and the app's first snapshot there is nothing to show
+  // yet, and a button that stays pressable in that gap invites a second one.
+  const [starting, setStarting] = useState(false);
+  const [live, setLive] = useState<{ done: number; total: number }>();
   const [error, setError] = useState("");
+  const [rate, setRate] = useState(0);
   // Oldest sample still inside the window, kept out of state: it changes on
   // every progress message and nothing renders from it directly.
   const mark = useRef<{ at: number; bytes: number }>({ at: 0, bytes: 0 });
+  const running = Boolean(mine) || starting;
 
   useEffect(() => {
-    if (!enabled) return;
+    if (!mine) {
+      setLive(undefined);
+      setRate(0);
+      mark.current = { at: 0, bytes: 0 };
+    } else {
+      setStarting(false);
+    }
+  }, [mine]);
+
+  useEffect(() => {
     let active = true;
     let unlisten: (() => void) | undefined;
     void adapter.onModelProgress((progress) => {
       if (!active || progress.model !== model) return;
-      setDone(progress.downloadedBytes);
-      setTotal(progress.totalBytes ?? 0);
+      setLive({ done: progress.downloadedBytes, total: progress.totalBytes ?? 0 });
       const now = Date.now();
       const since = now - mark.current.at;
       if (!mark.current.at || progress.downloadedBytes < mark.current.bytes) {
@@ -50,25 +61,32 @@ function useModelDownload(adapter: AppAdapter, model: string | undefined, enable
       else dispose();
     });
     return () => { active = false; unlisten?.(); };
-  }, [adapter, model, enabled]);
+  }, [adapter, model]);
 
   const start = useCallback(async () => {
     if (!model) return;
     setError("");
-    setDone(0);
-    setRate(0);
+    setStarting(true);
     mark.current = { at: Date.now(), bytes: 0 };
-    setRunning(true);
     try {
       await adapter.downloadModel(model);
     } catch (failure) {
       setError(normalizeError(failure));
     } finally {
-      setRunning(false);
+      setStarting(false);
     }
   }, [adapter, model]);
 
-  const fraction = total ? Math.min(1, done / total) : 0;
+  const cancel = useCallback(async () => {
+    try {
+      await adapter.cancelDownload();
+    } catch {
+      // Nothing to say: the transfer either stops or finishes on its own.
+    }
+  }, [adapter]);
+
+  const done = live?.done ?? mine?.downloadedBytes ?? 0;
+  const total = live?.total || mine?.totalBytes || 0;
   const remaining = total - done;
   return {
     running,
@@ -76,9 +94,10 @@ function useModelDownload(adapter: AppAdapter, model: string | undefined, enable
     total,
     rate,
     error,
-    fraction,
+    fraction: total ? Math.min(1, done / total) : 0,
     eta: rate > 0 && remaining > 0 ? Math.round(remaining / rate) : 0,
     start,
+    cancel,
   };
 }
 
@@ -195,7 +214,7 @@ export function DictatePage({
   const loadingModel = status === "processing" && snapshot.modelLoading;
   const model = snapshot.model;
   const setup = status === "idle" && !modelReady;
-  const download = useModelDownload(adapter, model?.key, setup);
+  const download = useModelDownload(adapter, model?.key, snapshot.download);
 
   useEffect(() => {
     if (status !== "recording" && status !== "cancelling") {
@@ -301,6 +320,9 @@ export function DictatePage({
                       : t("dictate.model.downloading")}
                   </span>
                 </p>
+                <button className="text-button" onClick={() => void download.cancel()}>
+                  {t("dictate.model.cancel")}
+                </button>
               </div>
             ) : (
               <div className="dictate__actions">
@@ -314,9 +336,7 @@ export function DictatePage({
                 {t("dictate.model.failed", { error: download.error })}
               </p>
             )}
-            <button className="text-button" onClick={() => onSettings?.()}>
-              {t("dictate.model.otherModels")}
-            </button>
+            <p className="model-setup__note">{t("dictate.model.soon")}</p>
           </div>
         )}
 

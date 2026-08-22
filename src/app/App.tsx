@@ -53,9 +53,35 @@ export function App({ adapter: adapterProp }: { adapter?: AppAdapter }) {
     : "checking";
 
 
+  const transfer = snapshot.download;
+  // The snapshot says whether a transfer exists; the progress events say how
+  // far along it is. Without the second, the chip would sit at 0% until the
+  // download finished.
+  const [transferLive, setTransferLive] = useState<{ model: string; done: number; total: number }>();
+  useEffect(() => {
+    let active = true;
+    let unlisten: (() => void) | undefined;
+    void adapter.onModelProgress((progress) => {
+      if (!active) return;
+      setTransferLive({
+        model: progress.model,
+        done: progress.downloadedBytes,
+        total: progress.totalBytes ?? 0,
+      });
+    }).then((dispose) => { if (active) unlisten = dispose; else dispose(); });
+    return () => { active = false; unlisten?.(); };
+  }, [adapter]);
+  const live = transfer && transferLive?.model === transfer.model ? transferLive : undefined;
+  const transferDone = live?.done ?? transfer?.downloadedBytes ?? 0;
+  const transferTotal = live?.total || transfer?.totalBytes || 0;
+  const transferPercent = transferTotal
+    ? Math.min(100, Math.round((transferDone / transferTotal) * 100))
+    : 0;
   const engine: { state: string; label: TranslationKey } =
     snapshot.dictation.status === "recording" || snapshot.dictation.status === "cancelling"
       ? { state: "recording", label: "engine.recording" }
+      : transfer
+        ? { state: "downloading", label: "engine.downloading" }
       : snapshot.modelLoading
         ? { state: "loading", label: "engine.loading" }
         : installed === "checking"
@@ -97,7 +123,7 @@ export function App({ adapter: adapterProp }: { adapter?: AppAdapter }) {
   } else if (page === "history") {
     content = <HistoryPage adapter={adapter} recordings={history} onRefresh={refreshHistory} onToast={toast} />;
   } else {
-    content = <SettingsPage adapter={adapter} initialSettings={snapshot.settings} onSettingsChange={(settings) => setSnapshot((current) => ({ ...current, settings }))} onModelsChanged={() => { void adapter.getAppSnapshot().then(setSnapshot).catch(() => {}); }} onToast={toast} />;
+    content = <SettingsPage adapter={adapter} initialSettings={snapshot.settings} download={snapshot.download} onSettingsChange={(settings) => setSnapshot((current) => ({ ...current, settings }))} onModelsChanged={() => { void adapter.getAppSnapshot().then(setSnapshot).catch(() => {}); }} onToast={toast} />;
   }
 
   return (
@@ -142,7 +168,10 @@ export function App({ adapter: adapterProp }: { adapter?: AppAdapter }) {
             </span>
             <span className="engine-chip__copy">
               <strong>{model?.display ?? t("engine.checking")}</strong>
-              <span className="engine-chip__state"><i aria-hidden="true" />{t(engine.label)}</span>
+              <span className="engine-chip__state">
+                <i aria-hidden="true" />
+                {transfer ? t("engine.downloading", { percent: transferPercent }) : t(engine.label)}
+              </span>
             </span>
           </button>
         </aside>
