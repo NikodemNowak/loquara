@@ -16,6 +16,7 @@ const fallbackSettings: AppSettings = {
   streaming: true,
   language: "system",
   modelKeepAliveSecs: 0,
+  pasteMode: "auto",
 };
 export function useAppModel(adapter: AppAdapter, onError: (message: string) => void) {
   const [snapshot, setSnapshot] = useState<AppSnapshot>({

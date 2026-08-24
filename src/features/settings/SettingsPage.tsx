@@ -7,7 +7,7 @@ import { ShortcutCapture } from "./ShortcutCapture";
 import { Select } from "../../components/Select";
 import type { ToastKind } from "../../components/Toast";
 import type { AppAdapter } from "../../lib/tauri";
-import type { AppSettings, DownloadStatus, InputDeviceInfo, ModelDescriptor, ModelDownloadProgress, ModelStatus } from "../../lib/types";
+import type { AppSettings, DownloadStatus, InputDeviceInfo, ModelDescriptor, ModelDownloadProgress, ModelStatus, PasteMode } from "../../lib/types";
 import { normalizeError } from "../../lib/errors";
 import { formatBytes as formatSize } from "../../lib/bytes";
 import { useI18n } from "../../lib/i18n";
@@ -342,6 +342,20 @@ export function SettingsPage({
           <label className="setting-row">
             <span><strong>{t("settings.autoPaste.label")}</strong><small>{t("settings.autoPaste.description")}</small></span>
             <input type="checkbox" checked={settings.autoPaste} aria-label={t("settings.autoPaste.label")} onChange={(event) => void save({ autoPaste: event.target.checked })} />
+          </label>
+          <label className="setting-row">
+            <span><strong>{t("settings.pasteMode.label")}</strong><small>{t("settings.pasteMode.description")}</small></span>
+            <Select
+              label={t("settings.pasteMode.label")}
+              value={settings.pasteMode ?? "auto"}
+              onChange={(next) => void save({ pasteMode: next as PasteMode })}
+              options={[
+                { value: "auto", label: t("settings.pasteMode.auto") },
+                { value: "ctrl_shift_v", label: t("settings.pasteMode.ctrlShiftV") },
+                { value: "shift_insert", label: t("settings.pasteMode.shiftInsert") },
+                { value: "ctrl_v", label: t("settings.pasteMode.ctrlV") },
+              ]}
+            />
           </label>
           <label className="setting-row">
             <span><strong>{t("settings.showOverlay.label")}</strong><small>{t("settings.showOverlay.description")}</small></span>

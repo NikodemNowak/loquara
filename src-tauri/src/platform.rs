@@ -119,6 +119,16 @@ impl fmt::Display for Shortcut {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PasteMode {
+    #[default]
+    Auto,
+    CtrlV,
+    CtrlShiftV,
+    ShiftInsert,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WindowTarget(pub isize);
 
 pub trait WindowsApi {
@@ -126,18 +136,34 @@ pub trait WindowsApi {
     fn restore_foreground(&mut self, target: WindowTarget) -> Result<(), PlatformError>;
     fn write_clipboard(&mut self, text: &str) -> Result<(), PlatformError>;
     fn send_ctrl_v(&mut self) -> Result<(), PlatformError>;
+    fn send_ctrl_shift_v(&mut self) -> Result<(), PlatformError> {
+        self.send_ctrl_v()
+    }
+    fn send_shift_insert(&mut self) -> Result<(), PlatformError> {
+        self.send_ctrl_v()
+    }
+    fn send_paste(&mut self, target: Option<WindowTarget>, mode: PasteMode) -> Result<(), PlatformError> {
+        let _ = target;
+        match mode {
+            PasteMode::Auto => self.send_ctrl_v(),
+            PasteMode::CtrlV => self.send_ctrl_v(),
+            PasteMode::CtrlShiftV => self.send_ctrl_shift_v(),
+            PasteMode::ShiftInsert => self.send_shift_insert(),
+        }
+    }
 }
 
 pub fn copy_and_paste(
     windows: &mut impl WindowsApi,
     target: Option<WindowTarget>,
     text: &str,
+    mode: PasteMode,
 ) -> Result<(), PlatformError> {
     windows.write_clipboard(text)?;
     if let Some(target) = target {
         windows.restore_foreground(target)?;
     }
-    windows.send_ctrl_v()
+    windows.send_paste(target, mode)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -619,6 +645,185 @@ pub fn reveal_path(path: &std::path::Path) -> Result<(), PlatformError> {
     }
 }
 
+#[cfg(windows)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TerminalPasteType {
+    None,
+    CtrlShiftV,
+    ShiftInsert,
+}
+
+#[cfg(windows)]
+pub fn detect_terminal_paste_type(hwnd: windows_sys::Win32::Foundation::HWND) -> TerminalPasteType {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetClassNameW, GetWindowTextW, GetWindowThreadProcessId,
+    };
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    use windows_sys::Win32::Foundation::CloseHandle;
+
+    if hwnd.is_null() {
+        return TerminalPasteType::None;
+    }
+
+    // 1. Check window class name
+    let mut class_buf = [0u16; 256];
+    let class_len = unsafe { GetClassNameW(hwnd, class_buf.as_mut_ptr(), class_buf.len() as i32) };
+    let class_name = if class_len > 0 {
+        String::from_utf16_lossy(&class_buf[..class_len as usize]).to_ascii_lowercase()
+    } else {
+        String::new()
+    };
+
+    if class_name.contains("putty") || class_name.contains("kitty") {
+        return TerminalPasteType::ShiftInsert;
+    }
+    if class_name == "cascadia_hosting_window_class" // Windows Terminal
+        || class_name == "consolewindowclass"         // conhost / cmd / powershell
+        || class_name == "mintty"                     // Git Bash / Cygwin / MSYS2
+        || class_name.contains("alacritty")
+        || class_name.contains("wezterm")
+        || class_name.contains("ghostty")
+        || class_name.contains("virtualconsoleclass") // ConEmu
+        || class_name.contains("conemumain")
+        || class_name.contains("mobaxterm")
+        || class_name.contains("tmoba")
+        || class_name.contains("vcxsrv")             // X11 SSH / Remote Linux GUI
+        || class_name.contains("x410")
+        || class_name.contains("x-frame")
+        || class_name.contains("rail_window")         // WSLg Remote App / Terminal
+        || class_name.contains("wsldvcwindowclass")
+    {
+        return TerminalPasteType::CtrlShiftV;
+    }
+
+    // 2. Check window title
+    let mut title_buf = [0u16; 512];
+    let title_len = unsafe { GetWindowTextW(hwnd, title_buf.as_mut_ptr(), title_buf.len() as i32) };
+    if title_len > 0 {
+        let title = String::from_utf16_lossy(&title_buf[..title_len as usize]).to_ascii_lowercase();
+        if title.contains("termius") {
+            return TerminalPasteType::CtrlShiftV;
+        }
+        if title.contains("putty") {
+            return TerminalPasteType::ShiftInsert;
+        }
+    }
+
+    // 3. Check process executable name
+    let mut pid = 0u32;
+    unsafe { GetWindowThreadProcessId(hwnd, &mut pid) };
+    if pid != 0 {
+        let process_handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        if !process_handle.is_null() {
+            let mut name_buf = [0u16; 1024];
+            let mut size = name_buf.len() as u32;
+            let ok = unsafe {
+                QueryFullProcessImageNameW(process_handle, 0, name_buf.as_mut_ptr(), &mut size)
+            };
+            unsafe { CloseHandle(process_handle) };
+            if ok != 0 && size > 0 {
+                let full_path = String::from_utf16_lossy(&name_buf[..size as usize]).to_ascii_lowercase();
+                let exe_name = full_path.rsplit('\\').next().unwrap_or(&full_path);
+
+                if exe_name.contains("putty") || exe_name.contains("kitty") {
+                    return TerminalPasteType::ShiftInsert;
+                }
+                if exe_name.contains("termius")
+                    || exe_name.contains("windowsterminal")
+                    || exe_name == "wt.exe"
+                    || exe_name.contains("alacritty")
+                    || exe_name.contains("wezterm")
+                    || exe_name.contains("ghostty")
+                    || exe_name.contains("mintty")
+                    || exe_name.contains("conhost")
+                    || exe_name.contains("powershell")
+                    || exe_name == "pwsh.exe"
+                    || exe_name == "cmd.exe"
+                    || exe_name.contains("mobaxterm")
+                    || exe_name.contains("wsl")
+                    || exe_name.contains("tabby")
+                    || exe_name.contains("terminus")
+                    || exe_name.contains("hyper")
+                    || exe_name.contains("securecrt")
+                    || exe_name.contains("xshell")
+                    || exe_name.contains("vcxsrv")
+                    || exe_name.contains("x410")
+                    || exe_name.contains("xming")
+                    || exe_name.contains("wslg")
+                {
+                    return TerminalPasteType::CtrlShiftV;
+                }
+            }
+        }
+    }
+
+    TerminalPasteType::None
+}
+
+#[cfg(windows)]
+fn send_inputs_with_hold(
+    down: &[windows_sys::Win32::UI::Input::KeyboardAndMouse::INPUT],
+    up: &[windows_sys::Win32::UI::Input::KeyboardAndMouse::INPUT],
+) -> Result<(), PlatformError> {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{SendInput, INPUT};
+
+    let sent_down = unsafe {
+        SendInput(
+            down.len().try_into().unwrap_or(u32::MAX),
+            down.as_ptr(),
+            size_of::<INPUT>().try_into().unwrap_or(i32::MAX),
+        )
+    };
+    if sent_down != down.len() as u32 {
+        return Err(PlatformError::PasteFailed(format!(
+            "SendInput down accepted {sent_down}/{} events",
+            down.len()
+        )));
+    }
+
+    std::thread::sleep(std::time::Duration::from_millis(15));
+
+    let sent_up = unsafe {
+        SendInput(
+            up.len().try_into().unwrap_or(u32::MAX),
+            up.as_ptr(),
+            size_of::<INPUT>().try_into().unwrap_or(i32::MAX),
+        )
+    };
+    if sent_up != up.len() as u32 {
+        return Err(PlatformError::PasteFailed(format!(
+            "SendInput up accepted {sent_up}/{} events",
+            up.len()
+        )));
+    }
+
+    Ok(())
+}
+
+#[cfg(windows)]
+fn key_input(key: u16, flags: u32) -> windows_sys::Win32::UI::Input::KeyboardAndMouse::INPUT {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+        INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY, MapVirtualKeyW,
+        VK_INSERT,
+    };
+    let scan = unsafe { MapVirtualKeyW(key as u32, 0) } as u16;
+    let extra_flags = if key == VK_INSERT { KEYEVENTF_EXTENDEDKEY } else { 0 };
+    INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: key,
+                wScan: scan,
+                dwFlags: flags | extra_flags,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    }
+}
+
 pub struct SystemWindows;
 
 impl WindowsApi for SystemWindows {
@@ -638,17 +843,58 @@ impl WindowsApi for SystemWindows {
         #[cfg(windows)]
         {
             use windows_sys::Win32::UI::WindowsAndMessaging::{
-                SW_RESTORE, SetForegroundWindow, ShowWindow,
+                BringWindowToTop, GetForegroundWindow, GetWindowThreadProcessId, IsIconic,
+                SW_RESTORE, SW_SHOW, SetForegroundWindow, ShowWindow,
             };
+            use windows_sys::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
+
             let hwnd = target.0 as windows_sys::Win32::Foundation::HWND;
+            if hwnd.is_null() {
+                return Ok(());
+            }
+
             unsafe {
-                ShowWindow(hwnd, SW_RESTORE);
-                if SetForegroundWindow(hwnd) == 0 {
-                    return Err(PlatformError::FocusFailed(
-                        "Windows refused to restore the target foreground window".into(),
-                    ));
+                // Only call SW_RESTORE if the window is truly minimized (iconic).
+                // Calling SW_RESTORE on a maximized or snapped/split-screen window
+                // causes Windows to unsnap/unmaximize it and reset its size and position!
+                if IsIconic(hwnd) != 0 {
+                    ShowWindow(hwnd, SW_RESTORE);
+                } else {
+                    ShowWindow(hwnd, SW_SHOW);
+                }
+
+                let current_thread = GetCurrentThreadId();
+                let target_thread = GetWindowThreadProcessId(hwnd, std::ptr::null_mut());
+                if current_thread != target_thread && target_thread != 0 {
+                    AttachThreadInput(current_thread, target_thread, 1);
+                    let success = SetForegroundWindow(hwnd);
+                    BringWindowToTop(hwnd);
+                    AttachThreadInput(current_thread, target_thread, 0);
+                    if success == 0 {
+                        return Err(PlatformError::FocusFailed(
+                            "Windows refused to restore the target foreground window".into(),
+                        ));
+                    }
+                } else {
+                    if SetForegroundWindow(hwnd) == 0 {
+                        return Err(PlatformError::FocusFailed(
+                            "Windows refused to restore the target foreground window".into(),
+                        ));
+                    }
+                    BringWindowToTop(hwnd);
                 }
             }
+
+            // Wait for Windows and target process (especially Electron/Chromium apps like Termius)
+            // to switch active foreground context and focus the input element
+            for _ in 0..10 {
+                let fg = unsafe { GetForegroundWindow() };
+                if fg == hwnd {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(40));
         }
         Ok(())
     }
@@ -664,43 +910,13 @@ impl WindowsApi for SystemWindows {
     fn send_ctrl_v(&mut self) -> Result<(), PlatformError> {
         #[cfg(windows)]
         {
-            use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-                INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput, VK_CONTROL,
-            };
-            fn key_input(key: u16, flags: u32) -> INPUT {
-                INPUT {
-                    r#type: INPUT_KEYBOARD,
-                    Anonymous: INPUT_0 {
-                        ki: KEYBDINPUT {
-                            wVk: key,
-                            wScan: 0,
-                            dwFlags: flags,
-                            time: 0,
-                            dwExtraInfo: 0,
-                        },
-                    },
-                }
-            }
-            let inputs = [
-                key_input(VK_CONTROL, 0),
-                key_input(u16::from(b'V'), 0),
+            use windows_sys::Win32::UI::Input::KeyboardAndMouse::{KEYEVENTF_KEYUP, VK_CONTROL};
+            let down = [key_input(VK_CONTROL, 0), key_input(u16::from(b'V'), 0)];
+            let up = [
                 key_input(u16::from(b'V'), KEYEVENTF_KEYUP),
                 key_input(VK_CONTROL, KEYEVENTF_KEYUP),
             ];
-            let sent = unsafe {
-                SendInput(
-                    inputs.len().try_into().unwrap_or(u32::MAX),
-                    inputs.as_ptr(),
-                    size_of::<INPUT>().try_into().unwrap_or(i32::MAX),
-                )
-            };
-            if sent != inputs.len() as u32 {
-                return Err(PlatformError::PasteFailed(format!(
-                    "SendInput accepted {sent}/{} events",
-                    inputs.len()
-                )));
-            }
-            Ok(())
+            send_inputs_with_hold(&down, &up)
         }
         #[cfg(target_os = "macos")]
         {
@@ -736,6 +952,135 @@ impl WindowsApi for SystemWindows {
             Err(PlatformError::PasteFailed(
                 "paste injection is not implemented on this platform".into(),
             ))
+        }
+    }
+
+    fn send_ctrl_shift_v(&mut self) -> Result<(), PlatformError> {
+        #[cfg(windows)]
+        {
+            use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+                KEYEVENTF_KEYUP, VK_CONTROL, VK_SHIFT,
+            };
+            let down = [
+                key_input(VK_CONTROL, 0),
+                key_input(VK_SHIFT, 0),
+                key_input(u16::from(b'V'), 0),
+            ];
+            let up = [
+                key_input(u16::from(b'V'), KEYEVENTF_KEYUP),
+                key_input(VK_SHIFT, KEYEVENTF_KEYUP),
+                key_input(VK_CONTROL, KEYEVENTF_KEYUP),
+            ];
+            send_inputs_with_hold(&down, &up)
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let output = std::process::Command::new("osascript")
+                .args([
+                    "-e",
+                    r#"tell application "System Events" to keystroke "v" using {command down, shift down}"#,
+                ])
+                .output()
+                .map_err(|error| PlatformError::PasteFailed(error.to_string()))?;
+            if !output.status.success() {
+                return Err(PlatformError::PasteFailed(
+                    String::from_utf8_lossy(&output.stderr).into_owned(),
+                ));
+            }
+            Ok(())
+        }
+        #[cfg(all(unix, not(target_os = "macos")))]
+        {
+            let output = std::process::Command::new("xdotool")
+                .args(["key", "--clearmodifiers", "ctrl+shift+v"])
+                .output()
+                .map_err(|error| PlatformError::PasteFailed(error.to_string()))?;
+            if !output.status.success() {
+                return Err(PlatformError::PasteFailed(
+                    String::from_utf8_lossy(&output.stderr).into_owned(),
+                ));
+            }
+            Ok(())
+        }
+        #[cfg(not(any(windows, target_os = "macos", all(unix, not(target_os = "macos")))))]
+        {
+            Err(PlatformError::PasteFailed(
+                "paste injection is not implemented on this platform".into(),
+            ))
+        }
+    }
+
+    fn send_shift_insert(&mut self) -> Result<(), PlatformError> {
+        #[cfg(windows)]
+        {
+            use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+                KEYEVENTF_KEYUP, VK_INSERT, VK_SHIFT,
+            };
+            let down = [key_input(VK_SHIFT, 0), key_input(VK_INSERT, 0)];
+            let up = [
+                key_input(VK_INSERT, KEYEVENTF_KEYUP),
+                key_input(VK_SHIFT, KEYEVENTF_KEYUP),
+            ];
+            send_inputs_with_hold(&down, &up)
+        }
+        #[cfg(target_os = "macos")]
+        {
+            self.send_ctrl_v()
+        }
+        #[cfg(all(unix, not(target_os = "macos")))]
+        {
+            let output = std::process::Command::new("xdotool")
+                .args(["key", "--clearmodifiers", "Shift+Insert"])
+                .output()
+                .map_err(|error| PlatformError::PasteFailed(error.to_string()))?;
+            if !output.status.success() {
+                return Err(PlatformError::PasteFailed(
+                    String::from_utf8_lossy(&output.stderr).into_owned(),
+                ));
+            }
+            Ok(())
+        }
+        #[cfg(not(any(windows, target_os = "macos", all(unix, not(target_os = "macos")))))]
+        {
+            Err(PlatformError::PasteFailed(
+                "paste injection is not implemented on this platform".into(),
+            ))
+        }
+    }
+
+    fn send_paste(&mut self, target: Option<WindowTarget>, mode: PasteMode) -> Result<(), PlatformError> {
+        match mode {
+            PasteMode::CtrlV => self.send_ctrl_v(),
+            PasteMode::CtrlShiftV => self.send_ctrl_shift_v(),
+            PasteMode::ShiftInsert => self.send_shift_insert(),
+            PasteMode::Auto => {
+                #[cfg(windows)]
+                {
+                    if let Some(target) = target {
+                        let hwnd = target.0 as windows_sys::Win32::Foundation::HWND;
+                        match detect_terminal_paste_type(hwnd) {
+                            TerminalPasteType::CtrlShiftV => return self.send_ctrl_shift_v(),
+                            TerminalPasteType::ShiftInsert => return self.send_shift_insert(),
+                            TerminalPasteType::None => return self.send_ctrl_v(),
+                        }
+                    }
+                    self.send_ctrl_v()
+                }
+                #[cfg(all(unix, not(target_os = "macos")))]
+                {
+                    self.send_ctrl_shift_v().or_else(|_| self.send_ctrl_v())
+                }
+                #[cfg(target_os = "macos")]
+                {
+                    self.send_ctrl_v()
+                }
+                #[cfg(not(any(windows, target_os = "macos", all(unix, not(target_os = "macos")))))]
+                {
+                    Err(PlatformError::PasteFailed(
+                        "paste injection is not implemented on this platform".into(),
+                    ))
+                }
+            }
         }
     }
 }
@@ -792,9 +1137,13 @@ mod tests {
         clipboard: Vec<String>,
         restored: Vec<WindowTarget>,
         paste_attempts: usize,
+        ctrl_shift_v_attempts: usize,
+        shift_insert_attempts: usize,
         fail_clipboard: bool,
         fail_focus: bool,
         fail_paste: bool,
+        #[cfg(windows)]
+        terminal_paste: Option<TerminalPasteType>,
     }
 
     impl WindowsApi for FakeWindows {
@@ -825,6 +1174,42 @@ mod tests {
             }
             Ok(())
         }
+
+        fn send_ctrl_shift_v(&mut self) -> Result<(), PlatformError> {
+            self.ctrl_shift_v_attempts += 1;
+            if self.fail_paste {
+                return Err(PlatformError::PasteFailed("SendInput".into()));
+            }
+            Ok(())
+        }
+
+        fn send_shift_insert(&mut self) -> Result<(), PlatformError> {
+            self.shift_insert_attempts += 1;
+            if self.fail_paste {
+                return Err(PlatformError::PasteFailed("SendInput".into()));
+            }
+            Ok(())
+        }
+
+        fn send_paste(&mut self, target: Option<WindowTarget>, mode: PasteMode) -> Result<(), PlatformError> {
+            match mode {
+                PasteMode::CtrlV => self.send_ctrl_v(),
+                PasteMode::CtrlShiftV => self.send_ctrl_shift_v(),
+                PasteMode::ShiftInsert => self.send_shift_insert(),
+                PasteMode::Auto => {
+                    #[cfg(windows)]
+                    if let Some(paste_type) = self.terminal_paste {
+                        return match paste_type {
+                            TerminalPasteType::CtrlShiftV => self.send_ctrl_shift_v(),
+                            TerminalPasteType::ShiftInsert => self.send_shift_insert(),
+                            TerminalPasteType::None => self.send_ctrl_v(),
+                        };
+                    }
+                    let _ = target;
+                    self.send_ctrl_v()
+                }
+            }
+        }
     }
 
     #[test]
@@ -834,7 +1219,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = copy_and_paste(&mut windows, Some(WindowTarget(9)), "Zażółć");
+        let result = copy_and_paste(&mut windows, Some(WindowTarget(9)), "Zażółć", PasteMode::Auto);
 
         assert_eq!(windows.clipboard, vec!["Zażółć"]);
         assert_eq!(windows.restored, vec![WindowTarget(9)]);
@@ -849,7 +1234,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = copy_and_paste(&mut windows, Some(WindowTarget(9)), "tekst");
+        let result = copy_and_paste(&mut windows, Some(WindowTarget(9)), "tekst", PasteMode::Auto);
 
         assert!(matches!(result, Err(PlatformError::FocusFailed(_))));
         assert_eq!(windows.clipboard, vec!["tekst"]);
@@ -945,5 +1330,37 @@ mod tests {
             }),
             CoordinatorAction::Ignore
         );
+    }
+
+    #[test]
+    fn terminal_paste_routes_to_ctrl_shift_v_or_shift_insert() {
+        #[cfg(windows)]
+        {
+            let mut terminal_windows = FakeWindows {
+                terminal_paste: Some(TerminalPasteType::CtrlShiftV),
+                ..Default::default()
+            };
+            let _ = copy_and_paste(&mut terminal_windows, Some(WindowTarget(10)), "ls -la", PasteMode::Auto);
+            assert_eq!(terminal_windows.ctrl_shift_v_attempts, 1);
+            assert_eq!(terminal_windows.paste_attempts, 0);
+            assert_eq!(terminal_windows.shift_insert_attempts, 0);
+
+            let mut putty_windows = FakeWindows {
+                terminal_paste: Some(TerminalPasteType::ShiftInsert),
+                ..Default::default()
+            };
+            let _ = copy_and_paste(&mut putty_windows, Some(WindowTarget(11)), "top", PasteMode::Auto);
+            assert_eq!(putty_windows.shift_insert_attempts, 1);
+            assert_eq!(putty_windows.paste_attempts, 0);
+            assert_eq!(putty_windows.ctrl_shift_v_attempts, 0);
+
+            let mut explicit_shift_insert = FakeWindows::default();
+            let _ = copy_and_paste(&mut explicit_shift_insert, Some(WindowTarget(12)), "echo hi", PasteMode::ShiftInsert);
+            assert_eq!(explicit_shift_insert.shift_insert_attempts, 1);
+
+            let mut explicit_ctrl_shift_v = FakeWindows::default();
+            let _ = copy_and_paste(&mut explicit_ctrl_shift_v, Some(WindowTarget(13)), "echo hi", PasteMode::CtrlShiftV);
+            assert_eq!(explicit_ctrl_shift_v.ctrl_shift_v_attempts, 1);
+        }
     }
 }

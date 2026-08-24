@@ -58,6 +58,7 @@ export const settings: AppSettings = {
   streaming: true,
   language: "system",
   modelKeepAliveSecs: 0,
+  pasteMode: "auto",
 };
 export const snapshot: AppSnapshot = {
   dictation: { status: "idle" },

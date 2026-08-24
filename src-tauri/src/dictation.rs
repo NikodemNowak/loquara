@@ -3,7 +3,7 @@ use crate::audio::{
     AudioRecorder, CompletedRecording, InputDeviceInfo, cleanup_partial, quantize_peaks,
 };
 use crate::domain::{DictationEvent, DictationState, transition};
-use crate::platform::{self, SystemWindows, WindowTarget, WindowsApi};
+use crate::platform::{self, PasteMode, SystemWindows, WindowTarget, WindowsApi};
 use crate::storage::{
     HistoryQuery, Mode, Recording, RecordingStatus, Retention, Storage, StorageError,
     VocabularyEntry, postprocess_for_mode,
@@ -11,9 +11,7 @@ use crate::storage::{
 use crate::transcription::TranscriptionResult;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::BTreeSet;
-use std::io::{BufRead, Read};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -230,6 +228,8 @@ pub struct AppSettings {
     /// 0 means "always" (never unload).
     #[serde(default)]
     pub model_keep_alive_secs: u64,
+    #[serde(default)]
+    pub paste_mode: PasteMode,
 }
 
 const fn default_launch_on_login() -> bool {
@@ -272,6 +272,7 @@ impl Default for AppSettings {
             streaming: default_streaming(),
             language: default_language(),
             model_keep_alive_secs: 0,
+            paste_mode: PasteMode::default(),
         }
     }
 }
@@ -319,13 +320,6 @@ pub struct ModelDownloadProgress {
     pub phase: String,
     pub downloaded_bytes: u64,
     pub total_bytes: Option<u64>,
-}
-
-#[derive(Debug, Deserialize)]
-struct WorkerDownloadProgress {
-    event: String,
-    downloaded_bytes: u64,
-    total_bytes: Option<u64>,
 }
 
 
@@ -1345,15 +1339,16 @@ fn finish_success(
         },
         || {
             emit_state(app, state);
-            let auto_paste = state
+            let (auto_paste, paste_mode) = state
                 .settings
                 .read()
-                .map(|settings| settings.auto_paste)
-                .unwrap_or(false);
+                .map(|settings| (settings.auto_paste, settings.paste_mode))
+                .unwrap_or((false, PasteMode::Auto));
             if auto_paste {
+                platform::hide_overlay(app);
                 let target = state.target_window.lock().ok().and_then(|target| *target);
                 let mut windows = SystemWindows;
-                if let Err(error) = platform::copy_and_paste(&mut windows, target, &transcript) {
+                if let Err(error) = platform::copy_and_paste(&mut windows, target, &transcript, paste_mode) {
                     let _ = app.emit("dictation://paste_error", error);
                 }
             } else {
@@ -1676,7 +1671,12 @@ pub fn paste_transcript_inner(recording_id: Option<&str>, state: &AppState) -> R
         .text
         .ok_or_else(|| "recording has no transcript".to_owned())?;
     let target = state.target_window.lock().ok().and_then(|target| *target);
-    platform::copy_and_paste(&mut SystemWindows, target, &text).map_err(|error| error.to_string())
+    let paste_mode = state
+        .settings
+        .read()
+        .map(|settings| settings.paste_mode)
+        .unwrap_or(PasteMode::Auto);
+    platform::copy_and_paste(&mut SystemWindows, target, &text, paste_mode).map_err(|error| error.to_string())
 }
 
 pub async fn toggle_recording(app: AppHandle, state: AppState) -> Result<(), String> {

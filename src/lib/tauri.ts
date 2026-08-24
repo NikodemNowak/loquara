@@ -150,6 +150,7 @@ const initialSettings: AppSettings = {
   streaming: false,
   language: "system",
   modelKeepAliveSecs: 0,
+  pasteMode: "auto",
 };
 /** A speech-shaped envelope, so the demo mode looks like real dictation. */
 const demoPeaks = (seed: number): number[] => {

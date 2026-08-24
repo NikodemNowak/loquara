@@ -21,6 +21,8 @@ export type DictationEvent =
   | { type: "cancel" }
   | { type: "cancel_request" };
 
+export type PasteMode = "auto" | "ctrl_v" | "ctrl_shift_v" | "shift_insert";
+
 export interface AppSettings {
   inputDevice: string | null;
   shortcut: string;
@@ -34,6 +36,7 @@ export interface AppSettings {
   streaming: boolean;
   language: LanguageChoice;
   modelKeepAliveSecs: number;
+  pasteMode: PasteMode;
 }
 
 export interface ModelStatus {
