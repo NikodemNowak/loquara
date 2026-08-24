@@ -1,24 +1,14 @@
 param(
-    [switch]$SetupEngine,
-    [switch]$DownloadModel,
-    [switch]$Built,
-    [string]$Python = $(if ($env:MOW_PYTHON) { $env:MOW_PYTHON } else { "python" })
+    [switch]$Built
 )
 
 $ErrorActionPreference = "Stop"
 $repository = Split-Path -Parent $PSScriptRoot
 
-if ($SetupEngine) {
-    & (Join-Path $PSScriptRoot "setup-engine.ps1") -Python $Python
-}
-if ($DownloadModel) {
-    & (Join-Path $PSScriptRoot "download-model.ps1") -Python $Python
-}
-
 if ($Built) {
-    $executable = Join-Path $repository "src-tauri\target\release\mow.exe"
+    $executable = Join-Path $repository "src-tauri\target\release\loquara.exe"
     if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) {
-        throw "Missing release executable: $executable"
+        throw "Missing release executable: $executable. Run 'pnpm tauri build' first."
     }
     Start-Process -FilePath $executable -WorkingDirectory (Split-Path $executable)
     return

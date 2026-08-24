@@ -1,70 +1,90 @@
 # Loquara
 
-Loquara is a local, open-source dictation app for Windows (Linux builds run in CI; macOS is not yet supported). Hold a global shortcut, speak, and get a transcription from a local Whisper, Parakeet, or Cohere model running on your GPU — optionally pasted straight into the active app.
+Loquara is a fast, private, and offline speech-to-text dictation application for Windows. Press a global shortcut anywhere, speak, and have your speech transcribed locally on your GPU or CPU using the **NVIDIA Parakeet TDT 0.6B v3** model — and pasted directly into your active window, code editor, browser, or terminal.
 
-## Highlights
+**100% offline and private:** audio and transcripts never leave your computer. No Python, PyTorch, or cloud accounts required.
 
-- global shortcut `Ctrl+Space` starts and stops recording, `Esc` cancels;
-- a minimal floating pill shows a live level meter while dictating — nothing else;
-- distinct sound cues mark recording start, stop, and transcript-ready;
-- system tray: start recording, paste the last transcript, open the main window;
-- history keeps audio and text; a custom vocabulary and modes refine results;
-- shortcut capture: click the shortcut field and press the new combo to set it;
-- a dark interface, tuned for long dictation sessions;
-- Polish and English UI — follows the OS language (Polish on Polish systems, English otherwise), switchable anytime in settings;
-- **everything runs locally** — audio never leaves the machine.
+---
 
-## Privacy and architecture
+## ✨ Features
 
-The React UI runs in Tauri. Rust captures audio, stores SQLite, and handles shortcuts, tray, and clipboard. A long-lived Python worker loads `nvidia/parakeet-tdt-0.6b-v3` at the pinned revision `7c35754d166cca382ad1e53e68b01e7c575f3a1d` via Transformers/PyTorch CUDA. After a one-time model download, transcription sends nothing to the cloud.
+- **Global shortcut:** `Ctrl+Space` starts and stops dictation anywhere. Configurable in settings.
+- **Minimal floating overlay:** Compact pill with a noise-adaptive meter during recording. Sound cues signal start, stop, and transcript readiness.
+- **Universal paste:**
+  - Standard apps: `Ctrl + V`
+  - Linux SSH / Terminals: automatic `Ctrl + Shift + V` for Termius, Windows Terminal, WSL, Git Bash, Alacritty, WezTerm, Ghostty, etc.
+  - PuTTY / KiTTY: automatic `Shift + Insert`
+  - Custom paste mode selection available in Settings.
+- **Runs on any GPU or CPU:** DirectML hardware acceleration covers NVIDIA, AMD, Intel, and CPU fallback out of the box with zero driver toolkits to install.
+- **Built-in model manager:** Downloads the lightweight 670 MB Parakeet model in-app with 4 concurrent streams and live progress.
+- **Custom vocabulary & modes:** Teach Loquara specialized jargon, brand names, and phonetic replacements. Transform output with custom mode rules.
+- **Audio history & retention:** Review past recordings and transcripts. Set automatic audio cleanup (1 day, 7 days, 30 days, or forever).
+- **System tray integration:** Start dictation, paste last transcription, or launch minimized to the tray at login.
+- **Bilingual interface:** Polish and English UI matching system language with manual override.
 
-## Requirements
+---
 
-- Windows 10/11 x64 (primary) or Linux x64 (via CI);
-- Node.js, `pnpm`, and a Rust toolchain matching `rust-version` (for building);
-- Python 3.10+ (tested with 3.13);
-- PyTorch with CUDA installed separately, matching your NVIDIA driver;
-- at least 6 GB of free space for the model in the Hugging Face cache.
+## 🚀 Getting Started
 
-`engine/requirements.txt` deliberately omits PyTorch so it never replaces your optimized CUDA build.
+### Installation
+1. Download the latest installer (`Loquara_x.x.x_x64-setup.exe` or `.msi`) from [Releases](https://github.com/NikodemNowak/loquara/releases).
+2. Run the installer and launch Loquara.
+3. On first start, click **Download** to fetch the offline speech engine model (670 MB).
+4. Press `Ctrl+Space` anywhere in Windows to start dictating!
 
-## Engine and model setup
+---
 
-In PowerShell (or bash on macOS/Linux):
+## 🛠️ Architecture & Tech Stack
 
+Loquara is built as a lightweight, native Windows desktop application:
+
+- **Frontend:** React 19, TypeScript, Vite, Fluent UI icons, Radix UI.
+- **Backend / Platform:** Tauri 2 (Rust), Win32 API (window management, thread-attached input injection, scan-code mapping), `cpal` (audio capture), `rusqlite` (SQLite storage).
+- **Speech Engine:** Native `sherpa-onnx` ONNX Runtime bindings with DirectML / CPU acceleration running `nvidia/parakeet-tdt-0.6b-v3`.
+
+---
+
+## 💻 Development & Building
+
+### Prerequisites
+- Windows 10/11 x64
+- [Node.js 22+](https://nodejs.org/) & [pnpm](https://pnpm.io/)
+- [Rust](https://rustup.rs/) (edition 2024 / stable toolchain)
+- CMake 3.x (for compiling native ONNX runtime bindings)
+
+### Running locally
 ```powershell
-.\scripts\setup-engine.ps1
-.\scripts\download-model.ps1
+# Install frontend dependencies
+pnpm install
+
+# Run the app in development mode (with hot reload)
+pnpm tauri dev
 ```
 
-`setup-engine.ps1` installs the pinned lightweight dependencies, checks CUDA, the GPU name, and pings the worker. `download-model.ps1` downloads the pinned revision into the standard Hugging Face cache; it is idempotent and reports the path and byte count. If Python is not on `PATH`, set `MOW_PYTHON` to the full path of `python.exe`.
-
-## Run and build
-
+### Running tests
 ```powershell
-pnpm install
-.\scripts\run-dev.ps1
+# Run frontend tests
+pnpm test
+
+# Run Rust unit & platform tests
+cargo test --manifest-path src-tauri/Cargo.toml --lib
+```
+
+### Building the installer
+```powershell
 pnpm tauri build
 ```
+The resulting NSIS installer and MSI packages are created in `src-tauri/target/release/bundle/`.
 
-`run-dev.ps1` options: `-SetupEngine`, `-DownloadModel`, and `-Built`. The release binary lands in `src-tauri\target\release\loquara.exe`, the NSIS installer in `src-tauri\target\release\bundle\nsis`.
+---
 
-Full runtime verification:
+## 📁 Local Data Paths
 
-```powershell
-.\tests\smoke.ps1 -ExePath .\src-tauri\target\release\loquara.exe
-```
+- **Settings, SQLite database, and recordings:** `%APPDATA%\io.loquara.desktop\`
+- **Engine models:** `%APPDATA%\io.loquara.desktop\models\`
 
-## Language
+---
 
-The interface ships in Polish and English. It follows the OS language — Polish on Polish systems, English everywhere else — and can be switched anytime in **Settings → General**.
-
-## Local data
-
-- settings, history, and recordings: `%APPDATA%\io.loquara.desktop`;
-- model: `%USERPROFILE%\.cache\huggingface\hub` or paths from `HF_HOME` / `HF_HUB_CACHE`;
-- model data and recordings are never committed to the repository.
-
-## License
+## 📄 License
 
 MIT — see [LICENSE](LICENSE).
