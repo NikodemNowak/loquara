@@ -2,8 +2,12 @@ import { translate, type TranslationKey } from "./i18n/lang";
 
 /** Backend messages (exact matches) that the UI should display localized. */
 const exactMessages: Record<string, TranslationKey> = {
+  "Previous dictation was interrupted before completion.": "errors.interrupted",
   "Previous dictation was interrupted before audio finalization.":
     "errors.interruptedBeforeFinalize",
+  "audio input buffer overflowed": "errors.bufferOverflow",
+  "recording cannot be retried: recording audio is missing": "errors.audioMissing",
+  "recording cannot be retried: recording has no finalized audio": "errors.audioMissing",
   "Stop dictating before deleting a model.": "errors.stopBeforeModelDelete",
   "Select another model before deleting the active one.": "errors.selectOtherBeforeModelDelete",
   "Only local WAV files are supported": "errors.onlyWav",

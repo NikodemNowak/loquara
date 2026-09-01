@@ -589,7 +589,7 @@ pub trait CompletionWriter {
         recording_id: &str,
         text: &str,
         model: &str,
-        duration_ms: u64,
+        duration_ms: Option<u64>,
     ) -> Result<(), String>;
     fn write_failed(&self, recording_id: &str, error: &str) -> Result<(), String>;
 }
@@ -600,14 +600,14 @@ impl CompletionWriter for Storage {
         recording_id: &str,
         text: &str,
         model: &str,
-        duration_ms: u64,
+        duration_ms: Option<u64>,
     ) -> Result<(), String> {
         match self.update_status(
             recording_id,
             RecordingStatus::Completed,
             Some(text),
             Some(model),
-            Some(duration_ms),
+            duration_ms,
             None,
         ) {
             Ok(true) => Ok(()),
@@ -635,7 +635,7 @@ pub struct DurableTranscript<'a> {
     pub audio_path: &'a str,
     pub transcript: &'a str,
     pub model: &'a str,
-    pub duration_ms: u64,
+    pub duration_ms: Option<u64>,
 }
 
 pub fn complete_transcription_durably(
@@ -1305,12 +1305,13 @@ async fn transcribe_recording(
         .map(|settings| settings.model.clone())
         .unwrap_or_else(|_| default_model());
     let started = Instant::now();
+    let cancel = state.transcription_cancel.clone();
     let outcome = tauri::async_runtime::spawn_blocking(move || {
         // A warm-up started when recording began may still be finishing; the
         // engine would serialise on its own lock anyway, but waiting here
         // keeps the reported state honest.
         let _ = warm.wait_until_ready_for(&model, Duration::from_secs(240));
-        let text = engine.transcribe(&model, &audio_for_engine)?;
+        let text = engine.transcribe(&model, &audio_for_engine, Some(&cancel))?;
         if let Ok(mut last_used) = engine_last_used.lock() {
             *last_used = Instant::now();
         }
@@ -1368,7 +1369,7 @@ fn finish_success(
             audio_path: &audio_path,
             transcript: &transcript,
             model: &result.model,
-            duration_ms: result.duration_ms,
+            duration_ms: None,
         },
         || {
             emit_state(app, state);
@@ -1473,17 +1474,34 @@ pub fn offers_cancel_undo(duration_ms: u64) -> bool {
     duration_ms >= CANCEL_UNDO_AFTER_MS
 }
 
+/// Short takes are discarded. Longer ones keep the finalized WAV so Undo and
+/// History retry have a file — `audio.cancel()` used to delete `.part` while
+/// the row still pointed at a `.wav` that was never written.
+pub fn discard_cancelled_take_if_short(
+    storage: &Storage,
+    recording_id: &str,
+    audio_path: &Path,
+    duration_ms: u64,
+) {
+    if offers_cancel_undo(duration_ms) {
+        return;
+    }
+    let _ = std::fs::remove_file(audio_path);
+    let _ = storage.clear_audio_path(recording_id);
+}
+
 fn cancel_live_recording(
     app: &AppHandle,
     state: &AppState,
     recording_id: String,
     audio_path: String,
 ) -> Result<AppSnapshot, String> {
-    let cancelled = match state.audio.cancel() {
+    let cancelled = match state.audio.stop() {
         Ok(cancelled) => cancelled,
         Err(error) => {
             let message = error.to_string();
             let _ = cleanup_partial(Path::new(&audio_path));
+            let _ = state.storage.clear_audio_path(&recording_id);
             let _ = recover_terminal_state(
                 &state.machine,
                 state.storage.as_ref(),
@@ -1521,6 +1539,12 @@ fn cancel_live_recording(
         emit_state(app, state);
         return Err(message);
     }
+    discard_cancelled_take_if_short(
+        state.storage.as_ref(),
+        &cancelled.id,
+        &cancelled.path,
+        cancelled.duration_ms,
+    );
     if offers_cancel_undo(cancelled.duration_ms) {
         state
             .machine
@@ -2578,6 +2602,7 @@ mod tests {
     use super::*;
     use crate::domain::{DictationState, RecoveryRecording};
     use std::fs;
+    use std::path::PathBuf;
 
     fn history_recording(id: &str, status: RecordingStatus, audio_path: &Path) -> Recording {
         Recording {
@@ -2796,6 +2821,52 @@ mod tests {
             retry_audio_path(&interrupted),
             Err(AppError::NotRetryable { .. })
         ));
+    }
+
+    #[test]
+    fn retry_rejects_a_row_whose_audio_file_is_missing() {
+        let missing = PathBuf::from("definitely-not-here.wav");
+        let row = history_recording("missing", RecordingStatus::Failed, &missing);
+
+        assert!(matches!(
+            retry_audio_path(&row),
+            Err(AppError::NotRetryable { message }) if message == "recording audio is missing"
+        ));
+    }
+
+    #[test]
+    fn short_cancel_deletes_audio_and_clears_the_stored_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = Storage::open_in_memory(temp.path().join("recordings")).unwrap();
+        let audio_path = temp.path().join("short.wav");
+        fs::write(&audio_path, b"wav").unwrap();
+        let mut row = history_recording("short", RecordingStatus::Cancelled, &audio_path);
+        row.duration_ms = 1_000;
+        storage.insert_recording(&row).unwrap();
+
+        discard_cancelled_take_if_short(&storage, "short", &audio_path, 1_000);
+
+        assert!(!audio_path.exists());
+        assert!(storage.get_recording("short").unwrap().unwrap().audio_path.is_none());
+    }
+
+    #[test]
+    fn long_cancel_keeps_audio_for_undo_and_retry() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = Storage::open_in_memory(temp.path().join("recordings")).unwrap();
+        let audio_path = temp.path().join("long.wav");
+        fs::write(&audio_path, b"wav").unwrap();
+        let mut row = history_recording("long", RecordingStatus::Cancelled, &audio_path);
+        row.duration_ms = CANCEL_UNDO_AFTER_MS;
+        storage.insert_recording(&row).unwrap();
+
+        discard_cancelled_take_if_short(&storage, "long", &audio_path, CANCEL_UNDO_AFTER_MS);
+
+        assert!(audio_path.is_file());
+        assert_eq!(
+            storage.get_recording("long").unwrap().unwrap().audio_path.as_deref(),
+            Some(audio_path.to_string_lossy().as_ref())
+        );
     }
 
     #[test]
@@ -3240,7 +3311,7 @@ mod tests {
             _recording_id: &str,
             _text: &str,
             _model: &str,
-            _duration_ms: u64,
+            _duration_ms: Option<u64>,
         ) -> Result<(), String> {
             let attempts = self.completed_attempts.get();
             self.completed_attempts.set(attempts + 1);
@@ -3276,7 +3347,7 @@ mod tests {
                 audio_path: "one.wav",
                 transcript: "tekst",
                 model: "model",
-                duration_ms: 10,
+                duration_ms: None,
             },
             || paste_calls.set(paste_calls.get() + 1),
         );
@@ -3310,7 +3381,7 @@ mod tests {
                 audio_path: "one.wav",
                 transcript: "tekst",
                 model: "model",
-                duration_ms: 10,
+                duration_ms: None,
             },
             || paste_calls.set(paste_calls.get() + 1),
         )

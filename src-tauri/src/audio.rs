@@ -105,6 +105,9 @@ pub enum AudioError {
     NotRecording,
     #[error("no input device is available")]
     NoInputDevice,
+    /// Historical rows still store this Display string. Stop no longer fails
+    /// with it — a full queue drops packets, then the take is finalized.
+    #[allow(dead_code)]
     #[error("audio input buffer overflowed")]
     BufferOverflow,
     #[error("audio I/O failed: {0}")]
@@ -478,8 +481,10 @@ impl AudioRecorder {
             sample_format: hound::SampleFormat::Int,
         };
         let writer = hound::WavWriter::create(&part_path, spec)?;
-        let (packet_sender, packet_receiver) = mpsc::sync_channel(16);
-        let (writer_sender, writer_receiver) = mpsc::sync_channel(16);
+        // Bounded, but wide enough that a brief disk stall (Defender scanning a
+        // previous take, a 70 MB finalize) does not throw the next dictation away.
+        let (packet_sender, packet_receiver) = mpsc::sync_channel(256);
+        let (writer_sender, writer_receiver) = mpsc::sync_channel(256);
         let overflowed = Arc::new(AtomicBool::new(false));
         let level_sender = self
             .level_sender
@@ -512,9 +517,11 @@ impl AudioRecorder {
             while let Ok(message) = writer_receiver.recv() {
                 match message {
                     WriterMessage::Samples(samples) => {
-                        // One float pass serves both consumers: the live meter
-                        // the overlay animates from, and the stored envelope.
-                        let float_samples = samples.as_f32();
+                        let pcm = samples.pcm16()?;
+                        let float_samples: Vec<f32> = pcm
+                            .iter()
+                            .map(|sample| f32::from(*sample) / 32768.0)
+                            .collect();
                         peaks.push(packet_peak(&float_samples));
                         if last_level.elapsed() >= Duration::from_millis(40) {
                             if let Some(sender) = &level_sender {
@@ -522,7 +529,9 @@ impl AudioRecorder {
                             }
                             last_level = Instant::now();
                         }
-                        samples.write_to(&mut writer)?;
+                        for sample in pcm {
+                            writer.write_sample(sample).map_err(AudioError::from)?;
+                        }
                     }
                     WriterMessage::Finish => break,
                 }
@@ -572,7 +581,7 @@ impl AudioRecorder {
             sender,
             bridge,
             writer,
-            overflowed,
+            overflowed: _overflowed,
             _input,
         } = recording;
         let duration_ms = started_at
@@ -593,9 +602,9 @@ impl AudioRecorder {
                 .map_err(|_| AudioError::Io("audio writer thread panicked".into()))?;
             let peaks = writer_result?;
             finish_result?;
-            if overflowed.load(Ordering::Acquire) {
-                return Err(AudioError::BufferOverflow);
-            }
+            // A full capture queue means some packets were dropped, not that
+            // the take is unusable. Keep the audio that did land so retry and
+            // transcription still have a file. Cancel still discards.
             if cancel {
                 fs::remove_file(&part_path)?;
             } else {
@@ -940,7 +949,7 @@ mod tests {
     }
 
     #[test]
-    fn callback_burst_overflow_is_bounded_cleans_partial_and_allows_restart() {
+    fn callback_burst_overflow_keeps_finalized_audio_and_allows_restart() {
         let temp = tempfile::tempdir().unwrap();
         let backend = Arc::new(FakeInputBackend::with_samples(
             (0..10_000)
@@ -950,11 +959,13 @@ mod tests {
         let recorder = AudioRecorder::with_backend(temp.path(), backend);
         let started = recorder.start(None).unwrap();
 
-        assert_eq!(recorder.stop().unwrap_err(), AudioError::BufferOverflow);
+        let completed = recorder.stop().unwrap();
+        assert_eq!(completed.id, started.id);
+        assert!(completed.path.is_file());
         assert!(!started.part_path.exists());
-        assert!(!started.path.exists());
         assert!(recorder.start(None).is_ok());
-        assert_eq!(recorder.cancel().unwrap_err(), AudioError::BufferOverflow);
+        let cancelled = recorder.cancel().unwrap();
+        assert!(!cancelled.path.exists());
     }
 
     #[test]

@@ -154,6 +154,7 @@ impl Storage {
         };
         storage.migrate()?;
         storage.reconcile_interrupted()?;
+        storage.reconcile_missing_audio()?;
         Ok(storage)
     }
 
@@ -331,6 +332,10 @@ impl Storage {
         )? > 0)
     }
 
+    pub fn mark_retrying(&self, id: &str) -> Result<bool, StorageError> {
+        self.update_status(id, RecordingStatus::Processing, None, None, None, None)
+    }
+
     /// Stores the amplitude envelope captured while the recording ran.
     pub fn store_peaks(&self, id: &str, peaks: &[u8]) -> Result<bool, StorageError> {
         Ok(self
@@ -339,8 +344,11 @@ impl Storage {
             > 0)
     }
 
-    pub fn mark_retrying(&self, id: &str) -> Result<bool, StorageError> {
-        self.update_status(id, RecordingStatus::Processing, None, None, None, None)
+    pub fn clear_audio_path(&self, id: &str) -> Result<bool, StorageError> {
+        Ok(self.connection()?.execute(
+            "UPDATE history SET audio_path=NULL WHERE id=?1",
+            [id],
+        )? > 0)
     }
 
     pub fn get_recording(&self, id: &str) -> Result<Option<Recording>, StorageError> {
@@ -592,6 +600,46 @@ impl Storage {
         }
         transaction.commit()?;
         Ok(retryable_ids.len() + interrupted_before_finalize_ids.len())
+    }
+
+    /// Failed, cancelled, and completed rows can keep an `audio_path` after the
+    /// file has already been deleted (overflow used to wipe the take on stop;
+    /// cancel used to discard `.part` while the row still pointed at `.wav`).
+    /// History then claimed audio was saved and Retry pointed at nothing.
+    pub fn reconcile_missing_audio(&self) -> Result<usize, StorageError> {
+        let missing_ids: Vec<String> = {
+            let connection = self.connection()?;
+            let mut statement = connection.prepare(
+                "SELECT id,audio_path FROM history
+                 WHERE audio_path IS NOT NULL
+                   AND status IN ('failed','cancelled','completed')",
+            )?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            rows.into_iter()
+                .filter_map(|(id, path)| {
+                    let path = path?;
+                    if Path::new(&path).is_file() {
+                        None
+                    } else {
+                        Some(id)
+                    }
+                })
+                .collect()
+        };
+        if missing_ids.is_empty() {
+            return Ok(0);
+        }
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction()?;
+        for id in &missing_ids {
+            transaction.execute("UPDATE history SET audio_path=NULL WHERE id=?1", [id])?;
+        }
+        transaction.commit()?;
+        Ok(missing_ids.len())
     }
 
     pub fn cleanup_retention(
@@ -1215,6 +1263,71 @@ mod tests {
         );
         assert!(malicious_row.audio_path.is_none());
         assert!(malicious_partial.is_file());
+    }
+
+    #[test]
+    fn completing_without_a_duration_keeps_the_capture_length() {
+        let (_temp, storage) = storage();
+        let mut row = recording("cap", RecordingStatus::Processing, None);
+        row.duration_ms = 409_000;
+        storage.insert_recording(&row).unwrap();
+
+        storage
+            .update_status(
+                "cap",
+                RecordingStatus::Completed,
+                Some("tekst"),
+                Some("parakeet"),
+                None,
+                None,
+            )
+            .unwrap();
+
+        let saved = storage.get_recording("cap").unwrap().unwrap();
+        assert_eq!(saved.duration_ms, 409_000);
+        assert_eq!(saved.text.as_deref(), Some("tekst"));
+    }
+
+    #[test]
+    fn clear_audio_path_forgets_a_dangling_file_reference() {
+        let (_temp, storage) = storage();
+        storage
+            .insert_recording(&recording("gone", RecordingStatus::Failed, None))
+            .unwrap();
+
+        assert!(storage.clear_audio_path("gone").unwrap());
+        assert!(storage.get_recording("gone").unwrap().unwrap().audio_path.is_none());
+    }
+
+    #[test]
+    fn reopening_clears_audio_path_when_the_file_is_gone() {
+        let temp = tempfile::tempdir().unwrap();
+        let database = temp.path().join("mow.sqlite3");
+        let recordings = temp.path().join("recordings");
+        fs::create_dir_all(&recordings).unwrap();
+        let storage = Storage::open(&database, &recordings).unwrap();
+        let missing = recordings.join("gone.wav");
+        let mut row = recording("gone", RecordingStatus::Failed, None);
+        row.audio_path = Some(missing.to_string_lossy().into_owned());
+        row.error = Some("audio input buffer overflowed".into());
+        storage.insert_recording(&row).unwrap();
+        let kept = recordings.join("kept.wav");
+        fs::write(&kept, b"wav").unwrap();
+        let mut kept_row = recording("kept", RecordingStatus::Failed, None);
+        kept_row.audio_path = Some(kept.to_string_lossy().into_owned());
+        storage.insert_recording(&kept_row).unwrap();
+        drop(storage);
+
+        let reopened = Storage::open(&database, &recordings).unwrap();
+
+        let gone = reopened.get_recording("gone").unwrap().unwrap();
+        assert!(gone.audio_path.is_none());
+        assert_eq!(gone.error.as_deref(), Some("audio input buffer overflowed"));
+        let kept_saved = reopened.get_recording("kept").unwrap().unwrap();
+        assert_eq!(
+            kept_saved.audio_path.as_deref(),
+            Some(kept.to_string_lossy().as_ref())
+        );
     }
 
     #[test]

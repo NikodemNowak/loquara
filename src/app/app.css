@@ -715,6 +715,12 @@ body.overlay-window #root { width: 100%; height: 100%; overflow: hidden; }
 
 .overlay-note { position: absolute; right: 6px; bottom: 1px; left: 6px; overflow: hidden; color: var(--pill-muted); font-size: 8px; line-height: 10px; text-align: center; text-overflow: ellipsis; white-space: nowrap; pointer-events: none; }
 .overlay-note--error { color: var(--pill-danger); }
+.recorder-overlay--large .overlay-note {
+  white-space: normal;
+  text-overflow: unset;
+  line-height: 1.25;
+  max-height: 2.5em;
+}
 
 /* ===== Keyframes ========================================================= */
 @keyframes spin { to { transform: rotate(360deg); } }

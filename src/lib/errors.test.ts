@@ -18,6 +18,15 @@ describe("normalizeError", () => {
     expect(normalizeError("Previous dictation was interrupted before audio finalization.")).toBe(
       "Poprzednie dyktowanie przerwano przed zapisaniem audio.",
     );
+    expect(normalizeError("Previous dictation was interrupted before completion.")).toBe(
+      "Poprzednie dyktowanie przerwano zanim skończyło się przepisywanie.",
+    );
+    expect(normalizeError("audio input buffer overflowed")).toBe(
+      "Kolejka mikrofonu się przepełniła. Nagranie mogło stracić fragmenty — spróbuj ponownie.",
+    );
+    expect(normalizeError("recording cannot be retried: recording audio is missing")).toBe(
+      "Brak pliku nagrania — nie można ponowić transkrypcji.",
+    );
     expect(normalizeError("Stop dictating before deleting a model.")).toBe(
       "Zatrzymaj dyktowanie przed usunięciem modelu.",
     );

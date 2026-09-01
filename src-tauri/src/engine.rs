@@ -12,6 +12,7 @@
 //! do not notice and one you do.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use rubato::{Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction};
@@ -19,6 +20,18 @@ use sherpa_rs::transducer::{TransducerConfig, TransducerRecognizer};
 
 /// Every model Loquara ships is trained on 16 kHz mono audio.
 pub const TARGET_SAMPLE_RATE: u32 = 16_000;
+
+/// Rubato's sinc interpolator allocates filters per input chunk. Passing the
+/// whole recording as one chunk (seven minutes of 48 kHz) exhausted memory
+/// and crashed retry. A few thousand frames is enough for quality.
+const RESAMPLE_INPUT_CHUNK: usize = 4_096;
+
+/// Parakeet/NeMo offline decode aborts the whole process (Windows `0xc0000409`)
+/// when given several minutes in one shot. Takes around 40s already succeed, so
+/// windows stay under that and hop with a little overlap so words on the cut
+/// are not dropped.
+const TRANSCRIBE_WINDOW_SAMPLES: usize = TARGET_SAMPLE_RATE as usize * 30;
+const TRANSCRIBE_HOP_SAMPLES: usize = TARGET_SAMPLE_RATE as usize * 29;
 
 /// Which processor actually ran the last model load.
 ///
@@ -205,7 +218,15 @@ impl Engine {
     }
 
     /// Transcribes a recording, loading the model first if necessary.
-    pub fn transcribe(&self, key: &str, audio: &Path) -> Result<String, EngineError> {
+    ///
+    /// Long takes are split into windows: feeding seven minutes to the encoder
+    /// in one call aborts the process.
+    pub fn transcribe(
+        &self,
+        key: &str,
+        audio: &Path,
+        cancel: Option<&AtomicBool>,
+    ) -> Result<String, EngineError> {
         let samples = read_as_target_rate(audio)?;
         self.ensure_loaded(key)?;
         let mut guard = self
@@ -215,11 +236,7 @@ impl Engine {
         let loaded = guard
             .as_mut()
             .ok_or_else(|| EngineError::Decode("model was unloaded mid-transcription".into()))?;
-        Ok(loaded
-            .recogniser
-            .transcribe(TARGET_SAMPLE_RATE, &samples)
-            .trim()
-            .to_owned())
+        transcribe_samples(&mut loaded.recogniser, &samples, cancel)
     }
 }
 
@@ -289,12 +306,88 @@ fn resample(samples: Vec<f32>, from_rate: u32) -> Result<Vec<f32>, EngineError> 
         window: WindowFunction::BlackmanHarris2,
     };
     let ratio = TARGET_SAMPLE_RATE as f64 / from_rate as f64;
-    let mut resampler = SincFixedIn::<f32>::new(ratio, 1.0, parameters, samples.len(), 1)
+    let mut resampler = SincFixedIn::<f32>::new(ratio, 1.0, parameters, RESAMPLE_INPUT_CHUNK, 1)
         .map_err(|error| EngineError::Audio(error.to_string()))?;
-    let output = resampler
-        .process(&[samples], None)
-        .map_err(|error| EngineError::Audio(error.to_string()))?;
-    Ok(output.into_iter().next().unwrap_or_default())
+    let mut output = Vec::with_capacity(
+        ((samples.len() as f64 * ratio).ceil() as usize).saturating_add(RESAMPLE_INPUT_CHUNK),
+    );
+    let mut pos = 0;
+    while pos + RESAMPLE_INPUT_CHUNK <= samples.len() {
+        let chunk = &samples[pos..pos + RESAMPLE_INPUT_CHUNK];
+        let waves = resampler
+            .process(&[chunk], None)
+            .map_err(|error| EngineError::Audio(error.to_string()))?;
+        if let Some(channel) = waves.first() {
+            output.extend_from_slice(channel);
+        }
+        pos += RESAMPLE_INPUT_CHUNK;
+    }
+    let remainder = &samples[pos..];
+    let waves = if remainder.is_empty() {
+        resampler.process_partial::<&[f32]>(None, None)
+    } else {
+        resampler.process_partial(Some(&[remainder]), None)
+    }
+    .map_err(|error| EngineError::Audio(error.to_string()))?;
+    if let Some(channel) = waves.first() {
+        output.extend_from_slice(channel);
+    }
+    let expected = (samples.len() as u64)
+        .saturating_mul(u64::from(TARGET_SAMPLE_RATE))
+        / u64::from(from_rate);
+    output.truncate(expected as usize);
+    Ok(output)
+}
+
+fn transcription_windows(sample_count: usize) -> Vec<(usize, usize)> {
+    if sample_count == 0 {
+        return Vec::new();
+    }
+    if sample_count <= TRANSCRIBE_WINDOW_SAMPLES {
+        return vec![(0, sample_count)];
+    }
+    let mut windows = Vec::new();
+    let mut start = 0;
+    loop {
+        let end = (start + TRANSCRIBE_WINDOW_SAMPLES).min(sample_count);
+        windows.push((start, end));
+        if end == sample_count {
+            break;
+        }
+        start += TRANSCRIBE_HOP_SAMPLES;
+        if start >= sample_count {
+            break;
+        }
+    }
+    windows
+}
+
+fn join_window_transcripts(parts: &[String]) -> String {
+    parts
+        .iter()
+        .map(|part| part.trim())
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn transcribe_samples(
+    recogniser: &mut TransducerRecognizer,
+    samples: &[f32],
+    cancel: Option<&AtomicBool>,
+) -> Result<String, EngineError> {
+    let mut parts = Vec::new();
+    for (start, end) in transcription_windows(samples.len()) {
+        if cancel.is_some_and(|flag| flag.load(Ordering::SeqCst)) {
+            return Err(EngineError::Decode("transcription cancelled".into()));
+        }
+        let text = recogniser.transcribe(TARGET_SAMPLE_RATE, &samples[start..end]);
+        let trimmed = text.trim();
+        if !trimmed.is_empty() {
+            parts.push(trimmed.to_owned());
+        }
+    }
+    Ok(join_window_transcripts(&parts))
 }
 
 #[cfg(test)]
@@ -362,8 +455,74 @@ mod tests {
     }
 
     #[test]
+    fn resampling_a_long_take_uses_bounded_chunks() {
+        assert!(
+            RESAMPLE_INPUT_CHUNK <= 8_192,
+            "a chunk the size of the whole file is what crashed 7-minute retries"
+        );
+        // Ten seconds at 48 kHz is longer than one chunk, so this actually
+        // walks the loop instead of treating the file as a single buffer.
+        let ten_seconds = vec![0.0_f32; 48_000 * 10];
+
+        let out = resample(ten_seconds, 48_000).unwrap();
+
+        let expected = i64::from(TARGET_SAMPLE_RATE) * 10;
+        let drift = (out.len() as i64 - expected).abs();
+        assert!(
+            drift < 400,
+            "expected about {expected} samples, got {}",
+            out.len()
+        );
+    }
+
+    #[test]
     fn an_empty_recording_resamples_to_nothing() {
         assert!(resample(Vec::new(), 48_000).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_short_take_is_a_single_transcription_window() {
+        assert_eq!(transcription_windows(16_000), vec![(0, 16_000)]);
+        assert!(transcription_windows(0).is_empty());
+        assert_eq!(
+            transcription_windows(TRANSCRIBE_WINDOW_SAMPLES),
+            vec![(0, TRANSCRIBE_WINDOW_SAMPLES)]
+        );
+    }
+
+    #[test]
+    fn a_seven_minute_take_is_split_into_encoder_sized_windows() {
+        // This is the 6:49 recording: one-shot decode aborted the process
+        // (Windows 0xc0000409). Windows must cover every sample and never
+        // exceed the length that already transcribes successfully.
+        let samples = TARGET_SAMPLE_RATE as usize * 409;
+        let windows = transcription_windows(samples);
+
+        assert!(windows.len() > 1);
+        assert_eq!(windows[0], (0, TRANSCRIBE_WINDOW_SAMPLES));
+        assert_eq!(windows.last().map(|(_, end)| *end), Some(samples));
+        assert!(
+            windows
+                .iter()
+                .all(|(start, end)| end.saturating_sub(*start) <= TRANSCRIBE_WINDOW_SAMPLES)
+        );
+        let mut covered = vec![false; samples];
+        for (start, end) in &windows {
+            covered[*start..*end].fill(true);
+        }
+        assert!(covered.iter().all(|sample| *sample));
+    }
+
+    #[test]
+    fn window_transcripts_are_joined_without_empty_pieces() {
+        assert_eq!(
+            join_window_transcripts(&[
+                "  pierwsza  ".into(),
+                String::new(),
+                "druga".into(),
+            ]),
+            "pierwsza druga"
+        );
     }
 
     #[test]
@@ -417,13 +576,13 @@ mod tests {
         let engine = Engine::new(models);
 
         let started = std::time::Instant::now();
-        let text = engine.transcribe("parakeet", Path::new(&wav)).unwrap();
+        let text = engine.transcribe("parakeet", Path::new(&wav), None).unwrap();
         let first = started.elapsed();
 
         // Loading is the expensive part, so the second pass proves the model
         // is still resident rather than rebuilt.
         let started = std::time::Instant::now();
-        let again = engine.transcribe("parakeet", Path::new(&wav)).unwrap();
+        let again = engine.transcribe("parakeet", Path::new(&wav), None).unwrap();
         let second = started.elapsed();
 
         println!("first: {first:?}  second: {second:?}");
