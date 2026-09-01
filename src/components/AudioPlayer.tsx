@@ -57,7 +57,7 @@ export function AudioPlayer({
     setCurrent(0);
     setDuration(0);
     setError("");
-    setUrl(isTauri && recording.audioPath ? convertFileSrc(recording.audioPath) : undefined);
+    setUrl(undefined);
   }, [recording.id, recording.audioPath]);
 
   useEffect(() => {
@@ -78,6 +78,11 @@ export function AudioPlayer({
     setLoading(true);
     setError("");
     try {
+      if (isTauri && recording.audioPath) {
+        const objectUrl = convertFileSrc(recording.audioPath);
+        setUrl(objectUrl);
+        return objectUrl;
+      }
       const bytes = await adapter.getRecordingAudio(recording.id);
       const copy = new Uint8Array(bytes.byteLength);
       copy.set(bytes);
@@ -90,13 +95,15 @@ export function AudioPlayer({
     } finally {
       setLoading(false);
     }
-  }, [url, loading, recording.id, adapter]);
+  }, [url, loading, recording.id, recording.audioPath, adapter]);
 
   const toggle = useCallback(async () => {
     const audio = audioRef.current;
     if (!audio) return;
     if (!url) {
-      if (!(await load())) return;
+      const next = await load();
+      if (!next) return;
+      audio.src = next;
       await audio.play().catch(() => undefined);
       return;
     }
@@ -134,7 +141,7 @@ export function AudioPlayer({
       <audio
         ref={audioRef}
         src={url}
-        preload="metadata"
+        preload={url ? "metadata" : "none"}
         onPlay={() => setPlaying(true)}
         onPause={() => setPlaying(false)}
         onEnded={() => { setPlaying(false); setCurrent(0); }}

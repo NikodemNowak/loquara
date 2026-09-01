@@ -97,16 +97,7 @@ pub fn transition(state: DictationState, event: DictationEvent) -> DictationStat
             audio_path,
         },
         (DictationState::Recording { .. }, DictationEvent::Cancel) => DictationState::Idle,
-        (
-            DictationState::Cancelling {
-                recording_id,
-                audio_path,
-            },
-            DictationEvent::CancelRequest,
-        ) => DictationState::Recording {
-            recording_id,
-            audio_path,
-        },
+        (DictationState::Cancelling { .. }, DictationEvent::CancelRequest) => DictationState::Idle,
         (DictationState::Cancelling { .. }, DictationEvent::Cancel) => DictationState::Idle,
         (
             DictationState::Cancelling {
@@ -150,6 +141,7 @@ pub fn transition(state: DictationState, event: DictationEvent) -> DictationStat
             }
         }
         (DictationState::Failed { .. }, DictationEvent::Cancel) => DictationState::Idle,
+        (DictationState::Processing { .. }, DictationEvent::Cancel) => DictationState::Idle,
         (state, _) => state,
     }
 }
@@ -245,7 +237,7 @@ mod tests {
             audio_path: recovery.audio_path.clone(),
         };
         let failed_state = DictationState::Failed {
-            recovery,
+            recovery: recovery.clone(),
             error: "Model jest niedostępny.".into(),
         };
 
@@ -257,6 +249,11 @@ mod tests {
             transition(failed_state, DictationEvent::Cancel),
             DictationState::Idle
         );
+        let processing = DictationState::Processing {
+            recording_id: recovery.recording_id,
+            audio_path: recovery.audio_path,
+        };
+        assert_eq!(transition(processing, DictationEvent::Cancel), DictationState::Idle);
     }
 
     #[test]
@@ -291,7 +288,7 @@ mod tests {
         );
         assert_eq!(
             transition(cancelling_state.clone(), DictationEvent::CancelRequest),
-            recording_state
+            DictationState::Idle
         );
     }
 

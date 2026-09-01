@@ -290,10 +290,11 @@ pub fn decide_action(_source: ControlSource, state: &DictationState) -> Coordina
 }
 
 pub fn decide_escape(state: &DictationState) -> CoordinatorAction {
-    if matches!(state, DictationState::Recording { .. }) {
-        CoordinatorAction::Cancel
-    } else {
-        CoordinatorAction::Ignore
+    match state {
+        DictationState::Recording { .. }
+        | DictationState::Processing { .. }
+        | DictationState::Cancelling { .. } => CoordinatorAction::Cancel,
+        _ => CoordinatorAction::Ignore,
     }
 }
 
@@ -1328,7 +1329,7 @@ mod tests {
                 recording_id: "id".into(),
                 audio_path: "a.wav".into(),
             }),
-            CoordinatorAction::Ignore
+            CoordinatorAction::Cancel
         );
     }
 

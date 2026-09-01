@@ -1,6 +1,6 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type RefObject } from "react";
 
-import { aboveRoom, cssColor, mixColour, prepareCanvas, trackRoom } from "../lib/waveform";
+import { aboveRoom, cssColor, mixColour, prepareCanvas, resampleEnvelope, trackRoom } from "../lib/waveform";
 
 /** Loudness is perceived closer to a power curve than to raw amplitude. */
 const LOUDNESS_EXPONENT = 0.45;
@@ -13,41 +13,28 @@ const LOUDNESS_EXPONENT = 0.45;
  */
 const GAIN = 3.2;
 /** Attack is near-instant so speech registers; release trails so it reads. */
-const ATTACK = 0.5;
-const RELEASE = 0.12;
+const ATTACK = 0.55;
+const RELEASE = 0.16;
 /** Bars never fully collapse, so silence still looks like it is listening
  *  rather than like a row of dots. */
-const IDLE_LEVEL = 0.2;
-/** How much shorter the outermost bars are than the middle ones. */
-const CENTER_DROP = 0.28;
-/** Floor of the per-bar shimmer, so bars stay tall instead of flickering low. */
-const SHIMMER_FLOOR = 0.8;
+const IDLE_LEVEL = 0.16;
 /** Where the bars change colour, and how fast they get there. */
 const VOICE_THRESHOLD = 0.18;
 const VOICE_EASE = 0.07;
-
-/**
- * Fixed per-bar phases and speeds.
- *
- * Deterministic rather than random so the meter looks the same every launch,
- * and irregular enough that neighbouring bars never move in lockstep — which
- * is what makes a level meter look mechanical.
- */
-const BARS = Array.from({ length: 64 }, (_, index) => {
-  const noise = Math.sin(index * 127.1 + 311.7) * 43758.5453;
-  return {
-    phase: (noise - Math.floor(noise)) * Math.PI * 2,
-    speed: 3.2 + (index % 5) * 0.55,
-  };
-});
+/** How often a loudness sample is pushed into the scrolling envelope. */
+const SAMPLE_MS = 18;
 
 export interface LevelMeterProps {
   /** Current microphone level, `0..=1`. */
   level: number;
+  /** Live level updated without re-rendering the parent. Preferred over `level`. */
+  levelRef?: RefObject<number | null>;
   /** `thinking` shows activity with no microphone signal behind it.
    *  `countdown` keeps metering but puts the bars out from the right as a
    *  deadline approaches. */
   mode?: "live" | "thinking" | "countdown";
+  /** Compact pill vs the larger recording window. */
+  variant?: "compact" | "expanded";
   /** `countdown` only: epoch ms the last bar goes out at. */
   deadline?: number;
   /** `countdown` only: how long the whole row stands for, in ms. */
@@ -64,18 +51,18 @@ export interface LevelMeterProps {
 }
 
 /**
- * A microphone level meter: fixed bars that rise and fall in place.
+ * A microphone meter drawn from a short loudness history.
  *
- * This is a mood meter, not an oscilloscope. How much the bars move tracks how
- * loudly you are speaking, but individual heights are shaped to look good
- * rather than to reproduce the signal. The only promise it makes is that
- * silence looks still and speech looks alive — and that part is honest.
- *
- * Contrast with `Waveform`, which draws a recording's real stored envelope.
+ * Superwhisper / Wispr-style overlays do not paint a lockstep equaliser: they
+ * scroll a true-ish envelope of recent speech. We only receive one RMS value,
+ * so the honest picture is that history — not a FFT rainbow, and not a row of
+ * sines sharing one amplitude.
  */
 export function LevelMeter({
   level,
+  levelRef,
   mode = "live",
+  variant = "compact",
   deadline = 0,
   span = 1,
   height,
@@ -87,16 +74,12 @@ export function LevelMeter({
   quietToken = "--pill-muted",
 }: LevelMeterProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const levelRef = useRef(level);
-  levelRef.current = level;
-  // Read inside the animation loop rather than through the effect, so time
-  // passing never costs a React render.
+  const propLevelRef = useRef(level);
+  propLevelRef.current = level;
   const deadlineRef = useRef(deadline);
   deadlineRef.current = deadline;
   const spanRef = useRef(span);
   spanRef.current = span;
-  // The window is resizable, so bar layout has to be recomputed when the
-  // canvas box changes or the drawing ends up stretched.
   const [width, setWidth] = useState(0);
 
   useEffect(() => {
@@ -116,36 +99,46 @@ export function LevelMeter({
     if (!prepared) return;
     const { context, width } = prepared;
     const step = barWidth + gap;
-    const count = Math.min(BARS.length, Math.max(3, Math.floor((width + gap) / step)));
+    const count = Math.max(3, Math.floor((width + gap) / step));
     const contentWidth = count * step - gap;
     const offset = Math.max(0, (width - contentWidth) / 2);
-    const middle = (count - 1) / 2;
     const heights = new Array<number>(count).fill(IDLE_LEVEL);
+    const historyLen = variant === "expanded" ? 64 : 28;
+    const history = new Array<number>(historyLen).fill(IDLE_LEVEL);
     const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     const loud = cssColor(colorToken, "#4c8dff");
     const quiet = cssColor(quietToken, "#8d96a1");
     let energy = 0;
     let floor = 0;
     let voice = 0;
+    let lastPush = 0;
     let raf = 0;
+    let running = true;
 
     const draw = (now: number) => {
+      if (!running) return;
+      if (document.hidden) {
+        raf = 0;
+        return;
+      }
       const time = reduceMotion ? 0 : now / 1000;
-      const raw = Math.max(0, levelRef.current);
+      const raw = Math.max(0, levelRef?.current ?? propLevelRef.current);
       floor = trackRoom(raw, floor);
-      // Only the part that stands out from the room counts as a signal.
       const excess = aboveRoom(raw, floor);
       const shaped = mode === "thinking"
-        ? 0.6
+        ? 0.45
         : Math.min(1, Math.pow(excess * GAIN, LOUDNESS_EXPONENT));
       energy += (shaped - energy) * (shaped > energy ? ATTACK : RELEASE);
       voice += ((mode === "live" && shaped > VOICE_THRESHOLD ? 1 : 0) - voice) * VOICE_EASE;
 
-      context.clearRect(0, 0, width, height);
-      context.fillStyle = mode === "live" ? mixColour(quiet, loud, voice) : loud;
+      if (!reduceMotion && now - lastPush >= SAMPLE_MS) {
+        history.shift();
+        history.push(mode === "thinking" ? IDLE_LEVEL : Math.max(IDLE_LEVEL, energy));
+        lastPush = now;
+      } else if (reduceMotion) {
+        history.fill(Math.max(IDLE_LEVEL, energy));
+      }
 
-      // How many bars are still alight. The meter keeps working underneath —
-      // the microphone is still open — so only the extinguished tail is still.
       const remaining = spanRef.current > 0
         ? (deadlineRef.current - Date.now()) / spanRef.current
         : 0;
@@ -153,37 +146,38 @@ export function LevelMeter({
         ? Math.max(0, Math.min(count, Math.ceil(remaining * count)))
         : count;
 
+      const envelope = resampleEnvelope(history, count);
+      context.clearRect(0, 0, width, height);
+      context.fillStyle = mode === "live" ? mixColour(quiet, loud, voice) : loud;
+
       for (let index = 0; index < count; index += 1) {
-        const { phase, speed } = BARS[index];
         let target: number;
         if (mode === "thinking") {
-          // A pulse travelling across otherwise still bars, so "working" never
-          // reads as "hearing you".
-          const centre = (Math.sin(time * 1.5) * 0.5 + 0.5) * (count - 1);
-          const distance = Math.abs(index - centre);
-          target = IDLE_LEVEL + 0.75 * Math.exp(-(distance * distance) / (count / 4));
+          // A tide, not a beat: processing must never read as "hearing you".
+          const expanded = variant === "expanded";
+          const speed = expanded ? 0.85 : 1.45;
+          const widthBars = expanded ? count / 2.6 : count / 4.2;
+          const centre = (Math.sin(time * speed) * 0.5 + 0.5) * (count - 1);
+          const secondary = (Math.sin(time * speed * 0.53 + 1.7) * 0.5 + 0.5) * (count - 1);
+          const primary = Math.exp(-((index - centre) ** 2) / Math.max(1, widthBars));
+          const echo = expanded
+            ? 0.45 * Math.exp(-((index - secondary) ** 2) / Math.max(1, widthBars * 1.4))
+            : 0;
+          target = IDLE_LEVEL + (expanded ? 0.82 : 0.7) * Math.max(primary, echo);
         } else {
-          // Rounded silhouette: the middle of the meter reaches higher.
-          const fromCentre = Math.abs(index - middle) / (middle || 1);
-          const shape = 1 - CENTER_DROP * Math.pow(fromCentre, 1.7);
-          const shimmer = SHIMMER_FLOOR + (1 - SHIMMER_FLOOR) * Math.sin(time * speed + phase);
-          // At rest the meter breathes: enough motion to read as live, far
-          // too little to be mistaken for someone talking.
-          const breathing = IDLE_LEVEL * (0.45 + 0.55 * Math.sin(time * 1.6 + phase));
-          target = Math.max(breathing, energy * shape * shimmer);
+          // Neighbours show different moments of the same speech, so they
+          // cannot lock into a mechanical chorus.
+          const lag = 1 - Math.min(0.22, index * 0.012);
+          target = Math.max(IDLE_LEVEL, envelope[index] * lag);
         }
         const spent = index >= lit;
-        if (spent) {
-          target = 0;
-        }
-        // Per-bar smoothing on top of the shared envelope keeps neighbours
-        // from snapping to the same value on a loud syllable.
-        heights[index] += (target - heights[index]) * 0.35;
+        if (spent) target = 0;
+        heights[index] += (target - heights[index]) * (reduceMotion ? 1 : 0.38);
 
         const barHeight = Math.max(barWidth, Math.min(1, heights[index]) * height);
         const x = offset + index * step;
         const y = (height - barHeight) / 2;
-        context.globalAlpha = spent ? 0.18 : 0.5 + 0.5 * (barHeight / height);
+        context.globalAlpha = spent ? 0.18 : 0.48 + 0.52 * (barHeight / height);
         context.beginPath();
         context.roundRect(x, y, barWidth, barHeight, barWidth / 2);
         context.fill();
@@ -191,9 +185,22 @@ export function LevelMeter({
       context.globalAlpha = 1;
       raf = requestAnimationFrame(draw);
     };
+    const onVisibility = () => {
+      if (document.hidden) {
+        if (raf) cancelAnimationFrame(raf);
+        raf = 0;
+      } else if (running && !raf) {
+        raf = requestAnimationFrame(draw);
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibility);
     raf = requestAnimationFrame(draw);
-    return () => cancelAnimationFrame(raf);
-  }, [mode, height, barWidth, gap, colorToken, quietToken, width]);
+    return () => {
+      running = false;
+      cancelAnimationFrame(raf);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, [mode, variant, height, barWidth, gap, colorToken, quietToken, width, levelRef]);
 
   return (
     <canvas

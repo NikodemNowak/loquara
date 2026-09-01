@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { Copy, FolderOpen, RotateCcw, Search, Trash2 } from "../../components/Icons";
 import { EmptyState } from "../../components/EmptyState";
@@ -19,20 +19,27 @@ const formatDuration = (ms: number) =>
 export function HistoryPage({
   adapter,
   recordings,
+  initialSelectedId,
   onRefresh,
   onToast,
 }: {
   adapter: AppAdapter;
   recordings: Recording[];
+  initialSelectedId?: string;
   onRefresh: () => Promise<void>;
   onToast: (message: string, kind: ToastKind) => void;
 }) {
   const { t, lang } = useI18n();
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<RecordingStatus | "all">("all");
-  const [selectedId, setSelectedId] = useState(recordings[0]?.id);
-  const [draft, setDraft] = useState("");
+  const [selectedId, setSelectedId] = useState(initialSelectedId ?? recordings[0]?.id);
+  const [draft, setDraft] = useState(() => {
+    const initial = recordings.find((item) => item.id === (initialSelectedId ?? recordings[0]?.id));
+    return initial?.text ?? "";
+  });
   const [pendingClear, setPendingClear] = useState(false);
+  const [inspectorReady, setInspectorReady] = useState(false);
+  const selectedRowRef = useRef<HTMLButtonElement>(null);
   const { busy, pendingKey, run } = useAsyncAction(onToast);
 
   const labels: Record<RecordingStatus, string> = {
@@ -62,6 +69,16 @@ export function HistoryPage({
   useEffect(() => {
     setDraft(selected?.text ?? "");
   }, [selected?.id, selected?.text]);
+
+  useEffect(() => {
+    setInspectorReady(false);
+    const frame = window.requestAnimationFrame(() => setInspectorReady(true));
+    return () => window.cancelAnimationFrame(frame);
+  }, [selected?.id]);
+
+  useEffect(() => {
+    selectedRowRef.current?.scrollIntoView({ block: "nearest" });
+  }, [selectedId]);
 
   const action = (key: string, fn: () => Promise<unknown>) =>
     run(key, async () => {
@@ -120,8 +137,12 @@ export function HistoryPage({
           {filtered.map((item) => (
             <button
               key={item.id}
+              ref={item.id === selectedId ? selectedRowRef : undefined}
               className={`history-row ${selected?.id === item.id ? "history-row--selected" : ""}`}
-              onClick={() => setSelectedId(item.id)}
+              onClick={() => {
+                setInspectorReady(false);
+                setSelectedId(item.id);
+              }}
               aria-current={selected?.id === item.id ? "true" : undefined}
               aria-label={item.text ?? item.error ?? labels[item.status]}
             >
@@ -180,7 +201,7 @@ export function HistoryPage({
 
             {selected.error && <p className="error-note">{normalizeError(selected.error)}</p>}
 
-            {selected.audioPath && (
+            {selected.audioPath && inspectorReady && (
               <AudioPlayer
                 adapter={adapter}
                 recording={selected}

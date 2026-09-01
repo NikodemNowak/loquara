@@ -195,14 +195,14 @@ export function DictatePage({
   /** False until the selected model exists on this machine. */
   modelReady?: boolean;
   onSnapshot: (snapshot: AppSnapshot) => void;
-  onHistory: () => void;
+  onHistory: (selectedId?: string) => void;
   onSettings?: () => void;
   onToast: (message: string, kind: ToastKind) => void;
 }) {
   const { t, lang } = useI18n();
   const [busy, setBusy] = useState(false);
   const [seconds, setSeconds] = useState(0);
-  const [level, setLevel] = useState(0);
+  const micLevel = useRef(0);
   const state = snapshot.dictation;
   const status = state.status;
   const startedAt = snapshot.recordingStartedAt ?? null;
@@ -228,16 +228,21 @@ export function DictatePage({
     return () => window.clearInterval(timer);
   }, [status, startedAt]);
 
-  // The meter is the point of this screen while dictating, so the window
-  // listens for levels itself rather than mirroring whatever the pill shows.
+  // Levels only matter while this page is showing a live meter. Subscribing
+  // the rest of the time re-rendered the recent list ~25 times a second and
+  // kept a second copy of the overlay's work.
   useEffect(() => {
+    if (status !== "recording") {
+      micLevel.current = 0;
+      return;
+    }
     let active = true;
     let dispose: (() => void) | undefined;
     void adapter.onLevel((next) => {
-      if (active) setLevel(Math.max(0, Math.min(1, next)));
+      if (active) micLevel.current = Math.max(0, Math.min(1, next));
     }).then((unlisten) => { if (active) dispose = unlisten; else unlisten(); });
     return () => { active = false; dispose?.(); };
-  }, [adapter]);
+  }, [adapter, status]);
 
   const act = async () => {
     if (busy) return;
@@ -268,7 +273,14 @@ export function DictatePage({
 
         {(status === "recording" || status === "cancelling") && (
           <div className="dictate__meter">
-            <LevelMeter level={status === "cancelling" ? 0 : level} height={72} barWidth={4} gap={4} colorToken="--recording" />
+            <LevelMeter
+              level={0}
+              levelRef={status === "recording" ? micLevel : undefined}
+              height={72}
+              barWidth={4}
+              gap={4}
+              colorToken="--recording"
+            />
             <p className="dictate__timer" aria-label={t("dictate.elapsed")}>{formatClock(seconds)}</p>
           </div>
         )}
@@ -351,13 +363,13 @@ export function DictatePage({
 
       <div className="section-heading">
         <h2>{t("dictate.recent.title")}</h2>
-        <button className="text-button" onClick={onHistory}>{t("dictate.recent.all")}</button>
+        <button className="text-button" onClick={() => onHistory()}>{t("dictate.recent.all")}</button>
       </div>
 
       {recordings.length ? (
         <div className="recent">
           {recordings.slice(0, 5).map((item) => (
-            <button key={item.id} className="recent-item" onClick={onHistory}>
+            <button key={item.id} className="recent-item" onClick={() => onHistory(item.id)}>
               <span className={`recent-item__text ${item.text ? "" : "recent-item__text--empty"}`}>
                 {item.text ?? t("dictate.recent.noTranscript")}
               </span>

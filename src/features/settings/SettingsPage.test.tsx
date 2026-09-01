@@ -220,4 +220,19 @@ describe("ustawienia", () => {
     expect(saved[1]).toEqual(expect.objectContaining({ autoPaste: false, launchOnLogin: false }));
   });
 
+  test("rozmiar nakładki zapisuje się obok pokazywania nakładki i domyślnie jest kompaktowy", async () => {
+    const updateSettings = vi.fn(async (next: typeof settings) => ({ settings: next, warning: null }));
+    renderWithI18n(
+      <SettingsPage adapter={adapterStub({ updateSettings })} initialSettings={settings} onToast={() => undefined} />,
+    );
+
+    expect(screen.getByRole("combobox", { name: "Rozmiar nakładki" })).toHaveTextContent("Kompaktowa");
+    await userEvent.click(screen.getByRole("combobox", { name: "Rozmiar nakładki" }));
+    await userEvent.click(await screen.findByRole("option", { name: "Rozszerzona" }));
+
+    await waitFor(() => expect(updateSettings).toHaveBeenCalledWith(
+      expect.objectContaining({ overlaySize: "large", showOverlay: true }),
+    ));
+  });
+
 });

@@ -84,7 +84,7 @@ describe("dictation state machine", () => {
     );
   });
 
-  test("arms and dismisses the cancel confirmation prompt", () => {
+  test("arms an undo window, then dismisses it to idle", () => {
     const recordingState: DictationState = {
       status: "recording",
       ...recording,
@@ -99,13 +99,12 @@ describe("dictation state machine", () => {
       status: "cancelling",
       ...recording,
     };
-    expect(transition(cancellingState, { type: "cancel_request" })).toEqual({
-      status: "recording",
-      ...recording,
-    });
+    expect(transition(cancellingState, { type: "cancel_request" })).toBe(
+      initialDictationState,
+    );
   });
 
-  test("confirms cancel or finalizes from the cancelling prompt", () => {
+  test("undo transcribes the cancelled take, or discard finishes to idle", () => {
     const cancellingState: DictationState = {
       status: "cancelling",
       ...recording,
@@ -118,6 +117,17 @@ describe("dictation state machine", () => {
       status: "processing",
       ...recording,
     });
+  });
+
+  test("processing can be cancelled back to idle", () => {
+    const processingState: DictationState = {
+      status: "processing",
+      ...recording,
+    };
+
+    expect(transition(processingState, { type: "cancel" })).toBe(
+      initialDictationState,
+    );
   });
 
   test("ignores events that are invalid for the current state", () => {

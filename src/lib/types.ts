@@ -23,6 +23,9 @@ export type DictationEvent =
 
 export type PasteMode = "auto" | "ctrl_v" | "ctrl_shift_v" | "shift_insert";
 
+/** Compact pill vs Superwhisper-style recording window. Mini is the default. */
+export type OverlaySize = "mini" | "large";
+
 export interface AppSettings {
   inputDevice: string | null;
   shortcut: string;
@@ -32,6 +35,7 @@ export interface AppSettings {
   startMinimized: boolean;
   activeMode: string;
   showOverlay: boolean;
+  overlaySize: OverlaySize;
   model: string;
   streaming: boolean;
   language: LanguageChoice;

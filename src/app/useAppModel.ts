@@ -12,6 +12,7 @@ const fallbackSettings: AppSettings = {
   startMinimized: false,
   activeMode: "clean",
   showOverlay: true,
+  overlaySize: "mini",
   model: "parakeet",
   streaming: true,
   language: "system",

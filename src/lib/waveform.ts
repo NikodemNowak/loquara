@@ -70,6 +70,25 @@ export function resamplePeaks(peaks: Peaks, count: number): number[] {
 }
 
 /**
+ * Downsamples a live loudness history the same way stored peaks are drawn:
+ * each bar keeps the syllable peak in its window, so speech stays legible.
+ */
+export function resampleEnvelope(values: readonly number[], count: number): number[] {
+  if (count <= 0) return [];
+  if (values.length === 0) return new Array<number>(count).fill(0);
+  return Array.from({ length: count }, (_, index) => {
+    const start = Math.floor((index * values.length) / count);
+    const end = Math.max(start + 1, Math.floor(((index + 1) * values.length) / count));
+    let loudest = 0;
+    for (let cursor = start; cursor < Math.min(end, values.length); cursor += 1) {
+      const value = values[cursor];
+      if (Number.isFinite(value) && value > loudest) loudest = value;
+    }
+    return loudest;
+  });
+}
+
+/**
  * Draws a stored envelope as a centred bar waveform.
  *
  * Bars are laid out to fill the width exactly, so the same recording keeps its

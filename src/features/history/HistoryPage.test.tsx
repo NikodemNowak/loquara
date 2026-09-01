@@ -7,8 +7,16 @@ import { adapterStub, recordings, snapshot } from "../../test/fixtures";
 
 import { renderWithI18n } from "../../test/renderWithI18n";
 
-function renderPage(adapter = adapterStub(), onToast = () => undefined) {
-  return renderWithI18n(<HistoryPage adapter={adapter} recordings={recordings} onRefresh={async () => undefined} onToast={onToast} />);
+function renderPage(adapter = adapterStub(), onToast = () => undefined, initialSelectedId?: string) {
+  return renderWithI18n(
+    <HistoryPage
+      adapter={adapter}
+      recordings={recordings}
+      initialSelectedId={initialSelectedId}
+      onRefresh={async () => undefined}
+      onToast={onToast}
+    />,
+  );
 }
 
 describe("historia", () => {
@@ -93,5 +101,22 @@ describe("historia", () => {
     expect(await screen.findByRole("button", { name: "Kopiuj" })).toBeEnabled();
     expect(onToast).toHaveBeenCalledWith(expect.stringContaining("Brak dostępu do schowka"), "error");
     expect(writeText).toHaveBeenCalledWith("Przygotuj proszę podsumowanie spotkania.");
+  });
+
+  test("otwiera wskazane nagranie zamiast pierwszego z listy", () => {
+    renderPage(adapterStub(), () => undefined, "complete-1");
+
+    const inspector = screen.getByRole("complementary", { name: "Szczegóły nagrania" });
+    expect(within(inspector).getByText("Przygotuj proszę podsumowanie spotkania.")).toBeVisible();
+    expect(screen.getByRole("button", { name: /Przygotuj proszę/ })).toHaveAttribute("aria-current", "true");
+    expect(screen.getByRole("button", { name: /Model chwilowo niedostępny/ })).not.toHaveAttribute("aria-current");
+  });
+
+  test("nie wczytuje audio przy montowaniu inspektora", () => {
+    const getRecordingAudio = vi.fn(async () => new Uint8Array(0));
+    renderPage(adapterStub({ getRecordingAudio }), () => undefined, "complete-1");
+
+    expect(screen.getByRole("complementary", { name: "Szczegóły nagrania" })).toBeVisible();
+    expect(getRecordingAudio).not.toHaveBeenCalled();
   });
 });

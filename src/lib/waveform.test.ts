@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 
-import { aboveRoom, mixColour, trackRoom } from "./waveform";
+import { aboveRoom, mixColour, resampleEnvelope, trackRoom } from "./waveform";
 
 /** Feeds a level in for `frames` and returns where the room settles. */
 function settle(level: number, frames: number, floor = 0) {
@@ -52,5 +52,16 @@ describe("mieszanie kolorów", () => {
   test("czego nie da się rozłożyć na kanały, nie jest zgadywane", () => {
     // Token motywu może być czymkolwiek, co rozumie CSS.
     expect(mixColour("rgb(1 2 3)", "#ffffff", 0.9)).toBe("#ffffff");
+  });
+});
+
+describe("obwiednia mowy", () => {
+  test("zagęszcza historię głośności do słupków, biorąc szczyt sylaby", () => {
+    const history = [0.1, 0.8, 0.2, 0.9, 0.15, 0.4];
+    expect(resampleEnvelope(history, 3)).toEqual([0.8, 0.9, 0.4]);
+  });
+
+  test("pusta historia zostaje ciszą, a nie zgadywanką", () => {
+    expect(resampleEnvelope([], 4)).toEqual([0, 0, 0, 0]);
   });
 });

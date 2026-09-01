@@ -146,7 +146,9 @@ impl CoordinatorMachine {
     ) -> Result<(), CoordinatorError> {
         if !matches!(
             self.state,
-            DictationState::Idle | DictationState::Failed { .. }
+            DictationState::Idle
+                | DictationState::Failed { .. }
+                | DictationState::Cancelling { .. }
         ) {
             return Err(CoordinatorError::InvalidState);
         }
@@ -163,6 +165,7 @@ impl CoordinatorMachine {
             DictationState::Recording { .. }
                 | DictationState::Failed { .. }
                 | DictationState::Cancelling { .. }
+                | DictationState::Processing { .. }
         ) {
             return Err(CoordinatorError::InvalidState);
         }
@@ -200,6 +203,13 @@ pub enum LanguageChoice {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub enum OverlaySize {
+    Mini,
+    Large,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AppSettings {
     pub input_device: Option<String>,
     pub shortcut: String,
@@ -218,6 +228,8 @@ pub struct AppSettings {
     pub active_mode: String,
     #[serde(default = "default_show_overlay")]
     pub show_overlay: bool,
+    #[serde(default = "default_overlay_size")]
+    pub overlay_size: OverlaySize,
     #[serde(default = "default_model")]
     pub model: String,
     #[serde(default = "default_streaming")]
@@ -238,6 +250,10 @@ const fn default_launch_on_login() -> bool {
 
 const fn default_show_overlay() -> bool {
     true
+}
+
+const fn default_overlay_size() -> OverlaySize {
+    OverlaySize::Mini
 }
 
 const fn default_streaming() -> bool {
@@ -268,6 +284,7 @@ impl Default for AppSettings {
             start_minimized: false,
             active_mode: default_active_mode(),
             show_overlay: default_show_overlay(),
+            overlay_size: default_overlay_size(),
             model: default_model(),
             streaming: default_streaming(),
             language: default_language(),
@@ -439,6 +456,9 @@ pub struct AppState {
     lifecycle: Arc<Mutex<()>>,
     settings_update: Arc<Mutex<()>>,
     model_home: PathBuf,
+    /// Set when processing is discarded so a transcription that finishes late
+    /// does not paste into the target app.
+    transcription_cancel: Arc<AtomicBool>,
 }
 
 /// Tracks model warm-up so transcription never loads the model twice and waits
@@ -778,6 +798,7 @@ impl AppState {
             lifecycle: Arc::new(Mutex::new(())),
             settings_update: Arc::new(Mutex::new(())),
             model_home,
+            transcription_cancel: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -972,7 +993,9 @@ fn emit_state(app: &AppHandle, state: &AppState) {
 pub fn holds_discardable_audio(state: &DictationState) -> bool {
     matches!(
         state,
-        DictationState::Recording { .. } | DictationState::Cancelling { .. }
+        DictationState::Recording { .. }
+            | DictationState::Cancelling { .. }
+            | DictationState::Processing { .. }
     )
 }
 
@@ -1085,10 +1108,9 @@ pub fn start_recording_inner(app: &AppHandle, state: &AppState) -> Result<AppSna
         .started(started.id, audio_path)
         .map_err(|error| error.to_string())?;
     if state.show_overlay() {
-        // Give the overlay focus so its Esc/Enter controls for cancelling
-        // actually reach the DOM (the pill is where the user interacts while
-        // dictating; focus is restored to the target window afterwards).
-        platform::show_overlay_with_focus(app, overlay_position(&state))
+        // Shown without activation so the app the user is dictating into
+        // keeps the keyboard. Esc and the configured shortcut are global.
+        platform::show_overlay_without_focus(app, overlay_position(&state))
             .map_err(|error| error.to_string())?;
     }
     crate::sound::play_recording_started();
@@ -1272,6 +1294,7 @@ async fn transcribe_recording(
     recording_id: String,
     audio_path: PathBuf,
 ) {
+    state.transcription_cancel.store(false, Ordering::SeqCst);
     let engine = state.engine.clone();
     let engine_last_used = state.engine_last_used.clone();
     let audio_for_engine = audio_path.clone();
@@ -1313,6 +1336,16 @@ fn finish_success(
     audio_path: &Path,
     result: TranscriptionResult,
 ) {
+    if state.transcription_cancel.load(Ordering::SeqCst) {
+        return;
+    }
+    {
+        let Ok(machine) = state.machine.lock() else { return };
+        match machine.snapshot() {
+            DictationState::Processing { recording_id: active, .. } if active == recording_id => {}
+            _ => return,
+        }
+    }
     let vocabulary = state.storage.list_vocabulary().unwrap_or_default();
     let settings = state
         .settings
@@ -1393,6 +1426,16 @@ fn postprocess_with_mode(
 }
 
 fn finish_failure(app: &AppHandle, state: &AppState, recording_id: &str, error: String) {
+    if state.transcription_cancel.load(Ordering::SeqCst) {
+        return;
+    }
+    {
+        let Ok(machine) = state.machine.lock() else { return };
+        match machine.snapshot() {
+            DictationState::Processing { recording_id: active, .. } if active == recording_id => {}
+            _ => return,
+        }
+    }
     let _ = state.storage.write_failed(recording_id, &error);
     if let Ok(mut machine) = state.machine.lock() {
         let _ = machine.transcription_failed(error);
@@ -1407,17 +1450,35 @@ pub fn cancel_recording(app: AppHandle, state: State<'_, AppState>) -> Result<Ap
 
 pub fn cancel_recording_inner(app: &AppHandle, state: &AppState) -> Result<AppSnapshot, String> {
     let _lifecycle = lifecycle_guard(&state.lifecycle).map_err(|error| error.to_string())?;
-    let (recording_id, audio_path) = match state.snapshot()?.dictation {
+    match state.snapshot()?.dictation {
         DictationState::Recording {
             recording_id,
             audio_path,
-        }
-        | DictationState::Cancelling {
+        } => cancel_live_recording(app, state, recording_id, audio_path),
+        DictationState::Processing {
             recording_id,
             audio_path,
-        } => (recording_id, audio_path),
-        _ => return Err(CoordinatorError::InvalidState.to_string()),
-    };
+        } => cancel_processing(app, state, recording_id, audio_path),
+        DictationState::Cancelling { .. } => dismiss_undo(app, state),
+        _ => Err(CoordinatorError::InvalidState.to_string()),
+    }
+}
+
+/// Takes shorter than this are discarded immediately. Longer ones keep a 5s
+/// undo chip on the overlay — the take is already cancelled, with audio in
+/// history, and Undo transcribes it.
+pub const CANCEL_UNDO_AFTER_MS: u64 = 8_000;
+
+pub fn offers_cancel_undo(duration_ms: u64) -> bool {
+    duration_ms >= CANCEL_UNDO_AFTER_MS
+}
+
+fn cancel_live_recording(
+    app: &AppHandle,
+    state: &AppState,
+    recording_id: String,
+    audio_path: String,
+) -> Result<AppSnapshot, String> {
     let cancelled = match state.audio.cancel() {
         Ok(cancelled) => cancelled,
         Err(error) => {
@@ -1435,6 +1496,11 @@ pub fn cancel_recording_inner(app: &AppHandle, state: &AppState) -> Result<AppSn
             return Err(message);
         }
     };
+    if !cancelled.peaks.is_empty() {
+        let _ = state
+            .storage
+            .store_peaks(&cancelled.id, &quantize_peaks(&cancelled.peaks));
+    }
     if let Err(error) = state.storage.update_status(
         &cancelled.id,
         RecordingStatus::Cancelled,
@@ -1455,19 +1521,71 @@ pub fn cancel_recording_inner(app: &AppHandle, state: &AppState) -> Result<AppSn
         emit_state(app, state);
         return Err(message);
     }
+    if offers_cancel_undo(cancelled.duration_ms) {
+        state
+            .machine
+            .lock()
+            .map_err(|_| "coordinator lock poisoned")?
+            .request_cancel()
+            .map_err(|error| error.to_string())?;
+        emit_state(app, state);
+        return state.snapshot();
+    }
     state
         .machine
         .lock()
         .map_err(|_| "coordinator lock poisoned")?
         .cancel()
         .map_err(|error| error.to_string())?;
+    hide_overlay_quietly(app, state);
+    emit_state(app, state);
+    state.snapshot()
+}
+
+fn cancel_processing(
+    app: &AppHandle,
+    state: &AppState,
+    recording_id: String,
+    _audio_path: String,
+) -> Result<AppSnapshot, String> {
+    state.transcription_cancel.store(true, Ordering::SeqCst);
+    let _ = state.storage.update_status(
+        &recording_id,
+        RecordingStatus::Cancelled,
+        None,
+        None,
+        None,
+        None,
+    );
+    state
+        .machine
+        .lock()
+        .map_err(|_| "coordinator lock poisoned")?
+        .cancel()
+        .map_err(|error| error.to_string())?;
+    hide_overlay_quietly(app, state);
+    emit_state(app, state);
+    state.snapshot()
+}
+
+fn dismiss_undo(app: &AppHandle, state: &AppState) -> Result<AppSnapshot, String> {
+    state
+        .machine
+        .lock()
+        .map_err(|_| "coordinator lock poisoned")?
+        .cancel()
+        .map_err(|error| error.to_string())?;
+    hide_overlay_quietly(app, state);
+    emit_state(app, state);
+    state.snapshot()
+}
+
+fn hide_overlay_quietly(app: &AppHandle, state: &AppState) {
     platform::hide_overlay(app);
     platform::restore_foreground_to(
         app,
         state.target_window.lock().ok().and_then(|target| *target),
     );
-    emit_state(app, state);
-    state.snapshot()
 }
 
 #[tauri::command]
@@ -1477,18 +1595,16 @@ pub fn request_cancel(app: AppHandle, state: State<'_, AppState>) -> Result<AppS
 
 /// What a press of the cancel key means, given what dictation is doing.
 ///
-/// The recorder pill is shown without focus and Windows refuses to hand it
-/// focus while another window of ours is active, so keyboard handling in the
-/// pill's document cannot be relied on. The global shortcut is the only path
-/// that fires whatever has focus, which makes it the only place this decision
-/// can live.
+/// The overlay is shown without focus, so keyboard handling in its document
+/// cannot be relied on. The global shortcut is the only path that fires
+/// whatever has focus, which makes it the only place this decision can live.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CancelPress {
     /// Nothing has been asked yet: put the question on screen.
     Ask,
     /// Take the question back and carry on recording.
     Dismiss,
-    /// Answer the question with yes and throw the recording away.
+    /// Discard the recording (or dismiss the undo chip).
     Confirm,
     /// There is nothing to cancel.
     Ignore,
@@ -1501,15 +1617,17 @@ pub enum RecorderKey {
     Enter,
 }
 
-/// Discarding a recording asks first, and the two keys answer differently:
-/// Escape opens the question and then takes it back, Enter is the only key
-/// that throws the audio away. A key that repeats a destructive answer is a
-/// key that discards a recording when it is pressed twice by accident.
+/// Escape discards immediately. Enter is no longer a recorder key: a second
+/// press must not throw a take away, and stealing Enter from the target app
+/// is worse than a confirm shortcut.
 pub fn cancel_press_for(state: &DictationState, key: RecorderKey) -> CancelPress {
     match (state, key) {
-        (DictationState::Recording { .. }, RecorderKey::Escape) => CancelPress::Ask,
-        (DictationState::Cancelling { .. }, RecorderKey::Escape) => CancelPress::Dismiss,
-        (DictationState::Cancelling { .. }, RecorderKey::Enter) => CancelPress::Confirm,
+        (
+            DictationState::Recording { .. }
+            | DictationState::Processing { .. }
+            | DictationState::Cancelling { .. },
+            RecorderKey::Escape,
+        ) => CancelPress::Confirm,
         _ => CancelPress::Ignore,
     }
 }
@@ -1518,8 +1636,6 @@ pub fn cancel_press_for(state: &DictationState, key: RecorderKey) -> CancelPress
 pub fn handle_cancel_press(app: &AppHandle, state: &AppState, key: RecorderKey) {
     let Ok(snapshot) = state.snapshot() else { return };
     match cancel_press_for(&snapshot.dictation, key) {
-        // Both directions of the question are the same transition: the
-        // machine sends Cancelling back to Recording.
         CancelPress::Ask | CancelPress::Dismiss => {
             let _ = request_cancel_inner(app, state);
         }
@@ -1530,40 +1646,20 @@ pub fn handle_cancel_press(app: &AppHandle, state: &AppState, key: RecorderKey) 
     }
 }
 
-/// Whether the question is on screen waiting for an answer.
+/// Whether Enter should be claimed. It is not: cancel is undo-after, not a
+/// two-key confirm, so Enter stays with the app the user is dictating into.
 pub fn awaits_cancel_answer(state: &DictationState) -> bool {
-    matches!(state, DictationState::Cancelling { .. })
+    let _ = state;
+    false
 }
 
 pub fn request_cancel_inner(app: &AppHandle, state: &AppState) -> Result<AppSnapshot, String> {
-    let _lifecycle = lifecycle_guard(&state.lifecycle).map_err(|error| error.to_string())?;
     match state.snapshot()?.dictation {
-        DictationState::Recording { .. } => {
-            state
-                .machine
-                .lock()
-                .map_err(|_| "coordinator lock poisoned")?
-                .request_cancel()
-                .map_err(|error| error.to_string())?;
-            platform::show_overlay_with_focus(app, overlay_position(state))
-                .map_err(|error| error.to_string())?;
-            emit_state(app, state);
-            state.snapshot()
-        }
         DictationState::Cancelling { .. } => {
-            state
-                .machine
-                .lock()
-                .map_err(|_| "coordinator lock poisoned")?
-                .request_cancel()
-                .map_err(|error| error.to_string())?;
-            platform::restore_foreground_to(
-                app,
-                state.target_window.lock().ok().and_then(|target| *target),
-            );
-            emit_state(app, state);
-            state.snapshot()
+            let _lifecycle = lifecycle_guard(&state.lifecycle).map_err(|error| error.to_string())?;
+            dismiss_undo(app, state)
         }
+        DictationState::Recording { .. } => cancel_recording_inner(app, state),
         _ => state.snapshot(),
     }
 }
@@ -1582,7 +1678,9 @@ pub fn retry_transcription(
             .map_err(|_| "coordinator lock poisoned")?;
         if !matches!(
             machine.snapshot(),
-            DictationState::Idle | DictationState::Failed { .. }
+            DictationState::Idle
+                | DictationState::Failed { .. }
+                | DictationState::Cancelling { .. }
         ) {
             return Err(CoordinatorError::InvalidState.to_string());
         }
@@ -1623,9 +1721,12 @@ pub fn retry_transcription(
 }
 
 fn retry_audio_path(recording: &Recording) -> Result<PathBuf, AppError> {
-    if recording.status != RecordingStatus::Failed {
+    if !matches!(
+        recording.status,
+        RecordingStatus::Failed | RecordingStatus::Cancelled
+    ) {
         return Err(AppError::NotRetryable {
-            message: "only a failed recording can be retried".into(),
+            message: "only a failed or cancelled recording can be retried".into(),
         });
     }
     let audio_path =
@@ -2506,18 +2607,20 @@ mod tests {
             audio_path: "r.wav".into(),
         };
 
+        let processing = DictationState::Processing {
+            recording_id: "r".into(),
+            audio_path: "r.wav".into(),
+        };
+
         assert!(holds_discardable_audio(&recording));
         assert!(holds_discardable_audio(&cancelling));
+        assert!(holds_discardable_audio(&processing));
     }
 
     #[test]
     fn escape_is_released_once_capture_is_over() {
         for state in [
             DictationState::Idle,
-            DictationState::Processing {
-                recording_id: "r".into(),
-                audio_path: "r.wav".into(),
-            },
             DictationState::Pasting {
                 recording_id: "r".into(),
                 audio_path: "r.wav".into(),
@@ -2536,40 +2639,39 @@ mod tests {
     }
 
     #[test]
-    fn a_cancel_press_asks_before_it_discards_audio() {
+    fn a_cancel_press_discards_immediately() {
         let recording = DictationState::Recording {
             recording_id: "r".into(),
             audio_path: "r.wav".into(),
         };
+        let processing = DictationState::Processing {
+            recording_id: "r".into(),
+            audio_path: "r.wav".into(),
+        };
 
-        assert_eq!(cancel_press_for(&recording, RecorderKey::Escape), CancelPress::Ask);
-        // Enter means nothing until there is a question to answer.
+        assert_eq!(cancel_press_for(&recording, RecorderKey::Escape), CancelPress::Confirm);
+        assert_eq!(cancel_press_for(&processing, RecorderKey::Escape), CancelPress::Confirm);
         assert_eq!(cancel_press_for(&recording, RecorderKey::Enter), CancelPress::Ignore);
+        assert!(offers_cancel_undo(8_000));
+        assert!(!offers_cancel_undo(7_999));
     }
 
     #[test]
-    fn only_enter_answers_the_question_and_escape_takes_it_back() {
-        // Escape opened the question, so Escape must be able to close it
-        // again: a key that both asks and destroys throws a recording away on
-        // a double press.
+    fn escape_dismisses_the_undo_chip_and_enter_stays_with_the_target_app() {
         let cancelling = DictationState::Cancelling {
             recording_id: "r".into(),
             audio_path: "r.wav".into(),
         };
 
-        assert_eq!(cancel_press_for(&cancelling, RecorderKey::Enter), CancelPress::Confirm);
-        assert_eq!(cancel_press_for(&cancelling, RecorderKey::Escape), CancelPress::Dismiss);
-        assert!(awaits_cancel_answer(&cancelling));
+        assert_eq!(cancel_press_for(&cancelling, RecorderKey::Enter), CancelPress::Ignore);
+        assert_eq!(cancel_press_for(&cancelling, RecorderKey::Escape), CancelPress::Confirm);
+        assert!(!awaits_cancel_answer(&cancelling));
     }
 
     #[test]
     fn cancel_does_nothing_when_there_is_nothing_to_discard() {
         for state in [
             DictationState::Idle,
-            DictationState::Processing {
-                recording_id: "r".into(),
-                audio_path: "r.wav".into(),
-            },
             DictationState::Pasting {
                 recording_id: "r".into(),
                 audio_path: "r.wav".into(),
@@ -2814,7 +2916,7 @@ mod tests {
     }
 
     #[test]
-    fn request_cancel_arms_and_dismisses_the_confirm_prompt() {
+    fn request_cancel_opens_undo_then_dismisses_to_idle() {
         let mut machine = CoordinatorMachine::default();
         machine.started("one", "one.wav").unwrap();
 
@@ -2828,13 +2930,7 @@ mod tests {
         );
 
         machine.request_cancel().unwrap();
-        assert_eq!(
-            machine.snapshot(),
-            DictationState::Recording {
-                recording_id: "one".into(),
-                audio_path: "one.wav".into(),
-            }
-        );
+        assert_eq!(machine.snapshot(), DictationState::Idle);
     }
 
     #[test]
@@ -2985,6 +3081,21 @@ mod tests {
             serde_json::to_value(&settings).unwrap()["language"],
             serde_json::json!("system")
         );
+    }
+
+    #[test]
+    fn overlay_size_defaults_to_the_compact_pill() {
+        assert_eq!(AppSettings::default().overlay_size, OverlaySize::Mini);
+
+        let older: AppSettings = serde_json::from_value(serde_json::json!({
+            "inputDevice": null,
+            "shortcut": "Ctrl+Space",
+            "autoPaste": true,
+            "retentionDays": 30
+        }))
+        .unwrap();
+
+        assert_eq!(older.overlay_size, OverlaySize::Mini);
     }
 
     #[test]

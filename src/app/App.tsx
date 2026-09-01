@@ -34,6 +34,11 @@ export function App({ adapter: adapterProp }: { adapter?: AppAdapter }) {
   const adapter = useMemo(() => adapterProp ?? getAdapter(), [adapterProp]);
   const { t, applyPreference } = useI18n();
   const [page, setPage] = useState<PageId>("dictate");
+  const [historySelectedId, setHistorySelectedId] = useState<string>();
+  const openHistory = useCallback((selectedId?: string) => {
+    setHistorySelectedId(selectedId);
+    setPage("history");
+  }, []);
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
   const toast = useCallback((text: string, kind: ToastKind = "error") => {
     const id = Date.now() + Math.random();
@@ -119,9 +124,9 @@ export function App({ adapter: adapterProp }: { adapter?: AppAdapter }) {
       </div>
     );
   } else if (page === "dictate") {
-    content = <DictatePage adapter={adapter} snapshot={snapshot} recordings={history} modelReady={installed === "ready"} onSnapshot={setSnapshot} onHistory={() => setPage("history")} onSettings={() => setPage("settings")} onToast={toast} />;
+    content = <DictatePage adapter={adapter} snapshot={snapshot} recordings={history} modelReady={installed === "ready"} onSnapshot={setSnapshot} onHistory={openHistory} onSettings={() => setPage("settings")} onToast={toast} />;
   } else if (page === "history") {
-    content = <HistoryPage adapter={adapter} recordings={history} onRefresh={refreshHistory} onToast={toast} />;
+    content = <HistoryPage adapter={adapter} recordings={history} initialSelectedId={historySelectedId} onRefresh={refreshHistory} onToast={toast} />;
   } else {
     content = <SettingsPage adapter={adapter} initialSettings={snapshot.settings} download={snapshot.download} onSettingsChange={(settings) => setSnapshot((current) => ({ ...current, settings }))} onModelsChanged={() => { void adapter.getAppSnapshot().then(setSnapshot).catch(() => {}); }} onToast={toast} />;
   }
@@ -149,7 +154,10 @@ export function App({ adapter: adapterProp }: { adapter?: AppAdapter }) {
                   aria-current={page === id ? "page" : undefined}
                   aria-label={label}
                   title={label}
-                  onClick={() => setPage(id)}
+                  onClick={() => {
+                    if (id === "history") setHistorySelectedId(undefined);
+                    setPage(id);
+                  }}
                 >
                   <Icon size={18} strokeWidth={1.8} />
                   <span className="rail-btn__label">{label}</span>

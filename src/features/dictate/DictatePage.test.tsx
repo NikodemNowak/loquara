@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, test, vi } from "vitest";
 
 import { renderWithI18n } from "../../test/renderWithI18n";
-import { adapterStub, settings } from "../../test/fixtures";
+import { adapterStub, recordings, settings } from "../../test/fixtures";
 import type { DictationState } from "../../lib/types";
 import { DictatePage } from "./DictatePage";
 
@@ -185,5 +185,36 @@ describe("ekran Dyktuj", () => {
 
     // Katalog ma dziś jeden model, więc ekran tego nie ukrywa.
     expect(screen.getByText("Na razie jeden model. Kolejne wkrótce.")).toBeVisible();
+  });
+
+  test("kliknięcie ostatniego nagrania otwiera historię na tym nagraniu", async () => {
+    const onHistory = vi.fn();
+    renderWithI18n(<DictatePage
+      adapter={adapterStub()}
+      snapshot={{ dictation: { status: "idle" }, settings, modelLoading: false }}
+      recordings={recordings}
+      onSnapshot={() => undefined}
+      onHistory={onHistory}
+      onToast={() => undefined}
+    />);
+
+    await userEvent.click(screen.getByRole("button", { name: /Przygotuj proszę podsumowanie/ }));
+    expect(onHistory).toHaveBeenCalledWith("complete-1");
+  });
+
+  test("cała historia otwiera listę bez wybranego nagrania", async () => {
+    const onHistory = vi.fn();
+    renderWithI18n(<DictatePage
+      adapter={adapterStub()}
+      snapshot={{ dictation: { status: "idle" }, settings, modelLoading: false }}
+      recordings={recordings}
+      onSnapshot={() => undefined}
+      onHistory={onHistory}
+      onToast={() => undefined}
+    />);
+
+    await userEvent.click(screen.getByRole("button", { name: "Cała historia" }));
+    expect(onHistory).toHaveBeenCalledOnce();
+    expect(onHistory.mock.calls[0]).toEqual([]);
   });
 });

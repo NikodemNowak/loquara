@@ -362,6 +362,18 @@ export function SettingsPage({
             <input type="checkbox" checked={settings.showOverlay} aria-label={t("settings.showOverlay.label")} onChange={(event) => void save({ showOverlay: event.target.checked })} />
           </label>
           <label className="setting-row">
+            <span><strong>{t("settings.overlaySize.label")}</strong><small>{t("settings.overlaySize.description")}</small></span>
+            <Select
+              label={t("settings.overlaySize.label")}
+              value={settings.overlaySize ?? "mini"}
+              onChange={(next) => void save({ overlaySize: next === "large" ? "large" : "mini" })}
+              options={[
+                { value: "mini", label: t("settings.overlaySize.mini") },
+                { value: "large", label: t("settings.overlaySize.large") },
+              ]}
+            />
+          </label>
+          <label className="setting-row">
             <span><strong>{t("settings.launchOnLogin.label")}</strong><small>{t("settings.launchOnLogin.description")}</small></span>
             <input type="checkbox" checked={settings.launchOnLogin} aria-label={t("settings.launchOnLogin.label")} onChange={(event) => void save({ launchOnLogin: event.target.checked })} />
           </label>

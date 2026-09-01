@@ -34,12 +34,8 @@ export function transition(
       }
       return event.type === "cancel" ? initialDictationState : state;
     case "cancelling":
-      if (event.type === "cancel_request") {
-        return {
-          status: "recording",
-          recordingId: state.recordingId,
-          audioPath: state.audioPath,
-        };
+      if (event.type === "cancel_request" || event.type === "cancel") {
+        return initialDictationState;
       }
       if (event.type === "stop") {
         return {
@@ -48,7 +44,7 @@ export function transition(
           audioPath: state.audioPath,
         };
       }
-      return event.type === "cancel" ? initialDictationState : state;
+      return state;
     case "processing":
       if (event.type === "transcription_succeeded") {
         return {
@@ -68,7 +64,7 @@ export function transition(
           error: event.error,
         };
       }
-      return state;
+      return event.type === "cancel" ? initialDictationState : state;
     case "pasting":
       return event.type === "paste_completed" ? initialDictationState : state;
     case "failed":
@@ -80,5 +76,9 @@ export function transition(
         };
       }
       return event.type === "cancel" ? initialDictationState : state;
+    default: {
+      const _exhaustive: never = state;
+      return _exhaustive;
+    }
   }
 }

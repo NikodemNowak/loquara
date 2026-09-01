@@ -301,7 +301,7 @@ input[type="checkbox"]:disabled { opacity: 0.45; cursor: not-allowed; }
 .history-toolbar .select-trigger { width: 100%; }
 .history-workspace { display: grid; grid-template-columns: minmax(360px, 1fr) 380px; flex: 1 1 auto; min-height: 260px; overflow: hidden; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--panel); box-shadow: var(--panel-edge), var(--panel-shadow); }
 .history-list { min-width: 0; min-height: 0; padding: var(--s-2); overflow: auto; }
-.history-row { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: var(--s-3); width: 100%; padding: var(--s-3); border: 0; border-radius: var(--r-sm); background: transparent; text-align: left; transition: background var(--fast) var(--ease); }
+.history-row { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: var(--s-3); width: 100%; padding: var(--s-3); border: 0; border-radius: var(--r-sm); background: transparent; text-align: left; content-visibility: auto; contain-intrinsic-size: auto 64px; transition: background var(--fast) var(--ease); }
 .history-row:hover { background: var(--surface-hover); }
 /* Selection is a filled block, not a coloured rail down the edge. The accent
  * stays on things you press; being the current row is a state, not an action. */
@@ -559,21 +559,18 @@ input[type="checkbox"]:disabled { opacity: 0.45; cursor: not-allowed; }
 .error-boundary p { margin: 0; max-width: 460px; overflow-wrap: anywhere; color: var(--muted); font-size: var(--t-small); }
 
 /* ===== Recorder overlay ==================================================
- * An 80x42 pill that floats over other applications. States that carry words
- * widen it rather than stacking a second block underneath, so it is always one
- * object. It carries its own ground and inks, sitting over arbitrary windows.
+ * A floating recorder: a 68x36 pill by default, or a larger recording window
+ * when the user asks for it. It carries its own ground and inks, sitting over
+ * arbitrary application windows.
  */
 body.overlay-window { width: 100%; height: 100%; overflow: hidden; background: transparent; }
 body.overlay-window #root { width: 100%; height: 100%; overflow: hidden; }
-/* The window holds two objects stacked at its bottom edge: the question above,
- * the pill below, transparent air between them. The window itself carries no
- * ground — only the two things drawn in it do. */
 .recorder-overlay {
   position: relative;
   display: grid;
   align-content: end;
   justify-items: center;
-  gap: 8px;
+  gap: 6px;
   width: 100%;
   height: 100%;
   color: var(--pill-text);
@@ -592,21 +589,24 @@ body.overlay-window #root { width: 100%; height: 100%; overflow: hidden; }
   border-radius: 10px;
   background: var(--pill-bg);
 }
-/* While the question stands, the pill keeps its own width and the card takes
- * the window's — so the pill never changes shape, which is the whole point. */
-.recorder-overlay--asking .overlay-pill { width: 68px; }
-/* A pill at the top of the screen has nothing above it, so the question opens
- * downwards instead — same two objects, stacked the other way up. */
-.recorder-overlay--below { align-content: start; }
-.recorder-overlay--below .ask-card { order: 1; }
-.recorder-overlay--below .overlay-pill { order: 0; }
+.recorder-overlay--large .overlay-pill {
+  height: 88px;
+  border-radius: 16px;
+}
 .overlay-main { display: flex; align-items: center; gap: var(--s-2); height: 36px; padding: 0 7px; min-width: 0; }
 .overlay-main--center { justify-content: center; }
+.overlay-main--large {
+  display: grid;
+  grid-template-rows: 1fr auto;
+  align-items: stretch;
+  height: 100%;
+  padding: 8px 10px 8px;
+  gap: 4px;
+}
 .overlay-wave { flex: 1 1 auto; height: 26px; min-width: 0; }
+.recorder-overlay--large .overlay-wave { height: 36px; }
 .overlay-copy { display: grid; flex: 1 1 auto; min-width: 0; }
 .overlay-copy strong { overflow: hidden; font-size: var(--t-micro); font-weight: var(--w-medium); text-overflow: ellipsis; white-space: nowrap; }
-/* Error states drop the icon: at this width the words are worth more than a
- * glyph, and they need two lines to fit. */
 .overlay-copy--alert strong { color: var(--pill-danger); }
 .overlay-mark { display: grid; place-items: center; width: 22px; height: 22px; flex: 0 0 auto; border-radius: 50%; }
 .overlay-mark--success { color: var(--pill-success); background: color-mix(in srgb, var(--pill-success) 18%, transparent); }
@@ -615,60 +615,103 @@ body.overlay-window #root { width: 100%; height: 100%; overflow: hidden; }
 .recorder-overlay .text-button:hover { color: var(--pill-text); background: rgba(255, 255, 255, 0.08); }
 .recorder-overlay .spinner { border-color: rgba(255, 255, 255, 0.16); border-top-color: var(--pill-muted); }
 
-/* The question. Same ground, border and family of radii as the pill, so the
- * two read as one object in two parts. The only colour is the word naming
- * what Enter destroys — the app tints words, never whole surfaces.
- */
-.ask-card {
-  display: grid;
-  gap: 7px;
-  width: 100%;
-  padding: 9px 11px 10px;
-  border: 1px solid var(--pill-border);
-  border-radius: var(--r-md);
-  background: var(--pill-bg);
-  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.5);
+.overlay-actions {
+  position: absolute;
+  top: 50%;
+  right: 4px;
+  display: flex;
+  gap: 2px;
+  transform: translateY(-50%);
+  opacity: 0;
 }
-.ask-card__question {
-  font-size: var(--t-small);
-  font-weight: var(--w-bold);
-  letter-spacing: -0.01em;
-  line-height: 1.25;
+.recorder-overlay--mini .overlay-pill:hover .overlay-actions,
+.recorder-overlay--mini .overlay-pill:focus-within .overlay-actions {
+  opacity: 1;
 }
-/* One grid for both rows, so the keycaps share a column and the labels line
- * up whatever the keys are called. */
-.ask-card__answers {
-  display: grid;
-  grid-template-columns: max-content 1fr;
-  gap: 5px 9px;
-  align-items: center;
-  margin: 0;
+.recorder-overlay--mini .overlay-pill:hover .overlay-wave,
+.recorder-overlay--mini .overlay-pill:focus-within .overlay-wave {
+  margin-right: 34px;
 }
-.ask-card__answers dt, .ask-card__answers dd { margin: 0; }
-.ask-card__answers dd {
-  color: var(--pill-muted);
-  font-size: var(--t-micro);
-  font-weight: var(--w-medium);
+.recorder-overlay--large .overlay-actions {
+  position: static;
+  transform: none;
+  opacity: 1;
+  pointer-events: auto;
 }
-/* Scoped to beat the shared `dd` colour above it, not left to chance. */
-.ask-card__answers .ask-card__discard { color: var(--pill-danger); }
-/* The same keycap the shortcut in Settings uses, on the pill's darker ground:
- * one keycap in the app, not two. */
-.ask-card kbd {
+.overlay-icon-button {
   display: grid;
   place-items: center;
-  min-width: 24px;
-  padding: 3px 8px;
-  border: 1px solid rgba(255, 255, 255, 0.16);
-  border-bottom-width: 2px;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 0;
   border-radius: 5px;
-  background: rgba(255, 255, 255, 0.06);
   color: var(--pill-text);
-  font-family: inherit;
+  background: rgba(255, 255, 255, 0.08);
+}
+.overlay-icon-button:hover { background: rgba(255, 255, 255, 0.16); }
+.overlay-icon-button--cancel { color: var(--pill-danger); }
+.overlay-icon-button--stop { color: var(--pill-text); }
+.overlay-chrome {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+.overlay-meta {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  color: var(--pill-muted);
+  font-variant-numeric: tabular-nums;
+}
+.overlay-meta strong {
+  color: var(--pill-text);
   font-size: var(--t-micro);
   font-weight: var(--w-medium);
-  line-height: 1;
 }
+.overlay-undo {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+}
+.overlay-undo__button {
+  padding: 2px 8px;
+  border: 0;
+  border-radius: 6px;
+  color: var(--pill-text);
+  background: rgba(255, 255, 255, 0.1);
+  font: inherit;
+  font-weight: var(--w-medium);
+}
+.overlay-undo__button:hover { background: rgba(255, 255, 255, 0.16); }
+.overlay-menu {
+  display: grid;
+  gap: 2px;
+  width: 100%;
+  padding: 4px;
+  border: 1px solid var(--pill-border);
+  border-radius: 10px;
+  background: var(--pill-bg);
+}
+.overlay-menu button {
+  display: block;
+  width: 100%;
+  padding: 5px 8px;
+  border: 0;
+  border-radius: 6px;
+  color: var(--pill-text);
+  background: transparent;
+  font: inherit;
+  text-align: left;
+}
+.overlay-menu button:hover,
+.overlay-menu button.is-active { background: rgba(255, 255, 255, 0.08); }
 
 .overlay-note { position: absolute; right: 6px; bottom: 1px; left: 6px; overflow: hidden; color: var(--pill-muted); font-size: 8px; line-height: 10px; text-align: center; text-overflow: ellipsis; white-space: nowrap; pointer-events: none; }
 .overlay-note--error { color: var(--pill-danger); }

@@ -146,6 +146,7 @@ const initialSettings: AppSettings = {
   startMinimized: false,
   activeMode: "clean",
   showOverlay: true,
+  overlaySize: "mini",
   model: "parakeet",
   streaming: false,
   language: "system",

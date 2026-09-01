@@ -87,6 +87,19 @@ describe("główna nawigacja", () => {
     expect(getAppSnapshot).toHaveBeenCalledOnce();
   });
 
+  test("kliknięcie ostatniego nagrania od razu otwiera tę transkrypcję", async () => {
+    const user = userEvent.setup();
+    renderApp();
+
+    expect(await screen.findByRole("heading", { name: "Gotowy" })).toBeVisible();
+    await user.click(screen.getByRole("button", { name: /Przygotuj proszę podsumowanie/ }));
+
+    expect(screen.getByRole("heading", { name: "Historia" })).toBeVisible();
+    const inspector = screen.getByRole("complementary", { name: "Szczegóły nagrania" });
+    expect(inspector).toHaveTextContent("Przygotuj proszę podsumowanie spotkania.");
+    expect(screen.getByRole("button", { name: /Przygotuj proszę/ })).toHaveAttribute("aria-current", "true");
+  });
+
   test("renderuje UI po angielsku i ustawia atrybut lang dokumentu", async () => {
     const adapter = adapterStub({
       getAppSnapshot: async () => ({
