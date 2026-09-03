@@ -267,6 +267,22 @@ pub fn bottom_center_position(work_area: PhysicalRect, window: PhysicalWindowSiz
     )
 }
 
+/// Keeps a remembered pill on the visible work area. A second monitor that
+/// went away, or a drag that ended off-screen, otherwise leaves the overlay
+/// shown and unreachable.
+pub fn clamp_overlay_position(
+    work_area: PhysicalRect,
+    window: PhysicalWindowSize,
+    x: i32,
+    y: i32,
+) -> (i32, i32) {
+    let width = i32::try_from(window.width).unwrap_or(i32::MAX);
+    let height = i32::try_from(window.height).unwrap_or(i32::MAX);
+    let max_x = work_area.right.saturating_sub(width).max(work_area.left);
+    let max_y = work_area.bottom.saturating_sub(height).max(work_area.top);
+    (x.clamp(work_area.left, max_x), y.clamp(work_area.top, max_y))
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ControlSource {
     Tray,
@@ -420,10 +436,38 @@ pub fn hide_overlay<R: Runtime>(app: &AppHandle<R>) {
 
 fn overlay_origin(
     work: PhysicalRect,
+    visible: PhysicalRect,
     size: PhysicalWindowSize,
     position: Option<(i32, i32)>,
 ) -> (i32, i32) {
-    position.unwrap_or_else(|| bottom_center_position(work, size))
+    match position {
+        Some((x, y)) => clamp_overlay_position(visible, size, x, y),
+        None => bottom_center_position(work, size),
+    }
+}
+
+/// Visible, topmost, and not the keyboard target.
+///
+/// `SW_SHOWNOACTIVATE` alone leaves the HWND where it was in the Z-order —
+/// usually under the app the user is dictating into. Pinning `HWND_TOPMOST`
+/// with `SWP_NOACTIVATE` is the Win32 way to float without stealing focus.
+#[cfg(windows)]
+fn show_overlay_hwnd_topmost(hwnd: windows_sys::Win32::Foundation::HWND, activate: bool) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_SHOWWINDOW,
+        SW_SHOW, SW_SHOWNOACTIVATE, SetForegroundWindow, SetWindowPos, ShowWindow,
+    };
+    let mut flags = SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW | SWP_NOOWNERZORDER;
+    if !activate {
+        flags |= SWP_NOACTIVATE;
+    }
+    unsafe {
+        ShowWindow(hwnd, if activate { SW_SHOW } else { SW_SHOWNOACTIVATE });
+        SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, flags);
+        if activate {
+            SetForegroundWindow(hwnd);
+        }
+    }
 }
 
 pub fn show_overlay_without_focus<R: Runtime>(
@@ -435,12 +479,12 @@ pub fn show_overlay_without_focus<R: Runtime>(
         .ok_or_else(|| PlatformError::Other("overlay window is missing".into()))?;
     #[cfg(windows)]
     {
-        use windows_sys::Win32::UI::WindowsAndMessaging::{SW_SHOWNOACTIVATE, ShowWindow};
         let size = window
             .outer_size()
             .map_err(|error| PlatformError::Other(error.to_string()))?;
         let (x, y) = overlay_origin(
             windows_work_area()?,
+            windows_virtual_screen()?,
             PhysicalWindowSize {
                 width: size.width,
                 height: size.height,
@@ -450,18 +494,20 @@ pub fn show_overlay_without_focus<R: Runtime>(
         window
             .set_position(PhysicalPosition::new(x, y))
             .map_err(|error| PlatformError::Other(error.to_string()))?;
+        let _ = window.set_always_on_top(true);
         let hwnd = window
             .hwnd()
             .map_err(|error| PlatformError::Other(error.to_string()))?;
-        unsafe {
-            ShowWindow(hwnd.0, SW_SHOWNOACTIVATE);
-        }
+        show_overlay_hwnd_topmost(hwnd.0, false);
         Ok(())
     }
     #[cfg(not(windows))]
-    window
-        .show()
-        .map_err(|error| PlatformError::Other(error.to_string()))
+    {
+        let _ = window.set_always_on_top(true);
+        window
+            .show()
+            .map_err(|error| PlatformError::Other(error.to_string()))
+    }
 }
 
 #[cfg(windows)]
@@ -488,6 +534,29 @@ fn windows_work_area() -> Result<PhysicalRect, PlatformError> {
     })
 }
 
+/// Union of every attached display. `SPI_GETWORKAREA` is the primary monitor
+/// only; clamping a remembered pill to that would yank it off a second screen.
+#[cfg(windows)]
+fn windows_virtual_screen() -> Result<PhysicalRect, PlatformError> {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
+        SM_YVIRTUALSCREEN,
+    };
+    let left = unsafe { GetSystemMetrics(SM_XVIRTUALSCREEN) };
+    let top = unsafe { GetSystemMetrics(SM_YVIRTUALSCREEN) };
+    let width = unsafe { GetSystemMetrics(SM_CXVIRTUALSCREEN) };
+    let height = unsafe { GetSystemMetrics(SM_CYVIRTUALSCREEN) };
+    if width <= 0 || height <= 0 {
+        return windows_work_area();
+    }
+    Ok(PhysicalRect {
+        left,
+        top,
+        right: left.saturating_add(width),
+        bottom: top.saturating_add(height),
+    })
+}
+
 pub fn show_overlay_with_focus<R: Runtime>(
     app: &AppHandle<R>,
     position: Option<(i32, i32)>,
@@ -497,14 +566,12 @@ pub fn show_overlay_with_focus<R: Runtime>(
         .ok_or_else(|| PlatformError::Other("overlay window is missing".into()))?;
     #[cfg(windows)]
     {
-        use windows_sys::Win32::UI::WindowsAndMessaging::{
-            SW_SHOW, SetForegroundWindow, ShowWindow,
-        };
         let size = window
             .outer_size()
             .map_err(|error| PlatformError::Other(error.to_string()))?;
         let (x, y) = overlay_origin(
             windows_work_area()?,
+            windows_virtual_screen()?,
             PhysicalWindowSize {
                 width: size.width,
                 height: size.height,
@@ -514,13 +581,11 @@ pub fn show_overlay_with_focus<R: Runtime>(
         window
             .set_position(PhysicalPosition::new(x, y))
             .map_err(|error| PlatformError::Other(error.to_string()))?;
+        let _ = window.set_always_on_top(true);
         let hwnd = window
             .hwnd()
             .map_err(|error| PlatformError::Other(error.to_string()))?;
-        unsafe {
-            ShowWindow(hwnd.0, SW_SHOW);
-            SetForegroundWindow(hwnd.0);
-        }
+        show_overlay_hwnd_topmost(hwnd.0, true);
         // SetForegroundWindow can be refused by the OS; Tauri's set_focus is
         // a best-effort fallback so the DOM receives the keydown.
         let _ = window.set_focus();
@@ -1305,6 +1370,43 @@ mod tests {
                 }
             ),
             (648, 912)
+        );
+    }
+
+    #[test]
+    fn remembered_overlay_position_is_clamped_to_the_visible_displays() {
+        let work = PhysicalRect {
+            left: 0,
+            top: 0,
+            right: 1920,
+            bottom: 1040,
+        };
+        let dual = PhysicalRect {
+            left: 0,
+            top: 0,
+            right: 3840,
+            bottom: 1080,
+        };
+        let size = PhysicalWindowSize {
+            width: 68,
+            height: 36,
+        };
+
+        assert_eq!(
+            overlay_origin(work, dual, size, Some((-400, 5000))),
+            (0, 1044)
+        );
+        assert_eq!(
+            overlay_origin(work, dual, size, Some((2500, 800))),
+            (2500, 800)
+        );
+        assert_eq!(
+            overlay_origin(work, work, size, Some((3000, -20))),
+            (1852, 0)
+        );
+        assert_eq!(
+            overlay_origin(work, dual, size, None),
+            bottom_center_position(work, size)
         );
     }
 
