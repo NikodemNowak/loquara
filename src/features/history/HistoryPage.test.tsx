@@ -40,6 +40,51 @@ describe("historia", () => {
     await user.click(screen.getByRole("button", { name: /Przygotuj proszę/ }));
     await user.click(within(inspector).getByRole("button", { name: "Wklej" }));
     expect(pasteTranscript).toHaveBeenCalledWith("complete-1");
+    // A finished transcript is worth keeping, so no retry is offered.
+    expect(within(inspector).queryByRole("button", { name: "Ponów" })).not.toBeInTheDocument();
+  });
+
+  test("pokazuje brak transkrypcji i pozwala uruchomić ją ponownie", async () => {
+    const emptyCompleted = {
+      id: "complete-empty",
+      createdAt: 1_786_000_400_000,
+      durationMs: 5_000,
+      status: "completed" as const,
+      text: "",
+      model: "parakeet",
+      audioPath: "C:\\Mow\\complete-empty.wav",
+      sourceApp: null,
+      error: null,
+      peaks: null,
+    };
+    const retryTranscription = vi.fn(async () => snapshot);
+    renderWithI18n(<HistoryPage adapter={adapterStub({ retryTranscription })} recordings={[emptyCompleted]} onRefresh={async () => undefined} onToast={() => undefined} />);
+
+    expect(screen.getByRole("button", { name: /Brak transkrypcji/ })).toBeVisible();
+    expect(screen.getByText("Transkrypcja jest pusta. Możesz uruchomić ją ponownie.")).toBeVisible();
+
+    await userEvent.click(screen.getByRole("button", { name: "Ponów" }));
+    expect(retryTranscription).toHaveBeenCalledWith("complete-empty");
+  });
+
+  test("pozwala ponowić anulowane nagranie z zapisanym audio", async () => {
+    const cancelled = {
+      id: "cancelled-1",
+      createdAt: 1_786_000_500_000,
+      durationMs: 20_000,
+      status: "cancelled" as const,
+      text: null,
+      model: null,
+      audioPath: "C:\\Mow\\cancelled-1.wav",
+      sourceApp: null,
+      error: null,
+      peaks: null,
+    };
+    const retryTranscription = vi.fn(async () => snapshot);
+    renderWithI18n(<HistoryPage adapter={adapterStub({ retryTranscription })} recordings={[cancelled]} onRefresh={async () => undefined} onToast={() => undefined} />);
+
+    await userEvent.click(screen.getByRole("button", { name: "Ponów" }));
+    expect(retryTranscription).toHaveBeenCalledWith("cancelled-1");
   });
 
   test("wyjaśnia brak ponowienia nagrania bez zapisanego audio", async () => {

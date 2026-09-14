@@ -1744,13 +1744,27 @@ pub fn retry_transcription(
     state.snapshot()
 }
 
+/// Whether a history row is still waiting for a transcript.
+///
+/// Failed and cancelled takes were never transcribed. A completed take whose
+/// transcript came back empty was transcribed into nothing, which reads as a
+/// missing transcript rather than a finished one. Anything else already has
+/// text worth keeping, so history does not offer to overwrite it.
+pub fn needs_transcript(recording: &Recording) -> bool {
+    match recording.status {
+        RecordingStatus::Failed | RecordingStatus::Cancelled => true,
+        RecordingStatus::Completed => recording
+            .text
+            .as_deref()
+            .is_none_or(|text| text.trim().is_empty()),
+        RecordingStatus::Recording | RecordingStatus::Processing => false,
+    }
+}
+
 fn retry_audio_path(recording: &Recording) -> Result<PathBuf, AppError> {
-    if !matches!(
-        recording.status,
-        RecordingStatus::Failed | RecordingStatus::Cancelled
-    ) {
+    if !needs_transcript(recording) {
         return Err(AppError::NotRetryable {
-            message: "only a failed or cancelled recording can be retried".into(),
+            message: "the recording already has a transcript".into(),
         });
     }
     let audio_path =
@@ -2803,12 +2817,19 @@ mod tests {
     }
 
     #[test]
-    fn retry_requires_a_failed_row_with_existing_finalized_audio() {
+    fn retry_requires_a_missing_transcript_and_existing_finalized_audio() {
         let temp = tempfile::tempdir().unwrap();
         let final_audio = temp.path().join("final.wav");
         fs::write(&final_audio, b"wav").unwrap();
         let retryable =
             history_recording("retryable", RecordingStatus::Failed, final_audio.as_path());
+        let cancelled =
+            history_recording("cancelled", RecordingStatus::Cancelled, final_audio.as_path());
+        let mut blank = history_recording("blank", RecordingStatus::Completed, final_audio.as_path());
+        blank.text = Some("   ".into());
+        let mut transcribed =
+            history_recording("transcribed", RecordingStatus::Completed, final_audio.as_path());
+        transcribed.text = Some("gotowe".into());
         let mut interrupted = history_recording(
             "interrupted",
             RecordingStatus::Failed,
@@ -2817,10 +2838,38 @@ mod tests {
         interrupted.audio_path = None;
 
         assert_eq!(retry_audio_path(&retryable).unwrap(), final_audio);
+        assert_eq!(retry_audio_path(&cancelled).unwrap(), final_audio);
+        assert_eq!(retry_audio_path(&blank).unwrap(), final_audio);
         assert!(matches!(
             retry_audio_path(&interrupted),
             Err(AppError::NotRetryable { .. })
         ));
+        assert!(matches!(
+            retry_audio_path(&transcribed),
+            Err(AppError::NotRetryable { message }) if message == "the recording already has a transcript"
+        ));
+    }
+
+    #[test]
+    fn a_completed_row_with_an_empty_transcript_still_needs_one() {
+        // The model can finish without hearing anything, which stores an empty
+        // transcript on a completed row. History has to keep offering to run
+        // it again instead of treating it as done.
+        let temp = tempfile::tempdir().unwrap();
+        let audio_path = temp.path().join("empty.wav");
+        let mut blank = history_recording("empty", RecordingStatus::Completed, &audio_path);
+        blank.text = Some(String::new());
+
+        assert!(needs_transcript(&blank));
+        assert!(!needs_transcript(&Recording {
+            text: Some("mamy tekst".into()),
+            ..blank
+        }));
+        assert!(!needs_transcript(&history_recording(
+            "active",
+            RecordingStatus::Processing,
+            &audio_path
+        )));
     }
 
     #[test]

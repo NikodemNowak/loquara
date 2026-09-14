@@ -340,6 +340,7 @@ input[type="checkbox"]:disabled { opacity: 0.45; cursor: not-allowed; }
 .inspector-actions .danger-button { margin-left: auto; }
 .error-note { margin: 0; padding: var(--s-3); border-radius: var(--r-sm); color: var(--danger); background: var(--danger-soft); font-size: var(--t-small); line-height: var(--lh-relaxed); }
 .retry-unavailable { color: var(--faint); font-size: var(--t-micro); line-height: var(--lh-normal); }
+.inspector-hint { margin: 0; color: var(--faint); font-size: var(--t-micro); line-height: var(--lh-normal); }
 
 /* ===== Audio player ======================================================
  * The waveform is the scrubber. There is no separate track or thumb: the

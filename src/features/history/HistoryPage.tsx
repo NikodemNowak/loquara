@@ -49,6 +49,16 @@ export function HistoryPage({
     processing: t("history.status.processing"),
     cancelled: t("history.status.cancelled"),
   };
+  /** A completed take counts as transcribed only when it has text; an empty
+   *  result reads as a missing transcript that can be run again. */
+  const missingTranscript = (item: Recording) =>
+    item.status === "completed" && !item.text?.trim();
+  const awaitsTranscript = (item: Recording) =>
+    item.status === "failed" || item.status === "cancelled" || missingTranscript(item);
+  const rowLabel = (item: Recording) =>
+    item.text?.trim()
+      ? item.text
+      : item.error ?? (item.status === "completed" ? t("history.transcript.missing") : labels[item.status]);
   const formatTime = (timestamp: number) =>
     new Intl.DateTimeFormat(dateLocale(lang), { hour: "2-digit", minute: "2-digit" }).format(timestamp);
 
@@ -144,11 +154,11 @@ export function HistoryPage({
                 setSelectedId(item.id);
               }}
               aria-current={selected?.id === item.id ? "true" : undefined}
-              aria-label={item.text ?? item.error ?? labels[item.status]}
+              aria-label={rowLabel(item)}
             >
               <span className="history-row__copy">
-                <span className={`history-row__text ${item.text ? "" : "history-row__text--empty"}`}>
-                  {item.text ?? item.error ?? labels[item.status]}
+                <span className={`history-row__text ${item.text?.trim() ? "" : "history-row__text--empty"}`}>
+                  {rowLabel(item)}
                 </span>
                 <span className="history-row__meta">
                   {item.status !== "completed" && (
@@ -194,6 +204,9 @@ export function HistoryPage({
                   aria-label={t("history.transcript.title")}
                   onChange={(event) => setDraft(event.target.value)}
                 />
+                {missingTranscript(selected) && (
+                  <p className="inspector-hint">{t("history.transcript.emptyHint")}</p>
+                )}
               </div>
             ) : (
               <p className="inspector-facts"><span>{labels[selected.status]}</span></p>
@@ -242,7 +255,7 @@ export function HistoryPage({
                   {t("history.action.copyPath")}
                 </button>
               )}
-              {selected.status === "failed" && (
+              {awaitsTranscript(selected) && (
                 selected.audioPath
                   ? <button className="text-button" disabled={busy} onClick={() => void action("retry", () => adapter.retryTranscription(selected.id))}>
                       <RotateCcw size={14} />{pendingKey === "retry" ? t("history.action.retrying") : t("common.retry")}
