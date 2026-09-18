@@ -117,7 +117,7 @@ describe("ekran Dyktuj", () => {
     // żaden model nie był pobrany, więc skrót mógł się tylko wysypać.
     renderWithI18n(<DictatePage
       adapter={adapterStub()}
-      snapshot={{ dictation: { status: "idle" }, settings, model: { key: "parakeet", display: "Parakeet TDT 0.6B v3", provider: "NVIDIA", installed: false, totalBytes: 670_478_772 }, modelLoading: false }}
+      snapshot={{ dictation: { status: "idle" }, settings, model: { key: "parakeet", display: "Parakeet TDT 0.6B v3", provider: "NVIDIA", installed: false, totalBytes: 670_478_772, source: "local" }, modelLoading: false }}
       recordings={[]}
       modelReady={false}
       onSnapshot={() => undefined}
@@ -132,11 +132,43 @@ describe("ekran Dyktuj", () => {
     expect(screen.queryByRole("button", { name: "Zacznij nagrywać" })).not.toBeInTheDocument();
   });
 
+  test("w trybie chmury bez klucza odsyła do ustawień, a nie po model", async () => {
+    const onSettings = vi.fn();
+    renderWithI18n(<DictatePage
+      adapter={adapterStub()}
+      snapshot={{
+        dictation: { status: "idle" },
+        settings: { ...settings, transcriptionSource: "cloud" },
+        model: {
+          key: "",
+          display: "xAI (Grok) · grok-voice-transcribe-2.0",
+          provider: "xAI (Grok)",
+          installed: false,
+          totalBytes: 0,
+          source: "cloud",
+        },
+        modelLoading: false,
+      }}
+      recordings={[]}
+      modelReady={false}
+      onSnapshot={() => undefined}
+      onHistory={() => undefined}
+      onSettings={onSettings}
+      onToast={() => undefined}
+    />);
+
+    expect(screen.getByRole("heading", { name: "Dodaj klucz API" })).toBeVisible();
+    await userEvent.click(screen.getByRole("button", { name: "Otwórz ustawienia" }));
+
+    expect(onSettings).toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: "Pobierz model" })).toBeNull();
+  });
+
   test("pobieranie zaczęte gdzie indziej widać po powrocie na ekran", async () => {
     // Stan pobierania należy do aplikacji, nie do ekranu. Trzymany w
     // komponencie znikał po wyjściu, a przycisk wracał gotowy do klikania —
     // i drugie pobieranie pisało po plikach pierwszego.
-    const model = { key: "parakeet", display: "Parakeet TDT 0.6B v3", provider: "NVIDIA", installed: false, totalBytes: 670_478_772 };
+    const model = { key: "parakeet", display: "Parakeet TDT 0.6B v3", provider: "NVIDIA", installed: false, totalBytes: 670_478_772, source: "local" as const };
     const downloadModel = vi.fn(async () => undefined);
     renderWithI18n(<DictatePage
       adapter={adapterStub({ downloadModel })}
@@ -168,7 +200,7 @@ describe("ekran Dyktuj", () => {
     const onSettings = vi.fn();
     renderWithI18n(<DictatePage
       adapter={adapterStub({ startRecording, downloadModel })}
-      snapshot={{ dictation: { status: "idle" }, settings, model: { key: "parakeet", display: "Parakeet TDT 0.6B v3", provider: "NVIDIA", installed: false, totalBytes: 670_478_772 }, modelLoading: false }}
+      snapshot={{ dictation: { status: "idle" }, settings, model: { key: "parakeet", display: "Parakeet TDT 0.6B v3", provider: "NVIDIA", installed: false, totalBytes: 670_478_772, source: "local" }, modelLoading: false }}
       recordings={[]}
       modelReady={false}
       onSnapshot={() => undefined}

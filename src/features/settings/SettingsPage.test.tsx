@@ -220,6 +220,95 @@ describe("ustawienia", () => {
     expect(saved[1]).toEqual(expect.objectContaining({ autoPaste: false, launchOnLogin: false }));
   });
 
+  test("wybór chmury zapisuje silnik i pokazuje dostawcę z domyślnym modelem", async () => {
+    const adapter = adapterStub();
+    const updateSettings = vi.spyOn(adapter, "updateSettings");
+    renderWithI18n(<SettingsPage adapter={adapter} initialSettings={settings} onToast={() => undefined} />);
+
+    await userEvent.click(screen.getByRole("radio", { name: "Chmura (API)" }));
+
+    await waitFor(() => expect(updateSettings).toHaveBeenCalledWith(
+      expect.objectContaining({ transcriptionSource: "cloud" }),
+    ));
+    expect(await screen.findByRole("combobox", { name: "Dostawca" })).toHaveTextContent("xAI (Grok)");
+    // The model field falls back to what the provider calls its current
+    // model, without storing it until the user edits it.
+    expect(await screen.findByDisplayValue("grok-voice-transcribe-2.0")).toBeVisible();
+  });
+
+  test("zmiana dostawcy przestawia model na jego domyślny", async () => {
+    const adapter = adapterStub();
+    const updateSettings = vi.spyOn(adapter, "updateSettings");
+    renderWithI18n(<SettingsPage
+      adapter={adapter}
+      initialSettings={{ ...settings, transcriptionSource: "cloud" }}
+      onToast={() => undefined}
+    />);
+
+    await userEvent.click(await screen.findByRole("combobox", { name: "Dostawca" }));
+    await userEvent.click(await screen.findByRole("option", { name: "OpenAI" }));
+
+    await waitFor(() => expect(updateSettings).toHaveBeenCalledWith(
+      expect.objectContaining({ cloudProvider: "openai", cloudModel: "gpt-transcribe" }),
+    ));
+  });
+
+  test("klucz API zapisuje się poza ustawieniami i zaraz po zapisie go nie ma w polu", async () => {
+    const setCloudApiKey = vi.fn(async () => ["xai"]);
+    const onToast = vi.fn();
+    renderWithI18n(<SettingsPage
+      adapter={adapterStub({ setCloudApiKey })}
+      initialSettings={{ ...settings, transcriptionSource: "cloud" }}
+      onToast={onToast}
+    />);
+
+    const field = screen.getByLabelText("Klucz API");
+    await userEvent.type(field, "xai-secret");
+    await userEvent.click(screen.getByRole("button", { name: "Zapisz" }));
+
+    await waitFor(() => expect(setCloudApiKey).toHaveBeenCalledWith("xai", "xai-secret"));
+    expect(field).toHaveValue("");
+    expect(onToast).toHaveBeenCalledWith("Klucz API zapisany.", "success");
+  });
+
+  test("test połączenia pokazuje odpowiedź dostawcy", async () => {
+    const testCloudTranscription = vi.fn(async () => "Dzień dobry");
+    const onToast = vi.fn();
+    renderWithI18n(<SettingsPage
+      adapter={adapterStub({ listCloudKeys: async () => ["xai"], testCloudTranscription })}
+      initialSettings={{ ...settings, transcriptionSource: "cloud" }}
+      onToast={onToast}
+    />);
+
+    const button = await screen.findByRole("button", { name: "Przetestuj" });
+    await waitFor(() => expect(button).toBeEnabled());
+    await userEvent.click(button);
+
+    await waitFor(() => expect(onToast).toHaveBeenCalledWith(
+      "Połączenie działa. Odpowiedź: „Dzień dobry”",
+      "success",
+    ));
+    expect(testCloudTranscription).toHaveBeenCalled();
+  });
+
+  test("dostawca własny prosi o adres API, a znany go nie pokazuje", async () => {
+    const { rerender } = renderWithI18n(<SettingsPage
+      adapter={adapterStub()}
+      initialSettings={{ ...settings, transcriptionSource: "cloud", cloudProvider: "custom" }}
+      onToast={() => undefined}
+    />);
+
+    expect(await screen.findByLabelText("Adres API")).toBeVisible();
+
+    rerender(<SettingsPage
+      adapter={adapterStub()}
+      initialSettings={{ ...settings, transcriptionSource: "cloud", cloudProvider: "xai" }}
+      onToast={() => undefined}
+    />);
+
+    await waitFor(() => expect(screen.queryByLabelText("Adres API")).toBeNull());
+  });
+
   test("rozmiar nakładki zapisuje się obok pokazywania nakładki i domyślnie jest kompaktowy", async () => {
     const updateSettings = vi.fn(async (next: typeof settings) => ({ settings: next, warning: null }));
     renderWithI18n(

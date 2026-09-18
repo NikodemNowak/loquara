@@ -18,6 +18,11 @@ const fallbackSettings: AppSettings = {
   language: "system",
   modelKeepAliveSecs: 0,
   pasteMode: "auto",
+  transcriptionSource: "local",
+  cloudProvider: "xai",
+  cloudModel: "",
+  cloudBaseUrl: "",
+  cloudLanguage: "",
 };
 export function useAppModel(adapter: AppAdapter, onError: (message: string) => void) {
   const [snapshot, setSnapshot] = useState<AppSnapshot>({

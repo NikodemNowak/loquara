@@ -93,7 +93,9 @@ export function App({ adapter: adapterProp }: { adapter?: AppAdapter }) {
           ? { state: "checking", label: "engine.checking" }
           : installed === "ready"
             ? { state: "ready", label: "engine.ready" }
-            : { state: "missing", label: "engine.missing" };
+            : model?.source === "cloud"
+              ? { state: "missing", label: "engine.noKey" }
+              : { state: "missing", label: "engine.missing" };
   useEffect(() => {
     // Loquara is dark-only; tell the OS so the window frame and native
     // scrollbars match rather than flashing a light chrome on launch.

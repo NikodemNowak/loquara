@@ -1,9 +1,11 @@
 pub mod models;
 pub mod engine;
 pub mod audio;
+pub mod cloud;
 pub mod dictation;
 pub mod domain;
 pub mod platform;
+pub mod secret;
 pub mod sound;
 pub mod storage;
 pub mod transcription;
@@ -275,6 +277,11 @@ pub fn run() {
             dictation::delete_model,
             dictation::update_settings,
             dictation::update_setting_value,
+            dictation::list_cloud_providers,
+            dictation::list_cloud_keys,
+            dictation::set_cloud_api_key,
+            dictation::clear_cloud_api_key,
+            dictation::test_cloud_transcription,
             dictation::system_locale,
         ])
         .run(tauri::generate_context!())

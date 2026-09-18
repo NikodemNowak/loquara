@@ -23,6 +23,19 @@ export type DictationEvent =
 
 export type PasteMode = "auto" | "ctrl_v" | "ctrl_shift_v" | "shift_insert";
 
+/** Where the words come from: this machine, or a provider's API. */
+export type TranscriptionSource = "local" | "cloud";
+
+/** One provider the cloud engine can talk to. */
+export interface CloudProviderInfo {
+  key: string;
+  display: string;
+  defaultModel: string;
+  models: string[];
+  /** True for the provider whose address the user supplies themselves. */
+  custom: boolean;
+}
+
 /** Compact pill vs Superwhisper-style recording window. Mini is the default. */
 export type OverlaySize = "mini" | "large";
 
@@ -41,6 +54,14 @@ export interface AppSettings {
   language: LanguageChoice;
   modelKeepAliveSecs: number;
   pasteMode: PasteMode;
+  transcriptionSource: TranscriptionSource;
+  cloudProvider: string;
+  /** Empty means the provider's own default model. */
+  cloudModel: string;
+  /** Empty means the provider's own address; only custom providers set it. */
+  cloudBaseUrl: string;
+  /** ISO-639-1 code; empty lets the model detect the language. */
+  cloudLanguage: string;
 }
 
 export interface ModelStatus {
@@ -79,14 +100,16 @@ export interface PlatformError {
   message?: string;
 }
 
-/** Name, maker and readiness of the selected model, as the backend sees it. */
+/** Name, maker and readiness of the selected engine, as the backend sees it. */
 export interface ModelSummary {
   key: string;
   display: string;
   provider: string;
+  /** Ready to run: the model files are here, or the cloud key is set. */
   installed: boolean;
   /** What fetching it will cost, so the size can be shown before asking. */
   totalBytes: number;
+  source: TranscriptionSource;
 }
 
 /** A model transfer in flight, owned by the backend so any screen can show it. */

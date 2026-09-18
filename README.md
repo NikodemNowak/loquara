@@ -1,8 +1,10 @@
 # Loquara
 
-Loquara is a fast, private, and offline speech-to-text dictation application for Windows. Press a global shortcut anywhere, speak, and have your speech transcribed locally on your GPU or CPU using the **NVIDIA Parakeet TDT 0.6B v3** model — and pasted directly into your active window, code editor, browser, or terminal.
+Loquara is a fast, private speech-to-text dictation application for Windows. Press a global shortcut anywhere, speak, and have your speech transcribed locally on your GPU or CPU using the **NVIDIA Parakeet TDT 0.6B v3** model — and pasted directly into your active window, code editor, browser, or terminal.
 
-**100% offline and private:** audio and transcripts never leave your computer. No Python, PyTorch, or cloud accounts required.
+**Offline by default:** audio and transcripts never leave your computer unless you switch to a cloud engine. No Python, PyTorch, or cloud accounts required.
+
+**Optional cloud engines:** bring your own API key and dictate through **xAI Grok Voice Transcribe**, OpenAI, Groq, Mistral, ElevenLabs, Deepgram, or any OpenAI-compatible endpoint. Keys are encrypted with Windows DPAPI, and the connection can be verified from Settings before you dictate.
 
 ---
 
@@ -17,6 +19,7 @@ Loquara is a fast, private, and offline speech-to-text dictation application for
   - Custom paste mode selection available in Settings.
 - **Runs on any GPU or CPU:** DirectML hardware acceleration covers NVIDIA, AMD, Intel, and CPU fallback out of the box with zero driver toolkits to install.
 - **Built-in model manager:** Downloads the lightweight 670 MB Parakeet model in-app with 4 concurrent streams and live progress.
+- **Cloud transcription (optional):** Pick a provider, a model, and paste an API key — settings can send a second of silence to check the connection before you rely on it. Keys are stored encrypted with Windows DPAPI, and your vocabulary is passed along as keyterms where the provider supports it.
 - **Custom vocabulary & modes:** Teach Loquara specialized jargon, brand names, and phonetic replacements. Transform output with custom mode rules.
 - **Audio history & retention:** Review past recordings and transcripts. Set automatic audio cleanup (1 day, 7 days, 30 days, or forever).
 - **System tray integration:** Start dictation, paste last transcription, or launch minimized to the tray at login.
@@ -40,7 +43,7 @@ Loquara is built as a lightweight, native Windows desktop application:
 
 - **Frontend:** React 19, TypeScript, Vite, Fluent UI icons, Radix UI.
 - **Backend / Platform:** Tauri 2 (Rust), Win32 API (window management, thread-attached input injection, scan-code mapping), `cpal` (audio capture), `rusqlite` (SQLite storage).
-- **Speech Engine:** Native `sherpa-onnx` ONNX Runtime bindings with DirectML / CPU acceleration running `nvidia/parakeet-tdt-0.6b-v3`.
+- **Speech Engine:** Native `sherpa-onnx` ONNX Runtime bindings with DirectML / CPU acceleration running `nvidia/parakeet-tdt-0.6b-v3`, or a cloud provider's HTTP transcription API when one is configured.
 
 ---
 

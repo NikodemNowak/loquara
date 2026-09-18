@@ -206,14 +206,17 @@ export function DictatePage({
   const state = snapshot.dictation;
   const status = state.status;
   const startedAt = snapshot.recordingStartedAt ?? null;
-  // With no model there is nothing to be ready for, and saying "Ready" would
+  // With no engine there is nothing to be ready for, and saying "Ready" would
   // send the user to press a shortcut that can only fail.
+  const cloudMissing = status === "idle" && !modelReady && snapshot.model?.source === "cloud";
   const readout = status === "idle" && !modelReady
-    ? { state: "dictate.state.noModel", hint: "dictate.hint.noModel", action: "dictate.action.getModel" } as Readout
+    ? cloudMissing
+      ? { state: "dictate.state.noKey", hint: "dictate.hint.noKey", action: "dictate.action.openSettings" } as Readout
+      : { state: "dictate.state.noModel", hint: "dictate.hint.noModel", action: "dictate.action.getModel" } as Readout
     : READOUTS[status] ?? READOUTS.idle;
   const loadingModel = status === "processing" && snapshot.modelLoading;
   const model = snapshot.model;
-  const setup = status === "idle" && !modelReady;
+  const setup = status === "idle" && !modelReady && !cloudMissing;
   const download = useModelDownload(adapter, model?.key, snapshot.download);
 
   useEffect(() => {
@@ -354,9 +357,15 @@ export function DictatePage({
 
         {readout.action && !setup && (
           <div className="dictate__actions">
-            <button className="secondary-button" disabled={busy} onClick={() => void act()}>
-              {busy ? t("dictate.action.working") : t(readout.action)}
-            </button>
+            {cloudMissing ? (
+              <button className="secondary-button" onClick={() => onSettings?.()}>
+                {t(readout.action)}
+              </button>
+            ) : (
+              <button className="secondary-button" disabled={busy} onClick={() => void act()}>
+                {busy ? t("dictate.action.working") : t(readout.action)}
+              </button>
+            )}
           </div>
         )}
       </div>

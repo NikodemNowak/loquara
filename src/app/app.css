@@ -464,6 +464,15 @@ input[type="checkbox"]:disabled { opacity: 0.45; cursor: not-allowed; }
 .model-footnote button:hover { text-decoration: underline; }
 .model-card__message { margin: var(--s-3) 0 0; padding: var(--s-3); border-radius: var(--r-sm); color: var(--danger); background: var(--danger-soft); font-size: var(--t-small); line-height: var(--lh-relaxed); }
 
+/* ===== Cloud engine ====================================================== */
+/* The rows sit where the model list sits in local mode, so the two modes
+ * read as the same panel with different contents. */
+.cloud-panel { display: grid; }
+.cloud-key { display: flex; align-items: center; gap: var(--s-2); flex: 0 0 auto; }
+.cloud-panel .cloud-key input { width: 220px; }
+.cloud-key input[type="password"] { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; }
+.cloud-note { margin: 0; padding: var(--s-3) var(--s-4); border: 1px solid var(--border); border-top: 0; border-bottom-left-radius: var(--r-md); border-bottom-right-radius: var(--r-md); color: var(--warning); background: var(--panel); font-size: var(--t-micro); line-height: var(--lh-relaxed); }
+
 /* Gated models need an account and a signed licence before they can be
  * fetched at all, so that is explained in place rather than as an error. */
 .gate { display: grid; gap: var(--s-3); margin-top: var(--s-3); padding: var(--s-4); border: 1px solid var(--border-strong); border-radius: var(--r-sm); background: var(--surface); }

@@ -1,4 +1,4 @@
-import type { AppAdapter } from "../lib/tauri";
+import { demoCloudProviders, type AppAdapter } from "../lib/tauri";
 import type {
   AppSettings,
   AppSnapshot,
@@ -60,11 +60,16 @@ export const settings: AppSettings = {
   language: "system",
   modelKeepAliveSecs: 0,
   pasteMode: "auto",
+  transcriptionSource: "local",
+  cloudProvider: "xai",
+  cloudModel: "",
+  cloudBaseUrl: "",
+  cloudLanguage: "",
 };
 export const snapshot: AppSnapshot = {
   dictation: { status: "idle" },
   settings,
-  model: { key: "parakeet", display: "Parakeet TDT 0.6B v3", provider: "NVIDIA", installed: true, totalBytes: 670_478_772 },
+  model: { key: "parakeet", display: "Parakeet TDT 0.6B v3", provider: "NVIDIA", installed: true, totalBytes: 670_478_772, source: "local" },
   modelLoading: false,
 };
 export function adapterStub(overrides: Partial<AppAdapter> = {}): AppAdapter {
@@ -149,6 +154,11 @@ export function adapterStub(overrides: Partial<AppAdapter> = {}): AppAdapter {
       return { settings: currentSettings, warning: null };
     },
     updateSettingValue: async () => undefined,
+    listCloudProviders: async () => demoCloudProviders,
+    listCloudKeys: async () => [],
+    setCloudApiKey: async () => [],
+    clearCloudApiKey: async () => [],
+    testCloudTranscription: async () => "",
     onState: async () => () => undefined,
     onLevel: async () => () => undefined,
     onModelProgress: async () => () => undefined,

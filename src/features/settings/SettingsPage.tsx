@@ -7,10 +7,10 @@ import { ShortcutCapture } from "./ShortcutCapture";
 import { Select } from "../../components/Select";
 import type { ToastKind } from "../../components/Toast";
 import type { AppAdapter } from "../../lib/tauri";
-import type { AppSettings, DownloadStatus, InputDeviceInfo, ModelDescriptor, ModelDownloadProgress, ModelStatus, PasteMode } from "../../lib/types";
+import type { AppSettings, CloudProviderInfo, DownloadStatus, InputDeviceInfo, ModelDescriptor, ModelDownloadProgress, ModelStatus, PasteMode, TranscriptionSource } from "../../lib/types";
 import { normalizeError } from "../../lib/errors";
 import { formatBytes as formatSize } from "../../lib/bytes";
-import { useI18n } from "../../lib/i18n";
+import { useI18n, type TranslationKey } from "../../lib/i18n";
 
 function ProviderMark({ provider }: { provider: string }) {
   return <span className={`provider-mark provider-mark--${provider.toLowerCase()}`} aria-label={provider} title={provider}>
@@ -27,6 +27,24 @@ function ProviderMark({ provider }: { provider: string }) {
  * namespace, so this cannot collide with a real device.
  */
 const SYSTEM_DEFAULT_DEVICE = "loquara:system-default";
+
+/**
+ * Languages the cloud engines take as a hint.
+ *
+ * Short on purpose: this only nudges formatting and punctuation, and every
+ * provider accepts "auto" when the speaker is somewhere else entirely.
+ */
+const CLOUD_LANGUAGES = ["auto", "pl", "en", "de", "fr", "es", "it"] as const;
+
+const CLOUD_LANGUAGE_LABELS: Record<(typeof CLOUD_LANGUAGES)[number], TranslationKey> = {
+  auto: "settings.cloud.language.auto",
+  pl: "settings.cloud.language.pl",
+  en: "settings.cloud.language.en",
+  de: "settings.cloud.language.de",
+  fr: "settings.cloud.language.fr",
+  es: "settings.cloud.language.es",
+  it: "settings.cloud.language.it",
+};
 
 /** Whether a failed download was refused for lack of Hugging Face access. */
 function isAccessFailure(error: unknown): boolean {
@@ -65,6 +83,15 @@ export function SettingsPage({
   const [deleting, setDeleting] = useState("");
   const [pendingDelete, setPendingDelete] = useState<ModelDescriptor>();
   const [downloadProgress, setDownloadProgress] = useState<ModelDownloadProgress>();
+  const [providers, setProviders] = useState<CloudProviderInfo[]>([]);
+  const [cloudKeys, setCloudKeys] = useState<string[]>([]);
+  const [apiKeyDraft, setApiKeyDraft] = useState("");
+  const [keyBusy, setKeyBusy] = useState(false);
+  const [testing, setTesting] = useState(false);
+  // The model and address fields write on blur rather than on every key: a
+  // save per character would rewrite the database while the user types.
+  const [modelDraft, setModelDraft] = useState("");
+  const [baseUrlDraft, setBaseUrlDraft] = useState("");
 
   const formatBytes = (bytes: number | null | undefined) =>
     formatSize(bytes, t("settings.models.notDownloadedBytes"));
@@ -98,6 +125,17 @@ export function SettingsPage({
     })();
     return () => { active = false; };
   }, [adapter, settings.model, t]);
+
+  useEffect(() => {
+    let active = true;
+    void adapter.listCloudProviders()
+      .then((loaded) => { if (active) setProviders(loaded); })
+      .catch(() => {});
+    void adapter.listCloudKeys()
+      .then((loaded) => { if (active) setCloudKeys(loaded); })
+      .catch(() => {});
+    return () => { active = false; };
+  }, [adapter]);
 
   useEffect(() => {
     let active = true;
@@ -179,6 +217,84 @@ export function SettingsPage({
     }
   };
 
+  const source: TranscriptionSource = settings.transcriptionSource ?? "local";
+  const provider = providers.find((item) => item.key === settings.cloudProvider);
+  // Empty settings mean "whatever the provider calls its current model".
+  const effectiveModel = settings.cloudModel || provider?.defaultModel || "";
+  const keyStored = cloudKeys.includes(settings.cloudProvider);
+
+  // The drafts follow the saved values, so a change made elsewhere — or a
+  // provider switch that resets the model — lands in the fields too.
+  useEffect(() => {
+    setModelDraft(effectiveModel);
+  }, [effectiveModel]);
+  useEffect(() => {
+    setBaseUrlDraft(settings.cloudBaseUrl);
+  }, [settings.cloudBaseUrl]);
+
+  const changeProvider = (key: string) => {
+    const chosen = providers.find((item) => item.key === key);
+    void save({
+      cloudProvider: key,
+      cloudModel: chosen?.defaultModel ?? "",
+      cloudBaseUrl: "",
+    });
+  };
+
+  const commitModel = () => {
+    const next = modelDraft.trim();
+    if (next !== settings.cloudModel) void save({ cloudModel: next });
+  };
+
+  const commitBaseUrl = () => {
+    const next = baseUrlDraft.trim();
+    if (next !== settings.cloudBaseUrl) void save({ cloudBaseUrl: next });
+  };
+
+  const saveApiKey = async () => {
+    if (!apiKeyDraft.trim()) return;
+    setKeyBusy(true);
+    try {
+      setCloudKeys(await adapter.setCloudApiKey(settings.cloudProvider, apiKeyDraft));
+      setApiKeyDraft("");
+      onToast(t("settings.cloud.key.saved"), "success");
+    } catch (error) {
+      onToast(t("settings.cloud.key.error", { error: normalizeError(error) }), "error");
+    } finally {
+      setKeyBusy(false);
+    }
+  };
+
+  const clearApiKey = async () => {
+    setKeyBusy(true);
+    try {
+      setCloudKeys(await adapter.clearCloudApiKey(settings.cloudProvider));
+      setApiKeyDraft("");
+      onToast(t("settings.cloud.key.cleared"), "info");
+    } catch (error) {
+      onToast(t("settings.cloud.key.error", { error: normalizeError(error) }), "error");
+    } finally {
+      setKeyBusy(false);
+    }
+  };
+
+  const testCloud = async () => {
+    setTesting(true);
+    try {
+      const answer = await adapter.testCloudTranscription();
+      onToast(
+        answer.trim()
+          ? t("settings.cloud.testOk", { text: answer.trim() })
+          : t("settings.cloud.testOkEmpty"),
+        "success",
+      );
+    } catch (error) {
+      onToast(t("settings.cloud.testError", { error: normalizeError(error) }), "error");
+    } finally {
+      setTesting(false);
+    }
+  };
+
   const selectedModel = models.find((model) => model.key === settings.model);
   const selectedState = modelStatus?.state ?? selectedModel?.status;
   const selectedStatusLabel = !models.length
@@ -197,17 +313,137 @@ export function SettingsPage({
       </header>
 
       <div className="settings-column">
-        <section className="settings-group" aria-busy={!models.length}>
+        <section className="settings-group" aria-busy={source === "local" && !models.length}>
           <div className="group-heading group-heading--split">
             <div>
               <h2>{t("settings.models.heading")}</h2>
               <p>{t("settings.models.intro")}</p>
             </div>
-            <span className={`group-status group-status--${selectedState ?? "checking"}`}>
-              {selectedState === "ready" && <Check size={13} />}
-              {selectedStatusLabel}
-            </span>
+            {source === "local" && (
+              <span className={`group-status group-status--${selectedState ?? "checking"}`}>
+                {selectedState === "ready" && <Check size={13} />}
+                {selectedStatusLabel}
+              </span>
+            )}
           </div>
+          <div className="setting-row">
+            <span>
+              <strong>{t("settings.cloud.source.label")}</strong>
+              <small>{t("settings.cloud.source.description")}</small>
+            </span>
+            <div className="segment" role="radiogroup" aria-label={t("settings.cloud.source.label")}>
+              {([["local", "settings.cloud.source.local"], ["cloud", "settings.cloud.source.cloud"]] as const).map(([value, label]) => (
+                <label key={value}>
+                  <input
+                    type="radio"
+                    name="transcription-source"
+                    checked={source === value}
+                    onChange={() => void save({ transcriptionSource: value })}
+                  />
+                  <span>{t(label)}</span>
+                </label>
+              ))}
+            </div>
+          </div>
+          {source === "cloud" ? (
+            <div className="cloud-panel">
+              <label className="setting-row">
+                <span><strong>{t("settings.cloud.provider.label")}</strong><small>{t("settings.cloud.provider.description")}</small></span>
+                <Select
+                  label={t("settings.cloud.provider.label")}
+                  value={settings.cloudProvider}
+                  onChange={changeProvider}
+                  options={providers.map((item) => ({ value: item.key, label: item.display }))}
+                />
+              </label>
+              <label className="setting-row">
+                <span><strong>{t("settings.cloud.model.label")}</strong><small>{t("settings.cloud.model.description")}</small></span>
+                <input
+                  list="cloud-models"
+                  value={modelDraft}
+                  placeholder={provider?.defaultModel || t("settings.cloud.model.placeholder")}
+                  aria-label={t("settings.cloud.model.label")}
+                  onChange={(event) => setModelDraft(event.target.value)}
+                  onBlur={commitModel}
+                  onKeyDown={(event) => { if (event.key === "Enter") event.currentTarget.blur(); }}
+                />
+                <datalist id="cloud-models">
+                  {(provider?.models ?? []).map((model) => <option key={model} value={model} />)}
+                </datalist>
+              </label>
+              {provider?.custom ? (
+                <label className="setting-row">
+                  <span><strong>{t("settings.cloud.baseUrl.label")}</strong><small>{t("settings.cloud.baseUrl.description")}</small></span>
+                  <input
+                    value={baseUrlDraft}
+                    placeholder="https://api.example.com/v1"
+                    aria-label={t("settings.cloud.baseUrl.label")}
+                    onChange={(event) => setBaseUrlDraft(event.target.value)}
+                    onBlur={commitBaseUrl}
+                    onKeyDown={(event) => { if (event.key === "Enter") event.currentTarget.blur(); }}
+                  />
+                </label>
+              ) : null}
+              <label className="setting-row">
+                <span><strong>{t("settings.cloud.language.label")}</strong><small>{t("settings.cloud.language.description")}</small></span>
+                <Select
+                  label={t("settings.cloud.language.label")}
+                  value={settings.cloudLanguage || "auto"}
+                  onChange={(next) => void save({ cloudLanguage: next === "auto" ? "" : next })}
+                  options={CLOUD_LANGUAGES.map((code) => ({ value: code, label: t(CLOUD_LANGUAGE_LABELS[code]) }))}
+                />
+              </label>
+              <div className="setting-row">
+                <span>
+                  <strong>{t("settings.cloud.key.label")}</strong>
+                  <small>{keyStored ? t("settings.cloud.key.present") : t("settings.cloud.key.description")}</small>
+                </span>
+                <div className="cloud-key">
+                  <input
+                    type="password"
+                    value={apiKeyDraft}
+                    placeholder={t("settings.cloud.key.placeholder")}
+                    aria-label={t("settings.cloud.key.label")}
+                    onChange={(event) => setApiKeyDraft(event.target.value)}
+                    onKeyDown={(event) => { if (event.key === "Enter") void saveApiKey(); }}
+                  />
+                  <button
+                    type="button"
+                    className="secondary-button"
+                    disabled={keyBusy || !apiKeyDraft.trim()}
+                    onClick={() => void saveApiKey()}
+                  >
+                    {keyBusy ? t("settings.cloud.key.saving") : t("settings.cloud.key.save")}
+                  </button>
+                  {keyStored ? (
+                    <button
+                      type="button"
+                      className="text-button"
+                      disabled={keyBusy}
+                      onClick={() => void clearApiKey()}
+                    >
+                      {t("settings.cloud.key.clear")}
+                    </button>
+                  ) : null}
+                </div>
+              </div>
+              <div className="setting-row">
+                <span><strong>{t("settings.cloud.test.label")}</strong><small>{t("settings.cloud.test.description")}</small></span>
+                <button
+                  type="button"
+                  className="secondary-button"
+                  disabled={testing || !keyStored}
+                  onClick={() => void testCloud()}
+                >
+                  {testing ? t("settings.cloud.testing") : t("settings.cloud.test")}
+                </button>
+              </div>
+              <p className="cloud-note">
+                {t("settings.cloud.privacy", { provider: provider?.display ?? settings.cloudProvider })}
+              </p>
+            </div>
+          ) : (
+          <>
           <div className="model-options" role="radiogroup" aria-label={t("settings.models.heading")}>
             {models.map((model) => {
               const lacksRam = systemMemory.ramGb > 0 && model.minRamGb > systemMemory.ramGb;
@@ -311,6 +547,8 @@ export function SettingsPage({
           {(modelStatus?.message ?? selectedModel?.message) && selectedState !== "ready"
             ? <p className="model-card__message">{modelStatus?.message ?? selectedModel?.message}</p>
             : null}
+          </>
+          )}
         </section>
         <section className="settings-group">
           <div className="group-heading">
@@ -432,8 +670,17 @@ export function SettingsPage({
         </section>
 
         <p className="privacy-line">
-          <strong>{t("settings.privacy.title")}</strong>
-          <span>{t("settings.privacy.body")}</span>
+          {source === "cloud" ? (
+            <>
+              <strong>{t("settings.privacy.cloudTitle")}</strong>
+              <span>{t("settings.privacy.cloudBody", { provider: provider?.display ?? settings.cloudProvider })}</span>
+            </>
+          ) : (
+            <>
+              <strong>{t("settings.privacy.title")}</strong>
+              <span>{t("settings.privacy.body")}</span>
+            </>
+          )}
         </p>
       </div>
 

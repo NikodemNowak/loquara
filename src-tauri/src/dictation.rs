@@ -1,7 +1,9 @@
+use crate::cloud;
 use crate::engine::{Engine, EngineError};
 use crate::audio::{
     AudioRecorder, CompletedRecording, InputDeviceInfo, cleanup_partial, quantize_peaks,
 };
+use crate::secret;
 use crate::domain::{DictationEvent, DictationState, transition};
 use crate::platform::{self, PasteMode, SystemWindows, WindowTarget, WindowsApi};
 use crate::storage::{
@@ -208,6 +210,15 @@ pub enum OverlaySize {
     Large,
 }
 
+/// Where the words come from: the model on this machine, or a provider's API.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TranscriptionSource {
+    #[default]
+    Local,
+    Cloud,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppSettings {
@@ -242,6 +253,23 @@ pub struct AppSettings {
     pub model_keep_alive_secs: u64,
     #[serde(default)]
     pub paste_mode: PasteMode,
+    /// Local engine or a cloud provider. Local is the default so an existing
+    /// installation keeps transcribing on this machine after an update.
+    #[serde(default)]
+    pub transcription_source: TranscriptionSource,
+    #[serde(default = "default_cloud_provider")]
+    pub cloud_provider: String,
+    /// Empty means "the provider's default model", which keeps the choice
+    /// alive when a provider renames its models.
+    #[serde(default)]
+    pub cloud_model: String,
+    /// Empty means "the provider's own address"; only custom providers need
+    /// this to be filled in.
+    #[serde(default)]
+    pub cloud_base_url: String,
+    /// ISO-639-1 code. Empty lets the model detect the language.
+    #[serde(default)]
+    pub cloud_language: String,
 }
 
 const fn default_launch_on_login() -> bool {
@@ -268,6 +296,10 @@ fn default_active_mode() -> String {
     "clean".into()
 }
 
+fn default_cloud_provider() -> String {
+    cloud::default_provider().key.to_owned()
+}
+
 const fn default_language() -> LanguageChoice {
     LanguageChoice::System
 }
@@ -290,8 +322,69 @@ impl Default for AppSettings {
             language: default_language(),
             model_keep_alive_secs: 0,
             paste_mode: PasteMode::default(),
+            transcription_source: TranscriptionSource::default(),
+            cloud_provider: default_cloud_provider(),
+            cloud_model: String::new(),
+            cloud_base_url: String::new(),
+            cloud_language: String::new(),
         }
     }
+}
+
+/// The model a cloud transcription will actually ask for.
+fn resolve_cloud_model(settings: &AppSettings) -> String {
+    if !settings.cloud_model.trim().is_empty() {
+        return settings.cloud_model.trim().to_owned();
+    }
+    cloud::provider(&settings.cloud_provider)
+        .unwrap_or_else(|| cloud::default_provider())
+        .default_model
+        .to_owned()
+}
+
+/// Vocabulary turned into a provider's own hint list.
+///
+/// The replacement is what the user wants written, so that is the spelling a
+/// provider should be biased towards.
+fn keyterms_for(vocabulary: &[VocabularyEntry]) -> Vec<String> {
+    vocabulary
+        .iter()
+        .map(|entry| entry.replacement.clone())
+        .collect()
+}
+
+/// Where provider keys live in the settings table, still encrypted.
+fn stored_cloud_keys(storage: &Storage) -> std::collections::BTreeMap<String, String> {
+    storage
+        .get_setting::<std::collections::BTreeMap<String, String>>("cloud_keys")
+        .ok()
+        .flatten()
+        .unwrap_or_default()
+}
+
+/// One provider's key, decrypted, or `None` when the user has not set one.
+///
+/// A key that cannot be decrypted — a database copied from another Windows
+/// account, say — counts as absent, because a request sending it would only
+/// fail at the provider.
+fn cloud_api_key(storage: &Storage, provider: &str) -> Result<Option<String>, String> {
+    let Some(stored) = stored_cloud_keys(storage).get(provider).cloned() else {
+        return Ok(None);
+    };
+    match secret::unprotect(&stored) {
+        Ok(key) if !key.trim().is_empty() => Ok(Some(key)),
+        Ok(_) => Ok(None),
+        Err(_) => Ok(None),
+    }
+}
+
+/// Providers that have a usable key, for the interface to tick off.
+fn available_cloud_keys(storage: &Storage) -> Vec<String> {
+    stored_cloud_keys(storage)
+        .keys()
+        .filter(|provider| cloud_api_key(storage, provider).ok().flatten().is_some())
+        .cloned()
+        .collect()
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -418,16 +511,21 @@ pub struct DownloadStatus {
     pub total_bytes: u64,
 }
 
-/// What the interface needs to say about the selected model.
+/// What the interface needs to say about the selected engine.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelSummary {
     pub key: String,
     pub display: String,
     pub provider: String,
+    /// Whether the selected engine can run right now: for a local model that
+    /// means the files are here, for a cloud provider that the key is set.
     pub installed: bool,
     /// What it will cost to fetch, so the interface can say so before asking.
     pub total_bytes: u64,
+    /// Which engine this summary is about, so the interface can say "no key"
+    /// rather than "no model" when the cloud is selected.
+    pub source: TranscriptionSource,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -815,11 +913,35 @@ impl AppState {
     }
 
     fn model_summary(&self) -> ModelSummary {
-        let key = self
+        let settings = self
             .settings
             .read()
-            .map(|settings| settings.model.clone())
-            .unwrap_or_else(|_| default_model());
+            .map(|settings| settings.clone())
+            .unwrap_or_default();
+        if settings.transcription_source == TranscriptionSource::Cloud {
+            let provider = cloud::provider(&settings.cloud_provider)
+                .unwrap_or_else(|| cloud::default_provider());
+            let model = resolve_cloud_model(&settings);
+            // Asking whether the key decrypts is the cloud's version of
+            // "are the model files here": both answer whether pressing the
+            // shortcut can produce words right now. A custom provider also
+            // needs an address before it can go anywhere.
+            let has_address = !provider.custom || !settings.cloud_base_url.trim().is_empty();
+            let ready = has_address
+                && cloud_api_key(&self.storage, provider.key)
+                    .ok()
+                    .flatten()
+                    .is_some();
+            return ModelSummary {
+                key: String::new(),
+                display: format!("{} · {}", provider.display, model),
+                provider: provider.display.to_owned(),
+                installed: ready,
+                total_bytes: 0,
+                source: TranscriptionSource::Cloud,
+            };
+        }
+        let key = settings.model.clone();
         let spec = crate::models::spec(&key);
         ModelSummary {
             display: spec.map(|spec| spec.display.to_owned()).unwrap_or_else(|| key.clone()),
@@ -827,6 +949,7 @@ impl AppState {
             installed: self.engine.is_installed(&key),
             total_bytes: spec.map(|spec| spec.total_bytes()).unwrap_or(0),
             key,
+            source: TranscriptionSource::Local,
         }
     }
 
@@ -941,14 +1064,20 @@ fn epoch_ms() -> i64 {
 }
 
 pub fn warm_up_model(app: &AppHandle, state: &AppState) {
+    let settings = state
+        .settings
+        .read()
+        .map(|settings| settings.clone())
+        .unwrap_or_default();
+    // A cloud engine has nothing to load, and keeping the local model warm
+    // for it would hold gigabytes for no reason.
+    if settings.transcription_source == TranscriptionSource::Cloud {
+        return;
+    }
     let warm = state.model_warm.clone();
     let engine = state.engine.clone();
     let engine_last_used = state.engine_last_used.clone();
-    let model = state
-        .settings
-        .read()
-        .map(|settings| settings.model.clone())
-        .unwrap_or_else(|_| default_model());
+    let model = settings.model.clone();
     // Loading must never turn into an implicit download: the explicit model
     // action owns installation, and warm-up only uses what is already here.
     if !engine.is_installed(&model) {
@@ -1295,39 +1424,98 @@ async fn transcribe_recording(
     audio_path: PathBuf,
 ) {
     state.transcription_cancel.store(false, Ordering::SeqCst);
-    let engine = state.engine.clone();
-    let engine_last_used = state.engine_last_used.clone();
-    let audio_for_engine = audio_path.clone();
-    let warm = state.model_warm.clone();
-    let model = state
+    let settings = state
         .settings
         .read()
-        .map(|settings| settings.model.clone())
-        .unwrap_or_else(|_| default_model());
+        .map(|settings| settings.clone())
+        .unwrap_or_default();
     let started = Instant::now();
     let cancel = state.transcription_cancel.clone();
-    let outcome = tauri::async_runtime::spawn_blocking(move || {
-        // A warm-up started when recording began may still be finishing; the
-        // engine would serialise on its own lock anyway, but waiting here
-        // keeps the reported state honest.
-        let _ = warm.wait_until_ready_for(&model, Duration::from_secs(240));
-        let text = engine.transcribe(&model, &audio_for_engine, Some(&cancel))?;
-        if let Ok(mut last_used) = engine_last_used.lock() {
-            *last_used = Instant::now();
+    let outcome = match settings.transcription_source {
+        TranscriptionSource::Cloud => {
+            let storage = state.storage.clone();
+            let audio = audio_path.clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                transcribe_in_cloud(&storage, &settings, &audio, &cancel, started)
+            })
+            .await
         }
-        Ok::<_, EngineError>(TranscriptionResult {
-            text,
-            model,
-            language: None,
-            duration_ms: started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
-        })
-    })
-    .await;
+        TranscriptionSource::Local => {
+            let engine = state.engine.clone();
+            let engine_last_used = state.engine_last_used.clone();
+            let audio_for_engine = audio_path.clone();
+            let warm = state.model_warm.clone();
+            let model = settings.model.clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                // A warm-up started when recording began may still be
+                // finishing; the engine would serialise on its own lock
+                // anyway, but waiting here keeps the reported state honest.
+                let _ = warm.wait_until_ready_for(&model, Duration::from_secs(240));
+                let text = engine.transcribe(&model, &audio_for_engine, Some(&cancel))?;
+                if let Ok(mut last_used) = engine_last_used.lock() {
+                    *last_used = Instant::now();
+                }
+                Ok::<_, EngineError>(TranscriptionResult {
+                    text,
+                    model,
+                    language: None,
+                    duration_ms: started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
+                })
+            })
+            .await
+            .map(|outcome| outcome.map_err(|error| error.to_string()))
+        }
+    };
     match outcome {
         Ok(Ok(result)) => finish_success(&app, &state, &recording_id, &audio_path, result),
-        Ok(Err(error)) => finish_failure(&app, &state, &recording_id, error.to_string()),
+        Ok(Err(error)) => finish_failure(&app, &state, &recording_id, error),
         Err(error) => finish_failure(&app, &state, &recording_id, error.to_string()),
     }
+}
+
+/// One recording transcribed by the configured provider.
+fn transcribe_in_cloud(
+    storage: &Storage,
+    settings: &AppSettings,
+    audio_path: &Path,
+    cancel: &AtomicBool,
+    started: Instant,
+) -> Result<TranscriptionResult, String> {
+    let provider = cloud::provider(&settings.cloud_provider)
+        .unwrap_or_else(|| cloud::default_provider());
+    let api_key = cloud_api_key(storage, provider.key)?.ok_or_else(|| {
+        format!(
+            "no API key is set for {}; add one in Settings",
+            provider.display
+        )
+    })?;
+    let model = resolve_cloud_model(settings);
+    let audio = std::fs::read(audio_path).map_err(|error| format!("could not read the recording: {error}"))?;
+    let file_name = audio_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("recording.wav")
+        .to_owned();
+    let vocabulary = storage.list_vocabulary().unwrap_or_default();
+    let keyterms = keyterms_for(&vocabulary);
+    let transcript = cloud::transcribe(cloud::Request {
+        provider: provider.key,
+        model: &model,
+        base_url: &settings.cloud_base_url,
+        api_key: &api_key,
+        language: &settings.cloud_language,
+        keyterms: &keyterms,
+        audio: &audio,
+        file_name: &file_name,
+        cancel: Some(cancel),
+    })
+    .map_err(|error| error.to_string())?;
+    Ok(TranscriptionResult {
+        text: transcript.text,
+        model: format!("{} · {}", provider.display, model),
+        language: transcript.language,
+        duration_ms: started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
+    })
 }
 
 fn finish_success(
@@ -1714,16 +1902,30 @@ pub fn retry_transcription(
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "recording not found".to_owned())?;
         let audio_path = retry_audio_path(&recording).map_err(|error| error.to_string())?;
-        let selected_model = state
+        let settings = state
             .settings
             .read()
             .map_err(|_| "settings lock poisoned")?
-            .model
             .clone();
-        if !state.engine.is_installed(&selected_model) {
-            return Err(format!(
-                "The selected model is not ready. Download it before retrying: {selected_model}."
-            ));
+        match settings.transcription_source {
+            TranscriptionSource::Local => {
+                if !state.engine.is_installed(&settings.model) {
+                    return Err(format!(
+                        "The selected model is not ready. Download it before retrying: {}.",
+                        settings.model
+                    ));
+                }
+            }
+            TranscriptionSource::Cloud => {
+                let provider = cloud::provider(&settings.cloud_provider)
+                    .unwrap_or_else(|| cloud::default_provider());
+                if cloud_api_key(&state.storage, provider.key)?.is_none() {
+                    return Err(format!(
+                        "No API key is set for {}. Add one in Settings before retrying.",
+                        provider.display
+                    ));
+                }
+            }
         }
         match state.storage.mark_retrying(&recording_id) {
             Ok(true) => {}
@@ -2556,6 +2758,7 @@ pub fn update_settings(
         retention,
     };
     let old_language = live.language.clone();
+    let old_source = live.transcription_source.clone();
     let result = apply_settings_change(
         &mut shortcut_effect,
         &mut autostart_effect,
@@ -2573,11 +2776,12 @@ pub fn update_settings(
             .clone();
         current != live.model
     };
+    let source_changed = live.transcription_source != old_source;
     *state
         .settings
         .write()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = live;
-    if model_changed {
+    if model_changed || source_changed {
         // The old model is of no further use, and holding two at once would
         // double the memory for as long as the new one takes to load. The
         // release waits behind any load already running, so it happens off
@@ -2609,6 +2813,108 @@ pub fn update_setting_value(
         .storage
         .set_setting(&key, &value)
         .map_err(|error| error.to_string())
+}
+
+/// The providers the interface can offer, with their suggested models.
+#[tauri::command]
+pub fn list_cloud_providers() -> Vec<cloud::ProviderInfo> {
+    cloud::catalog()
+}
+
+/// Providers that already have a key, so the settings screen can tick them
+/// off without the key itself ever leaving the backend.
+#[tauri::command]
+pub fn list_cloud_keys(state: State<'_, AppState>) -> Vec<String> {
+    available_cloud_keys(&state.storage)
+}
+
+/// Stores one provider's key, encrypted.
+///
+/// An empty key removes it, which is how the interface clears one without a
+/// second command. The returned list is everything that now has a key, so a
+/// caller never has to guess what changed.
+#[tauri::command]
+pub fn set_cloud_api_key(
+    provider: String,
+    api_key: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Vec<String>, String> {
+    let keys = write_cloud_api_key(&state.storage, &provider, &api_key)?;
+    // Whether the selected engine is ready now depends on this key, and the
+    // snapshot is where every screen reads that from.
+    emit_state(&app, &state);
+    Ok(keys)
+}
+
+#[tauri::command]
+pub fn clear_cloud_api_key(
+    provider: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Vec<String>, String> {
+    let keys = write_cloud_api_key(&state.storage, &provider, "")?;
+    emit_state(&app, &state);
+    Ok(keys)
+}
+
+fn write_cloud_api_key(storage: &Storage, provider: &str, api_key: &str) -> Result<Vec<String>, String> {
+    if cloud::provider(provider).is_none() {
+        return Err(format!("Nieznany dostawca: {provider}."));
+    }
+    let mut keys = stored_cloud_keys(storage);
+    let api_key = api_key.trim();
+    if api_key.is_empty() {
+        keys.remove(provider);
+    } else {
+        keys.insert(provider.to_owned(), secret::protect(api_key)?);
+    }
+    storage
+        .set_setting("cloud_keys", &keys)
+        .map_err(|error| error.to_string())?;
+    Ok(available_cloud_keys(storage))
+}
+
+/// Sends a second of silence to the configured provider.
+///
+/// An empty transcript is still an answer: it proves the address, the key and
+/// the model were accepted. That is the part of the setup a user cannot check
+/// by looking at it.
+#[tauri::command]
+pub async fn test_cloud_transcription(state: State<'_, AppState>) -> Result<String, String> {
+    let settings = state
+        .settings
+        .read()
+        .map_err(|_| "settings lock poisoned")?
+        .clone();
+    let storage = state.storage.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let provider = cloud::provider(&settings.cloud_provider)
+            .unwrap_or_else(|| cloud::default_provider());
+        let api_key = cloud_api_key(&storage, provider.key)?.ok_or_else(|| {
+            format!(
+                "no API key is set for {}; add one in Settings",
+                provider.display
+            )
+        })?;
+        let model = resolve_cloud_model(&settings);
+        let audio = cloud::silence_wav();
+        let transcript = cloud::transcribe(cloud::Request {
+            provider: provider.key,
+            model: &model,
+            base_url: &settings.cloud_base_url,
+            api_key: &api_key,
+            language: &settings.cloud_language,
+            keyterms: &[],
+            audio: &audio,
+            file_name: "loquara-check.wav",
+            cancel: None,
+        })
+        .map_err(|error| error.to_string())?;
+        Ok(transcript.text)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[cfg(test)]
@@ -3216,6 +3522,95 @@ mod tests {
         .unwrap();
 
         assert_eq!(older.overlay_size, OverlaySize::Mini);
+    }
+
+    #[test]
+    fn settings_from_older_versions_default_to_the_local_engine() {
+        // An installation that predates the cloud option has no provider
+        // configured and must keep transcribing on this machine.
+        let older: AppSettings = serde_json::from_value(serde_json::json!({
+            "inputDevice": null,
+            "shortcut": "Ctrl+Space",
+            "autoPaste": true,
+            "retentionDays": 30
+        }))
+        .unwrap();
+
+        assert_eq!(older.transcription_source, TranscriptionSource::Local);
+        assert_eq!(older.cloud_provider, cloud::default_provider().key);
+        assert!(older.cloud_model.is_empty());
+        assert!(older.cloud_base_url.is_empty());
+        assert!(older.cloud_language.is_empty());
+        assert_eq!(
+            serde_json::to_value(&older).unwrap()["transcriptionSource"],
+            serde_json::json!("local")
+        );
+    }
+
+    #[test]
+    fn a_cloud_model_falls_back_to_whatever_the_provider_calls_current() {
+        let mut settings = AppSettings {
+            cloud_provider: "xai".into(),
+            cloud_model: "   ".into(),
+            ..AppSettings::default()
+        };
+
+        assert_eq!(resolve_cloud_model(&settings), "grok-voice-transcribe-2.0");
+
+        settings.cloud_model = "grok-voice-transcribe-1.0".into();
+        assert_eq!(resolve_cloud_model(&settings), "grok-voice-transcribe-1.0");
+
+        // A provider that no longer exists must not leave the app with no
+        // model at all.
+        settings.cloud_provider = "nope".into();
+        settings.cloud_model.clear();
+        assert_eq!(
+            resolve_cloud_model(&settings),
+            cloud::default_provider().default_model
+        );
+    }
+
+    #[test]
+    fn provider_keys_are_stored_encrypted_and_only_usable_ones_are_listed() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = Storage::open_in_memory(temp.path().join("recordings")).unwrap();
+
+        write_cloud_api_key(&storage, "xai", "xai-secret").unwrap();
+
+        assert_eq!(available_cloud_keys(&storage), vec!["xai"]);
+        let stored: std::collections::BTreeMap<String, String> = storage
+            .get_setting("cloud_keys")
+            .unwrap()
+            .unwrap();
+        assert_ne!(stored["xai"], "xai-secret", "the database holds ciphertext");
+        assert_eq!(
+            cloud_api_key(&storage, "xai").unwrap().as_deref(),
+            Some("xai-secret")
+        );
+
+        write_cloud_api_key(&storage, "xai", "").unwrap();
+
+        assert!(available_cloud_keys(&storage).is_empty());
+        assert!(cloud_api_key(&storage, "xai").unwrap().is_none());
+    }
+
+    #[test]
+    fn an_unknown_provider_key_is_refused_rather_than_stored() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = Storage::open_in_memory(temp.path().join("recordings")).unwrap();
+
+        assert!(write_cloud_api_key(&storage, "acme", "secret").is_err());
+        assert!(available_cloud_keys(&storage).is_empty());
+    }
+
+    #[test]
+    fn keyterms_are_the_spellings_the_user_wants_written() {
+        let vocabulary = vec![
+            VocabularyEntry { id: 1, heard: "parakit".into(), replacement: "Parakeet".into() },
+            VocabularyEntry { id: 2, heard: "loquara".into(), replacement: "Loquara".into() },
+        ];
+
+        assert_eq!(keyterms_for(&vocabulary), vec!["Parakeet", "Loquara"]);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 [package]
 name = "loquara"
-version = "0.4.4"
+version = "0.5.0"
 description = "Lokalna aplikacja do dyktowania"
 edition = "2024"
 rust-version = "1.95"
@@ -32,6 +32,7 @@ windows-sys = { version = "0.60", features = [
     "Win32_Foundation",
     "Win32_Globalization",
     "Win32_Media_Audio",
+    "Win32_Security_Cryptography",
     "Win32_System_DataExchange",
     "Win32_System_Memory",
     "Win32_System_Ole",
