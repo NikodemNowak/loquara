@@ -166,6 +166,66 @@ pub fn copy_and_paste(
     windows.send_paste(target, mode)
 }
 
+/// Types text into whatever window has focus, without touching the clipboard.
+///
+/// Live dictation arrives in pieces while the user is speaking, so each piece
+/// has to land where the caret is without stealing the clipboard or the
+/// focus from the application being dictated into.
+pub fn type_text(text: &str) -> Result<(), PlatformError> {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+            INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, SendInput,
+        };
+        if text.is_empty() {
+            return Ok(());
+        }
+        let mut events: Vec<INPUT> = Vec::with_capacity(text.len() * 2);
+        for unit in text.encode_utf16() {
+            for flags in [KEYEVENTF_UNICODE, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP] {
+                events.push(INPUT {
+                    r#type: INPUT_KEYBOARD,
+                    Anonymous: INPUT_0 {
+                        ki: KEYBDINPUT {
+                            wVk: 0,
+                            wScan: unit,
+                            dwFlags: flags,
+                            time: 0,
+                            dwExtraInfo: 0,
+                        },
+                    },
+                });
+            }
+        }
+        // Batched so one refused call cannot swallow a long piece, with a
+        // breath between batches so a busy application can keep up.
+        for batch in events.chunks(64) {
+            let sent = unsafe {
+                SendInput(
+                    batch.len().try_into().unwrap_or(u32::MAX),
+                    batch.as_ptr(),
+                    size_of::<INPUT>().try_into().unwrap_or(i32::MAX),
+                )
+            };
+            if sent != batch.len() as u32 {
+                return Err(PlatformError::PasteFailed(format!(
+                    "SendInput typed {sent}/{} events",
+                    batch.len()
+                )));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = text;
+        Err(PlatformError::PasteFailed(
+            "live typing is not implemented on this platform".into(),
+        ))
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ShortcutRole {
     Toggle,

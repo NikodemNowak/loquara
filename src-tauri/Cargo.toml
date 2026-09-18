@@ -1,6 +1,6 @@
 [package]
 name = "loquara"
-version = "0.5.0"
+version = "0.6.0"
 description = "Lokalna aplikacja do dyktowania"
 edition = "2024"
 rust-version = "1.95"
@@ -13,6 +13,7 @@ crate-type = ["lib", "cdylib", "staticlib"]
 [dependencies]
 arboard = "3"
 cpal = "0.16"
+futures-util = "0.3"
 hound = "3.5"
 regex = "1.11"
 rubato = "0.16"
@@ -25,6 +26,8 @@ tauri-plugin-autostart = "2"
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-single-instance = "2"
 thiserror = "2"
+tokio = { version = "1", features = ["macros", "sync", "time"] }
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "handshake", "rustls-tls-webpki-roots"] }
 ureq = { version = "2", features = ["tls"] }
 
 [target.'cfg(windows)'.dependencies]
@@ -43,6 +46,7 @@ windows-sys = { version = "0.60", features = [
 
 [dev-dependencies]
 tempfile = "3"
+tokio = { version = "1", features = ["macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
 
 [build-dependencies]
 tauri-build = "2.6.3"

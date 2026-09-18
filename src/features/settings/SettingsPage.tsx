@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { Check, Cpu, FolderOpen, Languages, Mic, SlidersHorizontal, Trash2 } from "../../components/Icons";
 import { BrandLogo } from "../../components/BrandLogo";
@@ -46,6 +46,14 @@ const CLOUD_LANGUAGE_LABELS: Record<(typeof CLOUD_LANGUAGES)[number], Translatio
   it: "settings.cloud.language.it",
 };
 
+/**
+ * Stands for "write the model id myself" in the model dropdown.
+ *
+ * The empty string cannot be used: the dropdown reserves it to mean "no value
+ * selected", so an option carrying it renders blank.
+ */
+const CUSTOM_MODEL = "loquara:custom-model";
+
 /** Whether a failed download was refused for lack of Hugging Face access. */
 function isAccessFailure(error: unknown): boolean {
   const raw = typeof error === "string" ? error : String((error as { message?: string })?.message ?? error);
@@ -92,6 +100,9 @@ export function SettingsPage({
   // save per character would rewrite the database while the user types.
   const [modelDraft, setModelDraft] = useState("");
   const [baseUrlDraft, setBaseUrlDraft] = useState("");
+  const [fetchedModels, setFetchedModels] = useState<string[]>([]);
+  const [fetchingModels, setFetchingModels] = useState(false);
+  const [customModel, setCustomModel] = useState(false);
 
   const formatBytes = (bytes: number | null | undefined) =>
     formatSize(bytes, t("settings.models.notDownloadedBytes"));
@@ -222,6 +233,19 @@ export function SettingsPage({
   // Empty settings mean "whatever the provider calls its current model".
   const effectiveModel = settings.cloudModel || provider?.defaultModel || "";
   const keyStored = cloudKeys.includes(settings.cloudProvider);
+  // Presets and anything the provider itself listed, without duplicates.
+  const modelOptions = useMemo(
+    () => Array.from(new Set([...(provider?.models ?? []), ...fetchedModels])),
+    [provider, fetchedModels],
+  );
+
+  // A model that is not on the list was typed by hand, so it keeps the text
+  // field rather than looking like a value the dropdown lost.
+  useEffect(() => {
+    if (settings.cloudModel && modelOptions.length && !modelOptions.includes(settings.cloudModel)) {
+      setCustomModel(true);
+    }
+  }, [settings.cloudModel, modelOptions]);
 
   // The drafts follow the saved values, so a change made elsewhere — or a
   // provider switch that resets the model — lands in the fields too.
@@ -234,11 +258,40 @@ export function SettingsPage({
 
   const changeProvider = (key: string) => {
     const chosen = providers.find((item) => item.key === key);
+    setFetchedModels([]);
+    setCustomModel(false);
     void save({
       cloudProvider: key,
       cloudModel: chosen?.defaultModel ?? "",
       cloudBaseUrl: "",
     });
+  };
+
+  const fetchModels = async () => {
+    setFetchingModels(true);
+    try {
+      const models = await adapter.listCloudModels();
+      if (!models.length) {
+        onToast(t("settings.cloud.model.fetchEmpty"), "info");
+        return;
+      }
+      setFetchedModels(models);
+      onToast(t("settings.cloud.model.fetched", { count: models.length }), "success");
+    } catch (error) {
+      onToast(t("settings.cloud.model.fetchError", { error: normalizeError(error) }), "error");
+    } finally {
+      setFetchingModels(false);
+    }
+  };
+
+  const chooseModel = (next: string) => {
+    if (next === CUSTOM_MODEL) {
+      setCustomModel(true);
+      return;
+    }
+    setCustomModel(false);
+    setModelDraft(next);
+    void save({ cloudModel: next });
   };
 
   const commitModel = () => {
@@ -282,10 +335,11 @@ export function SettingsPage({
     setTesting(true);
     try {
       const answer = await adapter.testCloudTranscription();
+      const seconds = (answer.elapsedMs / 1000).toFixed(1);
       onToast(
-        answer.trim()
-          ? t("settings.cloud.testOk", { text: answer.trim() })
-          : t("settings.cloud.testOkEmpty"),
+        answer.text.trim()
+          ? t("settings.cloud.testOk", { seconds, text: answer.text.trim() })
+          : t("settings.cloud.testOkEmpty", { seconds }),
         "success",
       );
     } catch (error) {
@@ -356,21 +410,48 @@ export function SettingsPage({
                   options={providers.map((item) => ({ value: item.key, label: item.display }))}
                 />
               </label>
-              <label className="setting-row">
+              <div className="setting-row">
                 <span><strong>{t("settings.cloud.model.label")}</strong><small>{t("settings.cloud.model.description")}</small></span>
-                <input
-                  list="cloud-models"
-                  value={modelDraft}
-                  placeholder={provider?.defaultModel || t("settings.cloud.model.placeholder")}
-                  aria-label={t("settings.cloud.model.label")}
-                  onChange={(event) => setModelDraft(event.target.value)}
-                  onBlur={commitModel}
-                  onKeyDown={(event) => { if (event.key === "Enter") event.currentTarget.blur(); }}
-                />
-                <datalist id="cloud-models">
-                  {(provider?.models ?? []).map((model) => <option key={model} value={model} />)}
-                </datalist>
-              </label>
+                <div className="cloud-model">
+                  {customModel ? (
+                    <input
+                      value={modelDraft}
+                      placeholder={provider?.defaultModel || t("settings.cloud.model.placeholder")}
+                      aria-label={t("settings.cloud.model.label")}
+                      onChange={(event) => setModelDraft(event.target.value)}
+                      onBlur={commitModel}
+                      onKeyDown={(event) => { if (event.key === "Enter") event.currentTarget.blur(); }}
+                    />
+                  ) : (
+                    <Select
+                      label={t("settings.cloud.model.label")}
+                      value={effectiveModel}
+                      onChange={chooseModel}
+                      options={[
+                        ...modelOptions.map((model) => ({ value: model, label: model })),
+                        { value: CUSTOM_MODEL, label: t("settings.cloud.model.custom") },
+                      ]}
+                    />
+                  )}
+                  <div className="cloud-model__actions">
+                    {provider?.listsModels ? (
+                      <button
+                        type="button"
+                        className="text-button"
+                        disabled={fetchingModels || !keyStored}
+                        onClick={() => void fetchModels()}
+                      >
+                        {fetchingModels ? t("settings.cloud.model.fetching") : t("settings.cloud.model.fetch")}
+                      </button>
+                    ) : null}
+                    {customModel ? (
+                      <button type="button" className="text-button" onClick={() => setCustomModel(false)}>
+                        {t("settings.cloud.model.pick")}
+                      </button>
+                    ) : null}
+                  </div>
+                </div>
+              </div>
               {provider?.custom ? (
                 <label className="setting-row">
                   <span><strong>{t("settings.cloud.baseUrl.label")}</strong><small>{t("settings.cloud.baseUrl.description")}</small></span>
@@ -393,6 +474,23 @@ export function SettingsPage({
                   options={CLOUD_LANGUAGES.map((code) => ({ value: code, label: t(CLOUD_LANGUAGE_LABELS[code]) }))}
                 />
               </label>
+              <div className="setting-row">
+                <span>
+                  <strong>{t("settings.cloud.live.label")}</strong>
+                  <small>
+                    {provider?.streaming
+                      ? t("settings.cloud.live.description")
+                      : t("settings.cloud.live.unsupported")}
+                  </small>
+                </span>
+                <input
+                  type="checkbox"
+                  aria-label={t("settings.cloud.live.label")}
+                  checked={Boolean(settings.streaming) && Boolean(provider?.streaming)}
+                  disabled={!provider?.streaming}
+                  onChange={(event) => void save({ streaming: event.target.checked })}
+                />
+              </div>
               <div className="setting-row">
                 <span>
                   <strong>{t("settings.cloud.key.label")}</strong>

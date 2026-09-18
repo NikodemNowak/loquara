@@ -19,7 +19,9 @@ Loquara is a fast, private speech-to-text dictation application for Windows. Pre
   - Custom paste mode selection available in Settings.
 - **Runs on any GPU or CPU:** DirectML hardware acceleration covers NVIDIA, AMD, Intel, and CPU fallback out of the box with zero driver toolkits to install.
 - **Built-in model manager:** Downloads the lightweight 670 MB Parakeet model in-app with 4 concurrent streams and live progress.
-- **Cloud transcription (optional):** Pick a provider, a model, and paste an API key — settings can send a second of silence to check the connection before you rely on it. Keys are stored encrypted with Windows DPAPI, and your vocabulary is passed along as keyterms where the provider supports it.
+- **Cloud transcription (optional):** Pick a provider, a model, and paste an API key — settings can send a second of silence to check the connection and show how long the round trip took. Keys are stored encrypted with Windows DPAPI, the model list can be fetched from the provider, and your vocabulary is passed along as keyterms where the provider supports it.
+- **Live dictation (xAI):** With "Type as you speak" enabled, Grok Voice Transcribe streams over a WebSocket and finished phrases land at the caret while you are still talking. If the live socket fails, the finished recording still goes through the ordinary request path.
+- **Small uploads:** recordings are converted to 16 kHz mono before they are sent, which is the shape every recogniser consumes and several times fewer bytes than a 48 kHz stereo capture.
 - **Custom vocabulary & modes:** Teach Loquara specialized jargon, brand names, and phonetic replacements. Transform output with custom mode rules.
 - **Audio history & retention:** Review past recordings and transcripts. Set automatic audio cleanup (1 day, 7 days, 30 days, or forever).
 - **System tray integration:** Start dictation, paste last transcription, or launch minimized to the tray at login.

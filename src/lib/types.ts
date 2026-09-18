@@ -34,6 +34,17 @@ export interface CloudProviderInfo {
   models: string[];
   /** True for the provider whose address the user supplies themselves. */
   custom: boolean;
+  /** The provider can transcribe while the user speaks. */
+  streaming: boolean;
+  /** The interface may offer to fetch the provider's model list. */
+  listsModels: boolean;
+}
+
+/** What a connection check found. */
+export interface CloudCheck {
+  /** Empty for silence, which is still a pass. */
+  text: string;
+  elapsedMs: number;
 }
 
 /** Compact pill vs Superwhisper-style recording window. Mini is the default. */

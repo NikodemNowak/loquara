@@ -3,6 +3,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   AppSettings,
   AppSnapshot,
+  CloudCheck,
   CloudProviderInfo,
   HistoryQuery,
   InputDeviceInfo,
@@ -56,10 +57,12 @@ export interface AppAdapter {
   listCloudProviders(): Promise<CloudProviderInfo[]>;
   /** Providers whose API key is stored, without the keys themselves. */
   listCloudKeys(): Promise<string[]>;
+  /** Asks the provider which models it offers, through its own API. */
+  listCloudModels(): Promise<string[]>;
   setCloudApiKey(provider: string, apiKey: string): Promise<string[]>;
   clearCloudApiKey(provider: string): Promise<string[]>;
-  /** Sends a short silent clip and returns the provider's answer. */
-  testCloudTranscription(): Promise<string>;
+  /** Sends a short silent clip and reports the provider's answer and time. */
+  testCloudTranscription(): Promise<CloudCheck>;
   onState(listener: Listener<AppSnapshot>): Promise<UnlistenFn>;
   onLevel(listener: Listener<number>): Promise<UnlistenFn>;
   onModelProgress(listener: Listener<ModelDownloadProgress>): Promise<UnlistenFn>;
@@ -127,6 +130,7 @@ const realAdapter: AppAdapter = {
     invoke("update_setting_value", { key, value }),
   listCloudProviders: () => invoke("list_cloud_providers"),
   listCloudKeys: () => invoke("list_cloud_keys"),
+  listCloudModels: () => invoke("list_cloud_models"),
   setCloudApiKey: (provider, apiKey) =>
     invoke("set_cloud_api_key", { provider, apiKey }),
   clearCloudApiKey: (provider) =>
@@ -176,13 +180,13 @@ const initialSettings: AppSettings = {
 
 /** Provider catalogue for the browser demo, mirroring the backend's. */
 export const demoCloudProviders: CloudProviderInfo[] = [
-  { key: "xai", display: "xAI (Grok)", defaultModel: "grok-voice-transcribe-2.0", models: ["grok-voice-transcribe-2.0", "grok-voice-transcribe-1.0"], custom: false },
-  { key: "openai", display: "OpenAI", defaultModel: "gpt-transcribe", models: ["gpt-transcribe", "gpt-4o-transcribe", "gpt-4o-mini-transcribe", "whisper-1"], custom: false },
-  { key: "groq", display: "Groq", defaultModel: "whisper-large-v3-turbo", models: ["whisper-large-v3-turbo", "whisper-large-v3", "distil-whisper-large-v3-en"], custom: false },
-  { key: "mistral", display: "Mistral", defaultModel: "voxtral-mini-latest", models: ["voxtral-mini-latest", "voxtral-small-latest"], custom: false },
-  { key: "elevenlabs", display: "ElevenLabs", defaultModel: "scribe_v2", models: ["scribe_v2", "scribe_v2_medical"], custom: false },
-  { key: "deepgram", display: "Deepgram", defaultModel: "nova-3", models: ["nova-3", "nova-2"], custom: false },
-  { key: "custom", display: "Inny (OpenAI-compatible)", defaultModel: "", models: [], custom: true },
+  { key: "xai", display: "xAI (Grok)", defaultModel: "grok-voice-transcribe-2.0", models: ["grok-voice-transcribe-2.0", "grok-voice-transcribe-1.0"], custom: false, streaming: true, listsModels: true },
+  { key: "openai", display: "OpenAI", defaultModel: "gpt-transcribe", models: ["gpt-transcribe", "gpt-4o-transcribe", "gpt-4o-mini-transcribe", "whisper-1"], custom: false, streaming: false, listsModels: true },
+  { key: "groq", display: "Groq", defaultModel: "whisper-large-v3-turbo", models: ["whisper-large-v3-turbo", "whisper-large-v3", "distil-whisper-large-v3-en"], custom: false, streaming: false, listsModels: true },
+  { key: "mistral", display: "Mistral", defaultModel: "voxtral-mini-latest", models: ["voxtral-mini-latest", "voxtral-small-latest"], custom: false, streaming: false, listsModels: true },
+  { key: "elevenlabs", display: "ElevenLabs", defaultModel: "scribe_v2", models: ["scribe_v2", "scribe_v2_medical"], custom: false, streaming: false, listsModels: false },
+  { key: "deepgram", display: "Deepgram", defaultModel: "nova-3", models: ["nova-3", "nova-2"], custom: false, streaming: false, listsModels: false },
+  { key: "custom", display: "Inny (OpenAI-compatible)", defaultModel: "", models: [], custom: true, streaming: false, listsModels: true },
 ];
 /** A speech-shaped envelope, so the demo mode looks like real dictation. */
 const demoPeaks = (seed: number): number[] => {
@@ -360,6 +364,11 @@ export function createBrowserAdapter(): AppAdapter {
     updateSettingValue: async () => undefined,
     listCloudProviders: async () => demoCloudProviders.map((provider) => ({ ...provider, models: [...provider.models] })),
     listCloudKeys: async () => [...cloudKeys],
+    listCloudModels: async () => {
+      const provider = demoCloudProviders.find((item) => item.key === settings.cloudProvider);
+      if (!provider?.listsModels) throw new Error("Ten dostawca nie udostępnia listy modeli.");
+      return [...provider.models];
+    },
     setCloudApiKey: async (provider, apiKey) => {
       if (apiKey.trim()) cloudKeys.add(provider);
       else cloudKeys.delete(provider);
@@ -371,7 +380,7 @@ export function createBrowserAdapter(): AppAdapter {
     },
     testCloudTranscription: async () => {
       if (!cloudKeys.has(settings.cloudProvider)) throw new Error("Brak klucza API.");
-      return "Dzień dobry, to jest test.";
+      return { text: "Dzień dobry, to jest test.", elapsedMs: 940 };
     },
     onState: async (listener) => {
       stateListeners.add(listener);

@@ -7,6 +7,7 @@ pub mod domain;
 pub mod platform;
 pub mod secret;
 pub mod sound;
+pub mod streaming;
 pub mod storage;
 pub mod transcription;
 
@@ -279,6 +280,7 @@ pub fn run() {
             dictation::update_setting_value,
             dictation::list_cloud_providers,
             dictation::list_cloud_keys,
+            dictation::list_cloud_models,
             dictation::set_cloud_api_key,
             dictation::clear_cloud_api_key,
             dictation::test_cloud_transcription,

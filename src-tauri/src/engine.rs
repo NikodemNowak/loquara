@@ -250,6 +250,38 @@ fn required_files(directory: &Path) -> [PathBuf; 4] {
     ]
 }
 
+/// Encodes 16 kHz mono samples as a WAV, in memory.
+pub fn encode_target_rate_wav(samples: &[f32]) -> Vec<u8> {
+    let spec = hound::WavSpec {
+        channels: 1,
+        sample_rate: TARGET_SAMPLE_RATE,
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
+    };
+    let mut cursor = std::io::Cursor::new(Vec::new());
+    {
+        let mut writer =
+            hound::WavWriter::new(&mut cursor, spec).expect("cursor writes cannot fail");
+        for sample in samples {
+            let value = (sample.clamp(-1.0, 1.0) * 32767.0).round() as i16;
+            writer
+                .write_sample(value)
+                .expect("cursor writes cannot fail");
+        }
+        writer.finalize().expect("cursor writes cannot fail");
+    }
+    cursor.into_inner()
+}
+
+/// The smallest WAV worth uploading to a provider.
+///
+/// A capture is routinely 48 kHz stereo — six times the bytes of the 16 kHz
+/// mono every recogniser actually consumes — and those extra bytes are paid
+/// for on the upload, which is where a slow take is slow.
+pub fn compact_wav(path: &Path) -> Result<Vec<u8>, EngineError> {
+    read_as_target_rate(path).map(|samples| encode_target_rate_wav(&samples))
+}
+
 /// Reads a WAV file as 16 kHz mono float samples.
 ///
 /// Recordings are captured in whatever format the input device offers, which
@@ -473,6 +505,38 @@ mod tests {
             "expected about {expected} samples, got {}",
             out.len()
         );
+    }
+
+    #[test]
+    fn a_compact_wav_is_16k_mono_and_six_times_smaller_than_the_capture() {
+        // A second of 48 kHz stereo, the shape most microphones produce.
+        let samples: Vec<f32> = (0..48_000 * 2)
+            .map(|index| ((index % 100) as f32 / 100.0) - 0.5)
+            .collect();
+        let path = std::env::temp_dir().join("loquara-compact-test.wav");
+        {
+            let spec = hound::WavSpec {
+                channels: 2,
+                sample_rate: 48_000,
+                bits_per_sample: 16,
+                sample_format: hound::SampleFormat::Int,
+            };
+            let mut writer = hound::WavWriter::create(&path, spec).unwrap();
+            for sample in &samples {
+                writer.write_sample((sample * 32767.0) as i16).unwrap();
+            }
+            writer.finalize().unwrap();
+        }
+
+        let compact = compact_wav(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        let reader = hound::WavReader::new(std::io::Cursor::new(&compact)).unwrap();
+        assert_eq!(reader.spec().channels, 1);
+        assert_eq!(reader.spec().sample_rate, 16_000);
+        assert_eq!(reader.duration(), 16_000);
+        // 48 kHz stereo is 192 000 bytes per second; this is 32 000.
+        assert!(compact.len() < 40_000, "got {} bytes", compact.len());
     }
 
     #[test]

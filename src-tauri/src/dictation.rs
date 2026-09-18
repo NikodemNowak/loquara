@@ -4,6 +4,8 @@ use crate::audio::{
     AudioRecorder, CompletedRecording, InputDeviceInfo, cleanup_partial, quantize_peaks,
 };
 use crate::secret;
+use crate::streaming;
+use crate::storage;
 use crate::domain::{DictationEvent, DictationState, transition};
 use crate::platform::{self, PasteMode, SystemWindows, WindowTarget, WindowsApi};
 use crate::storage::{
@@ -387,6 +389,127 @@ fn available_cloud_keys(storage: &Storage) -> Vec<String> {
         .collect()
 }
 
+/// Whether this take should be transcribed while the user is still speaking.
+fn streaming_wanted(settings: &AppSettings) -> bool {
+    settings.transcription_source == TranscriptionSource::Cloud
+        && settings.streaming
+        && cloud::provider(&settings.cloud_provider).is_some_and(|provider| provider.streaming)
+}
+
+/// "xAI (Grok) · grok-voice-transcribe-2.0", the label history stores.
+fn cloud_model_label(settings: &AppSettings) -> String {
+    let provider = cloud::provider(&settings.cloud_provider)
+        .unwrap_or_else(|| cloud::default_provider());
+    format!("{} · {}", provider.display, resolve_cloud_model(settings))
+}
+
+/// Types live pieces into whatever window has focus.
+struct LiveTypingSink {
+    app: AppHandle,
+    vocabulary: Vec<VocabularyEntry>,
+}
+
+impl streaming::TranscriptSink for LiveTypingSink {
+    fn commit(&self, text: &str) -> Result<String, String> {
+        let text = storage::apply_vocabulary_text(text, &self.vocabulary);
+        platform::type_text(&text).map_err(|error| error.to_string())?;
+        Ok(text)
+    }
+
+    fn failed(&self, message: &str) {
+        // Reuses the paste-error channel, so a typing failure reads the same
+        // as any other "the words could not reach the window" problem.
+        let _ = self.app.emit("dictation://paste_error", message.to_owned());
+    }
+}
+
+/// Opens a live session and points the recorder at it.
+///
+/// Returns the session for the take, or `None` when this take is not a
+/// streaming one — in which case the finished recording goes the usual way.
+fn start_live_session(
+    app: &AppHandle,
+    state: &AppState,
+    settings: &AppSettings,
+) -> Option<streaming::Session> {
+    if !streaming_wanted(settings) {
+        return None;
+    }
+    let provider = cloud::provider(&settings.cloud_provider)?;
+    let api_key = cloud_api_key(&state.storage, provider.key).ok().flatten()?;
+    let model = resolve_cloud_model(settings);
+    let vocabulary = state.storage.list_vocabulary().unwrap_or_default();
+    let keyterms = keyterms_for(&vocabulary);
+    let url = streaming::xai_stream_url(
+        &settings.cloud_base_url,
+        &model,
+        &settings.cloud_language,
+        &keyterms,
+    );
+    let sink: Arc<dyn streaming::TranscriptSink> = Arc::new(LiveTypingSink {
+        app: app.clone(),
+        vocabulary,
+    });
+    let (audio_sender, audio_receiver) = tokio::sync::mpsc::channel(1_024);
+    let session = streaming::spawn(streaming::Config { url, api_key }, sink, audio_receiver);
+
+    // The recorder hands every captured packet here; the pump turns them into
+    // the 16 kHz mono stream the provider wants.
+    let pump = Arc::new(Mutex::new(None::<streaming::AudioPump>));
+    state.audio.set_stream_sink(Some(Arc::new(move |pcm: &[i16], format| {
+        let Ok(mut pump) = pump.lock() else {
+            return;
+        };
+        if pump.is_none() {
+            *pump = streaming::AudioPump::new(format.channels, format.sample_rate).ok();
+        }
+        if let Some(pump) = pump.as_mut()
+            && let Ok(frames) = pump.push(pcm)
+            && !frames.is_empty()
+        {
+            // Never blocks the capture: a full queue drops a packet rather
+            // than stalling the recording.
+            let _ = audio_sender.try_send(frames);
+        }
+    })));
+    Some(session)
+}
+
+/// Lets go of the live session, if any, without waiting for it.
+fn abandon_live_session(state: &AppState) {
+    state.audio.set_stream_sink(None);
+    if let Ok(mut slot) = state.streaming.lock()
+        && let Some(session) = slot.take()
+    {
+        session.cancel();
+    }
+}
+
+/// Opens the provider's connection while the user is talking.
+///
+/// A TLS handshake plus DNS is a few hundred milliseconds; paying it while
+/// the recording runs is paying it when nobody is waiting. The request itself
+/// is the cheapest one the provider offers — a model list — and its answer is
+/// not used.
+fn warm_cloud_connection(state: &AppState, settings: &AppSettings) {
+    let Some(provider) = cloud::provider(&settings.cloud_provider) else {
+        return;
+    };
+    if !provider.lists_models {
+        return;
+    }
+    let Ok(Some(api_key)) = cloud_api_key(&state.storage, provider.key) else {
+        return;
+    };
+    let provider_key = provider.key;
+    let base_url = settings.cloud_base_url.clone();
+    std::thread::spawn(move || {
+        if let Some(provider) = cloud::provider(provider_key) {
+            let _ = cloud::list_models(provider, &base_url, &api_key);
+        }
+    });
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelDescriptor {
@@ -535,6 +658,15 @@ pub struct SettingsUpdateResult {
     pub warning: Option<String>,
 }
 
+/// What a connection check found: the provider's answer and how long it took.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudCheck {
+    /// Empty for silence, which is still a pass.
+    pub text: String,
+    pub elapsed_ms: u64,
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub machine: Arc<Mutex<CoordinatorMachine>>,
@@ -557,6 +689,8 @@ pub struct AppState {
     /// Set when processing is discarded so a transcription that finishes late
     /// does not paste into the target app.
     transcription_cancel: Arc<AtomicBool>,
+    /// The live transcription in flight, if the take is streaming.
+    pub streaming: Arc<Mutex<Option<streaming::Session>>>,
 }
 
 /// Tracks model warm-up so transcription never loads the model twice and waits
@@ -897,6 +1031,7 @@ impl AppState {
             settings_update: Arc::new(Mutex::new(())),
             model_home,
             transcription_cancel: Arc::new(AtomicBool::new(false)),
+            streaming: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -1184,30 +1319,43 @@ pub fn start_recording_inner(app: &AppHandle, state: &AppState) -> Result<AppSna
     if !matches!(state.snapshot()?.dictation, DictationState::Idle) {
         return Err(CoordinatorError::InvalidState.to_string());
     }
-    let selected_model = state
+    let settings = state
         .settings
         .read()
         .map_err(|_| "settings lock poisoned")?
-        .model
         .clone();
-    if !state.engine.is_installed(&selected_model) {
+    if settings.transcription_source == TranscriptionSource::Local
+        && !state.engine.is_installed(&settings.model)
+    {
         return Err("Najpierw pobierz wybrany model.".into());
     }
-    // Warm the model while the user talks, so transcription does not pay the
-    // load cost the moment they stop.
+    // Warm the model — or the provider's connection — while the user talks,
+    // so transcription does not pay the setup cost the moment they stop.
     warm_up_model(app, state);
+    if settings.transcription_source == TranscriptionSource::Cloud {
+        warm_cloud_connection(state, &settings);
+    }
     let mut windows = SystemWindows;
     let target = windows.foreground_window();
-    let device = state
-        .settings
-        .read()
-        .map_err(|_| "settings lock poisoned")?
-        .input_device
-        .clone();
-    let started = state
-        .audio
-        .start(device.as_deref())
-        .map_err(|error| error.to_string())?;
+    let device = settings.input_device.clone();
+    // Opened before the capture starts, so the first packet already has
+    // somewhere to go.
+    let live = start_live_session(app, state, &settings);
+    let started = match state.audio.start(device.as_deref()) {
+        Ok(started) => started,
+        Err(error) => {
+            state.audio.set_stream_sink(None);
+            if let Some(session) = live {
+                session.cancel();
+            }
+            return Err(error.to_string());
+        }
+    };
+    if let Some(session) = live
+        && let Ok(mut slot) = state.streaming.lock()
+    {
+        *slot = Some(session);
+    }
     let audio_path = started.path.to_string_lossy().into_owned();
     let recording = Recording {
         id: started.id.clone(),
@@ -1224,6 +1372,7 @@ pub fn start_recording_inner(app: &AppHandle, state: &AppState) -> Result<AppSna
     };
     if let Err(error) = state.storage.insert_recording(&recording) {
         let _ = state.audio.cancel();
+        abandon_live_session(state);
         return Err(error.to_string());
     }
     *state
@@ -1306,18 +1455,93 @@ pub async fn stop_recording_inner(app: AppHandle, state: AppState) -> Result<App
     crate::sound::play_recording_stopped();
     emit_state(&app, &state);
     let snapshot = state.snapshot()?;
+    // The capture is over, so the live tap can close; the session drains what
+    // is left and the provider flushes its final words.
+    state.audio.set_stream_sink(None);
+    let live = state
+        .streaming
+        .lock()
+        .ok()
+        .and_then(|mut slot| slot.take());
     let background_app = app.clone();
     let background_state = state.clone();
     tauri::async_runtime::spawn(async move {
-        transcribe_recording(
-            background_app,
-            background_state,
-            completed.id,
-            completed.path,
-        )
-        .await;
+        match live {
+            Some(session) => {
+                finish_live_take(background_app, background_state, completed, session).await
+            }
+            None => {
+                transcribe_recording(
+                    background_app,
+                    background_state,
+                    completed.id,
+                    completed.path,
+                )
+                .await
+            }
+        }
     });
     Ok(snapshot)
+}
+
+/// Completes a take whose words were typed while the user spoke.
+///
+/// The provider's own final transcript is what history stores; the text that
+/// reached the application is what the user saw, and the two can differ when
+/// the provider rewrote a phrase at the end. Nothing is pasted — that already
+/// happened, word by word.
+async fn finish_live_take(
+    app: AppHandle,
+    state: AppState,
+    completed: CompletedRecording,
+    session: streaming::Session,
+) {
+    let outcome = session.finish(Duration::from_secs(8)).await;
+    let typed = outcome.typed.trim().to_owned();
+    let final_text = outcome.final_text.trim().to_owned();
+    let model = state
+        .settings
+        .read()
+        .map(|settings| cloud_model_label(&settings))
+        .unwrap_or_default();
+    if !typed.is_empty() {
+        finish_success(
+            &app,
+            &state,
+            &completed.id,
+            &completed.path,
+            TranscriptionResult {
+                // The provider's stitched transcript is the better record;
+                // the typed text is only the fallback.
+                text: if final_text.is_empty() { typed } else { final_text },
+                model,
+                language: None,
+                duration_ms: 0,
+            },
+            true,
+        );
+        return;
+    }
+    if !final_text.is_empty() {
+        // Nothing could be typed — an elevated window, say — but the provider
+        // heard every word. Pasting beats transcribing the file again.
+        finish_success(
+            &app,
+            &state,
+            &completed.id,
+            &completed.path,
+            TranscriptionResult {
+                text: final_text,
+                model,
+                language: None,
+                duration_ms: 0,
+            },
+            false,
+        );
+        return;
+    }
+    // Nothing usable came back; the recording goes the ordinary way.
+    transcribe_recording(app, state, completed.id, completed.path).await;
 }
 
 fn stop_recording_committed(state: &AppState) -> Result<CompletedRecording, String> {
@@ -1467,7 +1691,7 @@ async fn transcribe_recording(
         }
     };
     match outcome {
-        Ok(Ok(result)) => finish_success(&app, &state, &recording_id, &audio_path, result),
+        Ok(Ok(result)) => finish_success(&app, &state, &recording_id, &audio_path, result, false),
         Ok(Err(error)) => finish_failure(&app, &state, &recording_id, error),
         Err(error) => finish_failure(&app, &state, &recording_id, error.to_string()),
     }
@@ -1490,12 +1714,22 @@ fn transcribe_in_cloud(
         )
     })?;
     let model = resolve_cloud_model(settings);
-    let audio = std::fs::read(audio_path).map_err(|error| format!("could not read the recording: {error}"))?;
-    let file_name = audio_path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("recording.wav")
-        .to_owned();
+    // The capture is routinely 48 kHz stereo; every recogniser here consumes
+    // 16 kHz mono, so converting first makes the upload several times
+    // smaller. The original file stays on disk untouched.
+    let (audio, file_name) = match crate::engine::compact_wav(audio_path) {
+        Ok(compact) => (compact, "loquara-16k-mono.wav".to_owned()),
+        Err(_) => {
+            let raw = std::fs::read(audio_path)
+                .map_err(|error| format!("could not read the recording: {error}"))?;
+            let name = audio_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("recording.wav")
+                .to_owned();
+            (raw, name)
+        }
+    };
     let vocabulary = storage.list_vocabulary().unwrap_or_default();
     let keyterms = keyterms_for(&vocabulary);
     let transcript = cloud::transcribe(cloud::Request {
@@ -1524,6 +1758,7 @@ fn finish_success(
     recording_id: &str,
     audio_path: &Path,
     result: TranscriptionResult,
+    already_typed: bool,
 ) {
     if state.transcription_cancel.load(Ordering::SeqCst) {
         return;
@@ -1561,6 +1796,12 @@ fn finish_success(
         },
         || {
             emit_state(app, state);
+            if already_typed {
+                // The words were typed into the application while the user
+                // was speaking; pasting them again would double them.
+                platform::hide_overlay(app);
+                return;
+            }
             let (auto_paste, paste_mode) = state
                 .settings
                 .read()
@@ -1684,6 +1925,9 @@ fn cancel_live_recording(
     recording_id: String,
     audio_path: String,
 ) -> Result<AppSnapshot, String> {
+    // Whatever was typed stays typed — there is no taking text back out of an
+    // arbitrary application — but nothing more will be sent.
+    abandon_live_session(state);
     let cancelled = match state.audio.stop() {
         Ok(cancelled) => cancelled,
         Err(error) => {
@@ -2878,10 +3122,10 @@ fn write_cloud_api_key(storage: &Storage, provider: &str, api_key: &str) -> Resu
 /// Sends a second of silence to the configured provider.
 ///
 /// An empty transcript is still an answer: it proves the address, the key and
-/// the model were accepted. That is the part of the setup a user cannot check
-/// by looking at it.
+/// the model were accepted. The time it took is reported too, because that is
+/// the part a user cannot see any other way.
 #[tauri::command]
-pub async fn test_cloud_transcription(state: State<'_, AppState>) -> Result<String, String> {
+pub async fn test_cloud_transcription(state: State<'_, AppState>) -> Result<CloudCheck, String> {
     let settings = state
         .settings
         .read()
@@ -2899,6 +3143,7 @@ pub async fn test_cloud_transcription(state: State<'_, AppState>) -> Result<Stri
         })?;
         let model = resolve_cloud_model(&settings);
         let audio = cloud::silence_wav();
+        let started = Instant::now();
         let transcript = cloud::transcribe(cloud::Request {
             provider: provider.key,
             model: &model,
@@ -2911,7 +3156,35 @@ pub async fn test_cloud_transcription(state: State<'_, AppState>) -> Result<Stri
             cancel: None,
         })
         .map_err(|error| error.to_string())?;
-        Ok(transcript.text)
+        Ok(CloudCheck {
+            text: transcript.text,
+            elapsed_ms: started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
+        })
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+/// The provider's own list of models, for the settings screen to offer.
+#[tauri::command]
+pub async fn list_cloud_models(state: State<'_, AppState>) -> Result<Vec<String>, String> {
+    let settings = state
+        .settings
+        .read()
+        .map_err(|_| "settings lock poisoned")?
+        .clone();
+    let storage = state.storage.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let provider = cloud::provider(&settings.cloud_provider)
+            .unwrap_or_else(|| cloud::default_provider());
+        let api_key = cloud_api_key(&storage, provider.key)?.ok_or_else(|| {
+            format!(
+                "no API key is set for {}; add one in Settings",
+                provider.display
+            )
+        })?;
+        cloud::list_models(provider, &settings.cloud_base_url, &api_key)
+            .map_err(|error| error.to_string())
     })
     .await
     .map_err(|error| error.to_string())?

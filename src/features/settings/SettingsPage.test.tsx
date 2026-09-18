@@ -233,7 +233,7 @@ describe("ustawienia", () => {
     expect(await screen.findByRole("combobox", { name: "Dostawca" })).toHaveTextContent("xAI (Grok)");
     // The model field falls back to what the provider calls its current
     // model, without storing it until the user edits it.
-    expect(await screen.findByDisplayValue("grok-voice-transcribe-2.0")).toBeVisible();
+    expect(await screen.findByRole("combobox", { name: "Model" })).toHaveTextContent("grok-voice-transcribe-2.0");
   });
 
   test("zmiana dostawcy przestawia model na jego domyślny", async () => {
@@ -271,8 +271,8 @@ describe("ustawienia", () => {
     expect(onToast).toHaveBeenCalledWith("Klucz API zapisany.", "success");
   });
 
-  test("test połączenia pokazuje odpowiedź dostawcy", async () => {
-    const testCloudTranscription = vi.fn(async () => "Dzień dobry");
+  test("test połączenia pokazuje odpowiedź dostawcy i czas", async () => {
+    const testCloudTranscription = vi.fn(async () => ({ text: "Dzień dobry", elapsedMs: 1234 }));
     const onToast = vi.fn();
     renderWithI18n(<SettingsPage
       adapter={adapterStub({ listCloudKeys: async () => ["xai"], testCloudTranscription })}
@@ -285,10 +285,77 @@ describe("ustawienia", () => {
     await userEvent.click(button);
 
     await waitFor(() => expect(onToast).toHaveBeenCalledWith(
-      "Połączenie działa. Odpowiedź: „Dzień dobry”",
+      "Połączenie działa w 1.2 s. Odpowiedź: „Dzień dobry”",
       "success",
     ));
     expect(testCloudTranscription).toHaveBeenCalled();
+  });
+
+  test("model można wpisać ręcznie, gdy lista go nie zawiera", async () => {
+    const adapter = adapterStub();
+    const updateSettings = vi.spyOn(adapter, "updateSettings");
+    renderWithI18n(<SettingsPage
+      adapter={adapter}
+      initialSettings={{ ...settings, transcriptionSource: "cloud" }}
+      onToast={() => undefined}
+    />);
+
+    await userEvent.click(await screen.findByRole("combobox", { name: "Model" }));
+    await userEvent.click(await screen.findByRole("option", { name: "Własny…" }));
+
+    const field = screen.getByLabelText("Model");
+    await userEvent.clear(field);
+    await userEvent.type(field, "grok-voice-transcribe-1.0{Enter}");
+
+    await waitFor(() => expect(updateSettings).toHaveBeenCalledWith(
+      expect.objectContaining({ cloudModel: "grok-voice-transcribe-1.0" }),
+    ));
+  });
+
+  test("listę modeli można pobrać od dostawcy", async () => {
+    const listCloudModels = vi.fn(async () => ["whisper-1", "gpt-transcribe"]);
+    const onToast = vi.fn();
+    renderWithI18n(<SettingsPage
+      adapter={adapterStub({ listCloudKeys: async () => ["xai"], listCloudModels })}
+      initialSettings={{ ...settings, transcriptionSource: "cloud" }}
+      onToast={onToast}
+    />);
+
+    const button = await screen.findByRole("button", { name: "Pobierz listę modeli" });
+    await waitFor(() => expect(button).toBeEnabled());
+    await userEvent.click(button);
+
+    await waitFor(() => expect(onToast).toHaveBeenCalledWith("Pobrano 2 modeli.", "success"));
+    await userEvent.click(screen.getByRole("combobox", { name: "Model" }));
+    expect(await screen.findByRole("option", { name: "whisper-1" })).toBeVisible();
+  });
+
+  test("tryb na żywo jest dostępny tylko u dostawcy, który go obsługuje", async () => {
+    const adapter = adapterStub();
+    const updateSettings = vi.spyOn(adapter, "updateSettings");
+    const { rerender } = renderWithI18n(<SettingsPage
+      adapter={adapter}
+      initialSettings={{ ...settings, transcriptionSource: "cloud", streaming: false }}
+      onToast={() => undefined}
+    />);
+
+    const live = await screen.findByRole("checkbox", { name: "Pisz na żywo" });
+    await waitFor(() => expect(live).toBeEnabled());
+    expect(live).not.toBeChecked();
+    await userEvent.click(live);
+
+    await waitFor(() => expect(updateSettings).toHaveBeenCalledWith(
+      expect.objectContaining({ streaming: true }),
+    ));
+
+    rerender(<SettingsPage
+      adapter={adapterStub()}
+      initialSettings={{ ...settings, transcriptionSource: "cloud", cloudProvider: "openai" }}
+      onToast={() => undefined}
+    />);
+
+    await waitFor(() => expect(screen.getByRole("checkbox", { name: "Pisz na żywo" })).toBeDisabled());
+    expect(screen.getByText("Ten dostawca nie obsługuje trybu na żywo")).toBeVisible();
   });
 
   test("dostawca własny prosi o adres API, a znany go nie pokazuje", async () => {

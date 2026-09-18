@@ -420,11 +420,19 @@ fn packet_peak(samples: &[f32]) -> f32 {
         .clamp(0.0, 1.0)
 }
 
+/// Receives every captured packet alongside the WAV writer.
+///
+/// Used for live transcription, which needs the audio while the take is
+/// still running. The packet arrives as PCM16 in the capture format, and the
+/// sink does whatever conversion the consumer needs.
+pub type StreamSink = Arc<dyn Fn(&[i16], AudioFormat) + Send + Sync>;
+
 pub struct AudioRecorder {
     recordings_dir: PathBuf,
     backend: Arc<dyn InputBackend>,
     active: Mutex<Option<ActiveRecording>>,
     level_sender: Mutex<Option<SyncSender<f32>>>,
+    stream_sink: Mutex<Option<StreamSink>>,
 }
 
 impl AudioRecorder {
@@ -441,12 +449,21 @@ impl AudioRecorder {
             backend,
             active: Mutex::new(None),
             level_sender: Mutex::new(None),
+            stream_sink: Mutex::new(None),
         }
     }
 
     pub fn set_level_sender(&self, sender: SyncSender<f32>) {
         if let Ok(mut level_sender) = self.level_sender.lock() {
             *level_sender = Some(sender);
+        }
+    }
+
+    /// Sets (or clears) the live-audio tap. The next recording is the first
+    /// one that sees a change.
+    pub fn set_stream_sink(&self, sink: Option<StreamSink>) {
+        if let Ok(mut stream_sink) = self.stream_sink.lock() {
+            *stream_sink = sink;
         }
     }
 
@@ -491,6 +508,11 @@ impl AudioRecorder {
             .lock()
             .ok()
             .and_then(|sender| sender.clone());
+        let stream_sink = self
+            .stream_sink
+            .lock()
+            .ok()
+            .and_then(|sink| sink.clone());
         let bridge_sender = writer_sender.clone();
         let input = match self
             .backend
@@ -518,6 +540,9 @@ impl AudioRecorder {
                 match message {
                     WriterMessage::Samples(samples) => {
                         let pcm = samples.pcm16()?;
+                        if let Some(sink) = &stream_sink {
+                            sink(&pcm, format);
+                        }
                         let float_samples: Vec<f32> = pcm
                             .iter()
                             .map(|sample| f32::from(*sample) / 32768.0)

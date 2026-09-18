@@ -61,6 +61,10 @@ pub struct Provider {
     pub auth: Auth,
     /// Whether the address above is a placeholder the user has to replace.
     pub custom: bool,
+    /// Whether the provider streams a transcript while the user speaks.
+    pub streaming: bool,
+    /// Whether the provider publishes a readable list of models.
+    pub lists_models: bool,
 }
 
 /// The providers Loquara can talk to, best-known first.
@@ -74,6 +78,8 @@ pub const PROVIDERS: &[Provider] = &[
         api: Api::Xai,
         auth: Auth::Bearer,
         custom: false,
+        streaming: true,
+        lists_models: true,
     },
     Provider {
         key: "openai",
@@ -89,6 +95,8 @@ pub const PROVIDERS: &[Provider] = &[
         api: Api::OpenAi,
         auth: Auth::Bearer,
         custom: false,
+        streaming: false,
+        lists_models: true,
     },
     Provider {
         key: "groq",
@@ -103,6 +111,8 @@ pub const PROVIDERS: &[Provider] = &[
         api: Api::OpenAi,
         auth: Auth::Bearer,
         custom: false,
+        streaming: false,
+        lists_models: true,
     },
     Provider {
         key: "mistral",
@@ -113,6 +123,8 @@ pub const PROVIDERS: &[Provider] = &[
         api: Api::OpenAi,
         auth: Auth::Bearer,
         custom: false,
+        streaming: false,
+        lists_models: true,
     },
     Provider {
         key: "elevenlabs",
@@ -123,6 +135,8 @@ pub const PROVIDERS: &[Provider] = &[
         api: Api::ElevenLabs,
         auth: Auth::XiApiKey,
         custom: false,
+        streaming: false,
+        lists_models: false,
     },
     Provider {
         key: "deepgram",
@@ -133,6 +147,8 @@ pub const PROVIDERS: &[Provider] = &[
         api: Api::Deepgram,
         auth: Auth::Token,
         custom: false,
+        streaming: false,
+        lists_models: false,
     },
     Provider {
         key: "custom",
@@ -143,6 +159,8 @@ pub const PROVIDERS: &[Provider] = &[
         api: Api::OpenAi,
         auth: Auth::Bearer,
         custom: true,
+        streaming: false,
+        lists_models: true,
     },
 ];
 
@@ -164,6 +182,10 @@ pub struct ProviderInfo {
     pub default_model: String,
     pub models: Vec<String>,
     pub custom: bool,
+    /// The provider can transcribe while the user speaks.
+    pub streaming: bool,
+    /// The interface may offer to fetch the provider's model list.
+    pub lists_models: bool,
 }
 
 pub fn catalog() -> Vec<ProviderInfo> {
@@ -175,6 +197,8 @@ pub fn catalog() -> Vec<ProviderInfo> {
             default_model: provider.default_model.to_owned(),
             models: provider.models.iter().map(|model| (*model).to_owned()).collect(),
             custom: provider.custom,
+            streaming: provider.streaming,
+            lists_models: provider.lists_models,
         })
         .collect()
 }
@@ -348,14 +372,11 @@ fn send(
     content_type: &str,
     body: &[u8],
 ) -> Result<String, CloudError> {
-    let mut request = agent()
-        .post(url)
-        .set("Content-Type", content_type);
-    request = match auth {
-        Auth::Bearer => request.set("Authorization", &format!("Bearer {api_key}")),
-        Auth::Token => request.set("Authorization", &format!("Token {api_key}")),
-        Auth::XiApiKey => request.set("xi-api-key", api_key),
-    };
+    let request = authorize(
+        agent().post(url).set("Content-Type", content_type),
+        auth,
+        api_key,
+    );
     match request.send_bytes(body) {
         Ok(response) => response
             .into_string()
@@ -369,6 +390,114 @@ fn send(
         }
         Err(ureq::Error::Transport(error)) => Err(CloudError::Network(error.to_string())),
     }
+}
+
+fn authorize(request: ureq::Request, auth: Auth, api_key: &str) -> ureq::Request {
+    match auth {
+        Auth::Bearer => request.set("Authorization", &format!("Bearer {api_key}")),
+        Auth::Token => request.set("Authorization", &format!("Token {api_key}")),
+        Auth::XiApiKey => request.set("xi-api-key", api_key),
+    }
+}
+
+/// Where the provider's model list lives, given a transcription address.
+pub fn models_endpoint(provider: &Provider, base_url: &str) -> String {
+    let base = if base_url.trim().is_empty() {
+        provider.base_url
+    } else {
+        base_url.trim()
+    };
+    let base = base
+        .trim_end_matches('/')
+        .trim_end_matches("/stt")
+        .trim_end_matches("/audio/transcriptions");
+    format!("{base}/models")
+}
+
+/// Asks the provider which models it offers.
+///
+/// Only the OpenAI-shaped `/models` route is understood, which covers every
+/// provider here except ElevenLabs and Deepgram; a list instead of a single
+/// string is not something the app can use, so it says so rather than
+/// guessing.
+pub fn list_models(
+    provider: &Provider,
+    base_url: &str,
+    api_key: &str,
+) -> Result<Vec<String>, CloudError> {
+    if !provider.lists_models {
+        return Err(CloudError::Response(format!(
+            "{} does not publish a model list",
+            provider.display
+        )));
+    }
+    let url = models_endpoint(provider, base_url);
+    let request = authorize(agent().get(&url), provider.auth, api_key);
+    let body = match request.call() {
+        Ok(response) => response
+            .into_string()
+            .map_err(|error| CloudError::Network(error.to_string()))?,
+        Err(ureq::Error::Status(status, response)) => {
+            let body = response.into_string().unwrap_or_default();
+            return Err(CloudError::Rejected {
+                status,
+                message: describe_error(&body),
+            });
+        }
+        Err(ureq::Error::Transport(error)) => return Err(CloudError::Network(error.to_string())),
+    };
+    let value: Value = serde_json::from_str(&body)
+        .map_err(|error| CloudError::Response(format!("{error}: {}", truncate(&body, 300))))?;
+    let mut models: Vec<String> = value
+        .get("data")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.get("id").and_then(Value::as_str))
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    if models.is_empty() {
+        // Some gateways answer with a bare list of names instead.
+        models = value
+            .as_array()
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default();
+    }
+    // A provider's catalogue holds everything it sells; dictation only wants
+    // the recognisers. A gateway that names nothing recognisably gets the
+    // whole list rather than an empty dropdown.
+    if !provider.custom {
+        let recognisers: Vec<String> = models
+            .iter()
+            .filter(|id| looks_like_transcription(id))
+            .cloned()
+            .collect();
+        if !recognisers.is_empty() {
+            models = recognisers;
+        }
+    }
+    models.sort();
+    models.dedup();
+    Ok(models)
+}
+
+fn looks_like_transcription(id: &str) -> bool {
+    let id = id.to_ascii_lowercase();
+    if id.contains("tts") || id.contains("text-to-speech") {
+        return false;
+    }
+    ["transcribe", "whisper", "stt", "voxtral", "scribe", "nova-"]
+        .iter()
+        .any(|needle| id.contains(needle))
 }
 
 /// One pooled agent, so a second dictation reuses the TLS connection the
@@ -433,7 +562,7 @@ fn truncate(text: &str, limit: usize) -> String {
 }
 
 /// Trims the vocabulary to what a provider will accept.
-fn keyterms(terms: &[String]) -> Vec<String> {
+pub(crate) fn keyterms(terms: &[String]) -> Vec<String> {
     let mut seen = std::collections::BTreeSet::new();
     terms
         .iter()
@@ -445,7 +574,7 @@ fn keyterms(terms: &[String]) -> Vec<String> {
         .collect()
 }
 
-fn url_escape(value: &str) -> String {
+pub(crate) fn url_escape(value: &str) -> String {
     let mut escaped = String::with_capacity(value.len());
     for byte in value.bytes() {
         match byte {
@@ -567,6 +696,16 @@ mod tests {
                     provider.key
                 );
             }
+        }
+    }
+
+    #[test]
+    fn only_providers_with_a_live_route_offer_streaming() {
+        // The live path is xAI-only for now: the others would need their own
+        // protocol, and claiming support would only fail on the first take.
+        assert!(provider("xai").unwrap().streaming);
+        for key in ["openai", "groq", "mistral", "elevenlabs", "deepgram", "custom"] {
+            assert!(!provider(key).unwrap().streaming, "{key}");
         }
     }
 
@@ -902,6 +1041,59 @@ mod tests {
 
         assert!(matches!(&error, CloudError::Rejected { status: 401, .. }), "{error:?}");
         assert!(error.to_string().contains("Incorrect API key provided"), "{error}");
+    }
+
+    #[test]
+    fn a_model_list_is_asked_for_at_the_root_of_the_api() {
+        assert_eq!(
+            models_endpoint(provider("xai").unwrap(), ""),
+            "https://api.x.ai/v1/models"
+        );
+        assert_eq!(
+            models_endpoint(provider("openai").unwrap(), ""),
+            "https://api.openai.com/v1/models"
+        );
+        assert_eq!(
+            models_endpoint(provider("custom").unwrap(), "https://host.example/v1/audio/transcriptions"),
+            "https://host.example/v1/models"
+        );
+    }
+
+    #[test]
+    fn a_model_list_keeps_recognisers_and_drops_everything_else() {
+        assert!(looks_like_transcription("grok-voice-transcribe-2.0"));
+        assert!(looks_like_transcription("whisper-large-v3-turbo"));
+        assert!(looks_like_transcription("voxtral-mini-latest"));
+        assert!(looks_like_transcription("scribe_v2"));
+        assert!(looks_like_transcription("nova-3"));
+        assert!(!looks_like_transcription("gpt-4o-mini-tts"));
+        assert!(!looks_like_transcription("gpt-4.1"));
+        assert!(!looks_like_transcription("grok-2-image"));
+    }
+
+    #[test]
+    fn the_model_list_comes_back_from_the_providers_own_route() {
+        let (base, server) = local_server(
+            "200 OK",
+            r#"{"data":[{"id":"gpt-4o-mini-tts"},{"id":"whisper-1"},{"id":"gpt-transcribe"},{"id":"gpt-4.1"}]}"#,
+        );
+
+        let models = list_models(provider("openai").unwrap(), &base, "test-key").unwrap();
+        let seen = server.join().unwrap();
+
+        assert_eq!(models, vec!["gpt-transcribe", "whisper-1"]);
+        assert!(seen.starts_with("GET /v1/models "), "{seen}");
+        assert!(
+            seen.to_ascii_lowercase().contains("authorization: bearer test-key"),
+            "{seen}"
+        );
+    }
+
+    #[test]
+    fn a_provider_without_a_model_route_says_so() {
+        let error = list_models(provider("deepgram").unwrap(), "", "key").unwrap_err();
+
+        assert!(matches!(error, CloudError::Response(_)), "{error:?}");
     }
 
     #[test]

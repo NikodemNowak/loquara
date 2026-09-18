@@ -825,6 +825,15 @@ impl TryFrom<RawRecording> for Recording {
     }
 }
 
+/// Applies the user's replacements to one piece of text.
+///
+/// Live dictation types pieces as they arrive, so they cannot wait for the
+/// paragraph pass that a finished transcript gets; the replacements are the
+/// part that has to survive, because they are the user's own spelling.
+pub fn apply_vocabulary_text(text: &str, vocabulary: &[VocabularyEntry]) -> String {
+    apply_vocabulary(text.to_owned(), vocabulary)
+}
+
 pub fn postprocess(text: &str, vocabulary: &[VocabularyEntry]) -> String {
     let whitespace = Regex::new(r"\s+").expect("static whitespace regex is valid");
     let punctuation = Regex::new(r"\s+([,.;:!?])").expect("static punctuation regex is valid");

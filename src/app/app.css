@@ -470,6 +470,11 @@ input[type="checkbox"]:disabled { opacity: 0.45; cursor: not-allowed; }
 .cloud-panel { display: grid; }
 .cloud-key { display: flex; align-items: center; gap: var(--s-2); flex: 0 0 auto; }
 .cloud-panel .cloud-key input { width: 220px; }
+.cloud-model { display: grid; gap: var(--s-2); justify-items: end; flex: 0 0 auto; }
+.cloud-panel .cloud-model .select-trigger, .cloud-panel .cloud-model input { width: 220px; }
+.cloud-model__actions { display: flex; gap: var(--s-3); }
+.cloud-model__actions .text-button { font-size: var(--t-micro); }
+.cloud-model__actions .text-button:disabled { opacity: 0.45; cursor: not-allowed; }
 .cloud-key input[type="password"] { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; }
 .cloud-note { margin: 0; padding: var(--s-3) var(--s-4); border: 1px solid var(--border); border-top: 0; border-bottom-left-radius: var(--r-md); border-bottom-right-radius: var(--r-md); color: var(--warning); background: var(--panel); font-size: var(--t-micro); line-height: var(--lh-relaxed); }
 
