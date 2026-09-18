@@ -180,7 +180,7 @@ const initialSettings: AppSettings = {
 
 /** Provider catalogue for the browser demo, mirroring the backend's. */
 export const demoCloudProviders: CloudProviderInfo[] = [
-  { key: "xai", display: "xAI (Grok)", defaultModel: "grok-voice-transcribe-2.0", models: ["grok-voice-transcribe-2.0", "grok-voice-transcribe-1.0"], custom: false, streaming: true, listsModels: true },
+  { key: "xai", display: "xAI (Grok)", defaultModel: "grok-voice-transcribe-2.0", models: ["grok-voice-transcribe-2.0", "grok-voice-transcribe-1.0"], custom: false, streaming: true, listsModels: false },
   { key: "openai", display: "OpenAI", defaultModel: "gpt-transcribe", models: ["gpt-transcribe", "gpt-4o-transcribe", "gpt-4o-mini-transcribe", "whisper-1"], custom: false, streaming: false, listsModels: true },
   { key: "groq", display: "Groq", defaultModel: "whisper-large-v3-turbo", models: ["whisper-large-v3-turbo", "whisper-large-v3", "distil-whisper-large-v3-en"], custom: false, streaming: false, listsModels: true },
   { key: "mistral", display: "Mistral", defaultModel: "voxtral-mini-latest", models: ["voxtral-mini-latest", "voxtral-small-latest"], custom: false, streaming: false, listsModels: true },

@@ -79,7 +79,10 @@ pub const PROVIDERS: &[Provider] = &[
         auth: Auth::Bearer,
         custom: false,
         streaming: true,
-        lists_models: true,
+        // xAI's model routes list chat, image and video models only; the
+        // speech models are not published there, so asking would offer
+        // nothing that can transcribe.
+        lists_models: false,
     },
     Provider {
         key: "openai",
@@ -473,17 +476,12 @@ pub fn list_models(
             .unwrap_or_default();
     }
     // A provider's catalogue holds everything it sells; dictation only wants
-    // the recognisers. A gateway that names nothing recognisably gets the
-    // whole list rather than an empty dropdown.
+    // the recognisers. A custom gateway gets the whole list, because nothing
+    // is known about how it names things — but a known provider must never
+    // fall back to offering chat and image models for dictation. An empty
+    // answer, which the interface reports, is the honest one.
     if !provider.custom {
-        let recognisers: Vec<String> = models
-            .iter()
-            .filter(|id| looks_like_transcription(id))
-            .cloned()
-            .collect();
-        if !recognisers.is_empty() {
-            models = recognisers;
-        }
+        models.retain(|id| looks_like_transcription(id));
     }
     models.sort();
     models.dedup();
@@ -1094,6 +1092,26 @@ mod tests {
         let error = list_models(provider("deepgram").unwrap(), "", "key").unwrap_err();
 
         assert!(matches!(error, CloudError::Response(_)), "{error:?}");
+    }
+
+    #[test]
+    fn a_catalogue_without_speech_models_offers_nothing_rather_than_everything() {
+        // This is what xAI actually answers with: chat, image and video
+        // models, and no recognisers at all.
+        let (base, server) = local_server(
+            "200 OK",
+            r#"{"data":[{"id":"grok-4.6"},{"id":"grok-build-0.1"},{"id":"grok-imagine-image"},{"id":"grok-imagine-video-1.5"}]}"#,
+        );
+
+        let models = list_models(provider("openai").unwrap(), &base, "key").unwrap();
+        let _ = server.join();
+
+        assert!(models.is_empty(), "{models:?}");
+    }
+
+    #[test]
+    fn xai_does_not_offer_to_list_models_it_does_not_publish() {
+        assert!(!provider("xai").unwrap().lists_models);
     }
 
     #[test]

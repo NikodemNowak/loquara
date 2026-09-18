@@ -234,6 +234,8 @@ describe("ustawienia", () => {
     // The model field falls back to what the provider calls its current
     // model, without storing it until the user edits it.
     expect(await screen.findByRole("combobox", { name: "Model" })).toHaveTextContent("grok-voice-transcribe-2.0");
+    // xAI does not publish its speech models, so it is not asked for them.
+    expect(screen.queryByRole("button", { name: "Pobierz listę modeli" })).toBeNull();
   });
 
   test("zmiana dostawcy przestawia model na jego domyślny", async () => {
@@ -312,12 +314,12 @@ describe("ustawienia", () => {
     ));
   });
 
-  test("listę modeli można pobrać od dostawcy", async () => {
-    const listCloudModels = vi.fn(async () => ["whisper-1", "gpt-transcribe"]);
+  test("listę modeli można pobrać od dostawcy, który ją publikuje", async () => {
+    const listCloudModels = vi.fn(async () => ["gpt-4o-transcribe-diarize", "gpt-transcribe"]);
     const onToast = vi.fn();
     renderWithI18n(<SettingsPage
-      adapter={adapterStub({ listCloudKeys: async () => ["xai"], listCloudModels })}
-      initialSettings={{ ...settings, transcriptionSource: "cloud" }}
+      adapter={adapterStub({ listCloudKeys: async () => ["openai"], listCloudModels })}
+      initialSettings={{ ...settings, transcriptionSource: "cloud", cloudProvider: "openai", cloudModel: "" }}
       onToast={onToast}
     />);
 
@@ -327,7 +329,7 @@ describe("ustawienia", () => {
 
     await waitFor(() => expect(onToast).toHaveBeenCalledWith("Pobrano 2 modeli.", "success"));
     await userEvent.click(screen.getByRole("combobox", { name: "Model" }));
-    expect(await screen.findByRole("option", { name: "whisper-1" })).toBeVisible();
+    expect(await screen.findByRole("option", { name: "gpt-4o-transcribe-diarize" })).toBeVisible();
   });
 
   test("tryb na żywo jest dostępny tylko u dostawcy, który go obsługuje", async () => {
