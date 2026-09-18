@@ -166,6 +166,52 @@ pub fn copy_and_paste(
     windows.send_paste(target, mode)
 }
 
+/// Removes the last `count` characters from whatever window has focus.
+///
+/// Used by live dictation to take back a word the model changed its mind
+/// about. It only ever runs immediately after this session typed those
+/// characters itself.
+pub fn backspace(count: usize) -> Result<(), PlatformError> {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+            INPUT, KEYEVENTF_KEYUP, SendInput, VK_BACK,
+        };
+        if count == 0 {
+            return Ok(());
+        }
+        // Small batches, so a window that is slow to process input cannot
+        // swallow the whole correction.
+        for batch in 0..count.div_ceil(24) {
+            let events: Vec<INPUT> = (0..24.min(count - batch * 24))
+                .flat_map(|_| [key_input(VK_BACK, 0), key_input(VK_BACK, KEYEVENTF_KEYUP)])
+                .collect();
+            let sent = unsafe {
+                SendInput(
+                    events.len().try_into().unwrap_or(u32::MAX),
+                    events.as_ptr(),
+                    size_of::<INPUT>().try_into().unwrap_or(i32::MAX),
+                )
+            };
+            if sent != events.len() as u32 {
+                return Err(PlatformError::PasteFailed(format!(
+                    "SendInput removed {sent}/{} events",
+                    events.len()
+                )));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = count;
+        Err(PlatformError::PasteFailed(
+            "live typing is not implemented on this platform".into(),
+        ))
+    }
+}
+
 /// Types text into whatever window has focus, without touching the clipboard.
 ///
 /// Live dictation arrives in pieces while the user is speaking, so each piece

@@ -5,7 +5,6 @@ use crate::audio::{
 };
 use crate::secret;
 use crate::streaming;
-use crate::storage;
 use crate::domain::{DictationEvent, DictationState, transition};
 use crate::platform::{self, PasteMode, SystemWindows, WindowTarget, WindowsApi};
 use crate::storage::{
@@ -406,14 +405,19 @@ fn cloud_model_label(settings: &AppSettings) -> String {
 /// Types live pieces into whatever window has focus.
 struct LiveTypingSink {
     app: AppHandle,
-    vocabulary: Vec<VocabularyEntry>,
 }
 
 impl streaming::TranscriptSink for LiveTypingSink {
-    fn commit(&self, text: &str) -> Result<String, String> {
-        let text = storage::apply_vocabulary_text(text, &self.vocabulary);
-        platform::type_text(&text).map_err(|error| error.to_string())?;
-        Ok(text)
+    fn type_text(&self, text: &str) -> Result<(), String> {
+        platform::type_text(text).map_err(|error| error.to_string())
+    }
+
+    fn retract(&self, chars: usize) -> Result<(), String> {
+        platform::backspace(chars).map_err(|error| {
+            let message = error.to_string();
+            let _ = self.app.emit("dictation://paste_error", message.clone());
+            message
+        })
     }
 
     fn failed(&self, message: &str) {
@@ -448,10 +452,17 @@ fn start_live_session(
     );
     let sink: Arc<dyn streaming::TranscriptSink> = Arc::new(LiveTypingSink {
         app: app.clone(),
-        vocabulary,
     });
     let (audio_sender, audio_receiver) = tokio::sync::mpsc::channel(1_024);
-    let session = streaming::spawn(streaming::Config { url, api_key }, sink, audio_receiver);
+    let session = streaming::spawn(
+        streaming::Config {
+            url,
+            api_key,
+            vocabulary,
+        },
+        sink,
+        audio_receiver,
+    );
 
     // The recorder hands every captured packet here; the pump turns them into
     // the 16 kHz mono stream the provider wants.

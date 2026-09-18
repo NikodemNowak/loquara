@@ -20,6 +20,8 @@ use rubato::{
 };
 use serde_json::Value;
 use tokio::sync::mpsc;
+
+use crate::storage::{VocabularyEntry, apply_vocabulary_text};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::HeaderValue;
@@ -61,8 +63,11 @@ pub fn xai_stream_url(
     } else {
         format!("{base}/stt")
     };
+    // `interim_results` is what turns the stream from a piece every few
+    // seconds into words as they are spoken; the typist decides how much of
+    // that uncertainty is safe to show.
     let mut url = format!(
-        "{base}?model={}&sample_rate={TARGET_SAMPLE_RATE}&encoding=pcm",
+        "{base}?model={}&sample_rate={TARGET_SAMPLE_RATE}&encoding=pcm&interim_results=true",
         url_escape(model)
     );
     if !language.trim().is_empty() {
@@ -131,70 +136,167 @@ pub fn parse_event(json: &str) -> Event {
     }
 }
 
-/// Turns the provider's overlapping results into pieces not yet typed.
+/// Maximum characters one correction may take back.
 ///
-/// Providers may send each locked chunk on its own, resend the whole
-/// utterance each time, or do both. Whatever has already reached the target
-/// application is never sent again, so a resend can never double a word.
-#[derive(Default)]
-pub struct DeltaTracker {
-    /// What the target application has received, as model text.
-    typed: String,
-    /// The utterance currently being constructed.
-    current: String,
+/// A model that rewrites more than this mid-utterance has lost the plot, and
+/// a wider backspace is how a dictation session eats the user's own typing.
+const MAX_CORRECTION_CHARS: usize = 160;
+
+/// Turns the provider's live results into keystrokes.
+///
+/// The stream carries three kinds of text: interim results that may still
+/// change, locked segments, and the finished utterance. Interim text is typed
+/// as it arrives, so words appear while the user is speaking, and taken back
+/// with backspaces when the model changes its mind. Everything removed was
+/// typed by this session moments earlier; corrections never reach past the
+/// segment in flight, and speculation stops for good if a correction cannot
+/// be made — a caret that has moved is not a caret to delete around.
+pub struct LiveTypist {
+    vocabulary: Vec<VocabularyEntry>,
+    /// Everything typed for the session, as the application received it.
+    delivered: String,
+    /// Delivered text of the utterance being spoken, including the segment in
+    /// flight.
+    utterance: String,
+    /// Delivered text of the segment in flight.
+    segment: String,
+    /// False once correcting the segment stops being safe.
+    speculating: bool,
 }
 
-impl DeltaTracker {
-    /// Feeds one final event; returns the text to type, if any.
-    pub fn accept(&mut self, text: &str, speech_final: bool) -> Option<String> {
-        let text = text.trim();
-        if text.is_empty() {
-            return None;
+impl LiveTypist {
+    pub fn new(vocabulary: Vec<VocabularyEntry>) -> Self {
+        Self {
+            vocabulary,
+            delivered: String::new(),
+            utterance: String::new(),
+            segment: String::new(),
+            speculating: true,
         }
-        let delta = if speech_final {
-            let delta = if self.current.is_empty() {
-                // A new utterance: it follows whatever came before.
-                self.spaced(text)
-            } else if let Some(rest) = text.strip_prefix(self.current.as_str()) {
-                // The stitched utterance continues the locked pieces, so the
-                // spacing is already in the text.
-                rest.to_owned()
-            } else if self.current.starts_with(text) {
-                // Shorter than what is already accounted for.
-                String::new()
-            } else {
-                // The provider revised earlier words. Its version wins for
-                // whatever has not been typed; typed text cannot be rewritten.
-                self.spaced(&tail_after_common_prefix(&self.current, text))
-            };
-            self.current.clear();
-            delta
-        } else if self.current.is_empty() {
-            let delta = self.spaced(text);
-            self.current = delta.clone();
-            delta
-        } else if let Some(rest) = text.strip_prefix(self.current.as_str()) {
-            self.current = text.to_owned();
-            rest.to_owned()
-        } else if self.current.starts_with(text) {
-            // A shorter resend of something already accounted for.
-            String::new()
-        } else {
-            // A new chunk of the same utterance.
-            let delta = format!(" {text}");
-            self.current.push_str(&delta);
-            delta
-        };
-        if delta.is_empty() {
-            return None;
-        }
-        self.typed.push_str(&delta);
-        Some(delta)
     }
 
-    /// Keeps a new utterance from running into the previous one.
+    /// What the target application has received so far.
+    pub fn delivered(&self) -> &str {
+        &self.delivered
+    }
+
+    /// A result that may still change.
+    pub fn speculate(&mut self, text: &str, sink: &dyn TranscriptSink) -> Result<(), String> {
+        if !self.speculating {
+            return Ok(());
+        }
+        let text = text.trim();
+        if text.is_empty() || text == self.segment {
+            return Ok(());
+        }
+        if let Some(tail) = text.strip_prefix(self.segment.as_str()) {
+            return self.append(tail, sink, true);
+        }
+        // The model changed its mind inside this segment.
+        let common = common_prefix_chars(&self.segment, text);
+        let remove = self.segment.chars().count().saturating_sub(common);
+        if remove > MAX_CORRECTION_CHARS {
+            self.speculating = false;
+            return Ok(());
+        }
+        if remove > 0 && !self.remove(remove, sink) {
+            return Ok(());
+        }
+        let tail: String = text.chars().skip(common).collect();
+        self.append(&tail, sink, true)
+    }
+
+    /// A locked result: one segment, or the finished utterance.
+    pub fn accept(
+        &mut self,
+        text: &str,
+        speech_final: bool,
+        sink: &dyn TranscriptSink,
+    ) -> Result<(), String> {
+        let text = text.trim();
+        if text.is_empty() {
+            return Ok(());
+        }
+        if speech_final {
+            // The stitched utterance supersedes everything this utterance
+            // said, including whatever is still in flight.
+            let desired = apply_vocabulary_text(text, &self.vocabulary);
+            if desired != self.utterance {
+                if self.utterance.is_empty() {
+                    self.append(&desired, sink, false)?;
+                } else if let Some(tail) = desired.strip_prefix(self.utterance.as_str()) {
+                    self.append(tail, sink, true)?;
+                } else if !self.utterance.starts_with(&desired) {
+                    // Earlier words were revised. Correct as much of the tail
+                    // as is safe, and type the rest after it.
+                    let common = common_prefix_chars(&self.utterance, &desired);
+                    let remove = self.utterance.chars().count().saturating_sub(common);
+                    if remove > 0 && remove <= MAX_CORRECTION_CHARS && self.remove(remove, sink) {
+                        let tail: String = desired.chars().skip(common).collect();
+                        self.append(&tail, sink, true)?;
+                    } else {
+                        let tail = tail_after_common_prefix(&self.utterance, &desired);
+                        self.append(&tail, sink, true)?;
+                    }
+                }
+            }
+            self.utterance.clear();
+            self.segment.clear();
+            self.speculating = true;
+            return Ok(());
+        }
+        // A locked segment: it replaces whatever was speculated for it.
+        let desired = apply_vocabulary_text(text, &self.vocabulary);
+        if desired != self.segment {
+            if self.segment.is_empty() {
+                self.append(&desired, sink, false)?;
+            } else if self.remove(self.segment.chars().count(), sink) {
+                self.append(&desired, sink, false)?;
+            }
+        }
+        self.segment.clear();
+        Ok(())
+    }
+
+    /// Takes back the last `count` characters. Returns whether it worked.
+    fn remove(&mut self, count: usize, sink: &dyn TranscriptSink) -> bool {
+        if count == 0 {
+            return true;
+        }
+        if !self.speculating {
+            // Speculation was abandoned; letting the wrong text stand is
+            // better than deleting around a caret that may no longer be ours.
+            return false;
+        }
+        if sink.retract(count).is_err() {
+            self.speculating = false;
+            return false;
+        }
+        truncate_chars(&mut self.delivered, count);
+        truncate_chars(&mut self.utterance, count);
+        truncate_chars(&mut self.segment, count);
+        true
+    }
+
+    /// Types one piece, spacing it away from whatever came before.
+    fn append(&mut self, text: &str, sink: &dyn TranscriptSink, continuation: bool) -> Result<(), String> {
+        if text.is_empty() {
+            return Ok(());
+        }
+        let text = if continuation { text.to_owned() } else { self.spaced(text) };
+        sink.type_text(&text)?;
+        self.delivered.push_str(&text);
+        self.utterance.push_str(&text);
+        self.segment.push_str(&text);
+        Ok(())
+    }
+
+    /// Keeps a new piece from running into the previous one.
     fn spaced(&self, text: &str) -> String {
-        let previous = self.typed.chars().last();
+        if !self.segment.is_empty() || self.delivered.is_empty() {
+            return text.to_owned();
+        }
+        let previous = self.delivered.chars().last();
         let next = text.chars().next();
         let glued = matches!(
             (previous, next),
@@ -204,12 +306,20 @@ impl DeltaTracker {
     }
 }
 
-fn tail_after_common_prefix(previous: &str, text: &str) -> String {
-    let common = previous
-        .chars()
-        .zip(text.chars())
+fn common_prefix_chars(left: &str, right: &str) -> usize {
+    left.chars()
+        .zip(right.chars())
         .take_while(|(left, right)| left == right)
-        .count();
+        .count()
+}
+
+fn truncate_chars(text: &mut String, count: usize) {
+    let keep = text.chars().count().saturating_sub(count);
+    *text = text.chars().take(keep).collect();
+}
+
+fn tail_after_common_prefix(previous: &str, text: &str) -> String {
+    let common = common_prefix_chars(previous, text);
     text.chars().skip(common).collect::<String>().trim_start().to_owned()
 }
 
@@ -296,12 +406,13 @@ fn pcm_bytes(samples: &[i16]) -> Vec<u8> {
     bytes
 }
 
-/// Where completed pieces go. Implemented by the dictation layer, which
-/// types them and shows them; tests use a recorder.
+/// Where characters go. Implemented by the dictation layer, which types them
+/// into the focused window; tests simulate a document.
 pub trait TranscriptSink: Send + Sync {
-    /// Hands one locked piece to the target application and returns it as
-    /// delivered — the user's vocabulary may have rewritten it on the way.
-    fn commit(&self, text: &str) -> Result<String, String>;
+    /// Types text at the caret.
+    fn type_text(&self, text: &str) -> Result<(), String>;
+    /// Removes the last `chars` characters, which this session typed there.
+    fn retract(&self, chars: usize) -> Result<(), String>;
     /// The session stopped being useful; `message` says why.
     fn failed(&self, message: &str);
 }
@@ -376,6 +487,9 @@ pub fn spawn(config: Config, sink: Arc<dyn TranscriptSink>, audio: mpsc::Receive
 pub struct Config {
     pub url: String,
     pub api_key: String,
+    /// Applied to locked text, so the words that land in the application use
+    /// the user's own spelling.
+    pub vocabulary: Vec<VocabularyEntry>,
 }
 
 async fn run_session(
@@ -385,12 +499,16 @@ async fn run_session(
     mut control: mpsc::Receiver<Control>,
     shared: &Mutex<Shared>,
 ) -> Result<Ending, String> {
-    let mut request = config
-        .url
+    let Config {
+        url,
+        api_key,
+        vocabulary,
+    } = config;
+    let mut request = url
         .as_str()
         .into_client_request()
         .map_err(|error| error.to_string())?;
-    let authorization = HeaderValue::from_str(&format!("Bearer {}", config.api_key))
+    let authorization = HeaderValue::from_str(&format!("Bearer {api_key}"))
         .map_err(|error| error.to_string())?;
     request.headers_mut().insert("Authorization", authorization);
 
@@ -400,7 +518,7 @@ async fn run_session(
         Err(_) => return Err("the live transcription service did not answer".to_owned()),
     };
 
-    let mut tracker = DeltaTracker::default();
+    let mut typist = LiveTypist::new(vocabulary);
     let mut typing_ok = true;
 
     // The server wants a ready signal before the first frame.
@@ -439,7 +557,7 @@ async fn run_session(
             },
             message = socket.next() => match message {
                 Some(Ok(Message::Text(text))) => {
-                    if handle_event(&parse_event(text.as_str()), &mut tracker, sink.as_ref(), shared, &mut typing_ok) {
+                    if handle_event(&parse_event(text.as_str()), &mut typist, sink.as_ref(), shared, &mut typing_ok) {
                         break 'stream Ending::Completed;
                     }
                 }
@@ -462,7 +580,7 @@ async fn run_session(
         loop {
             match tokio::time::timeout_at(deadline, socket.next()).await {
                 Ok(Some(Ok(Message::Text(text)))) => {
-                    if handle_event(&parse_event(text.as_str()), &mut tracker, sink.as_ref(), shared, &mut typing_ok) {
+                    if handle_event(&parse_event(text.as_str()), &mut typist, sink.as_ref(), shared, &mut typing_ok) {
                         break;
                     }
                 }
@@ -478,7 +596,7 @@ async fn run_session(
 /// Handles one provider event; returns true when the session is complete.
 fn handle_event(
     event: &Event,
-    tracker: &mut DeltaTracker,
+    typist: &mut LiveTypist,
     sink: &dyn TranscriptSink,
     shared: &Mutex<Shared>,
     typing_ok: &mut bool,
@@ -489,28 +607,27 @@ fn handle_event(
             is_final,
             speech_final,
         } => {
-            if !*is_final {
-                return false;
-            }
-            if let Some(delta) = tracker.accept(text, *speech_final) {
-                if *typing_ok {
-                    match sink.commit(&delta) {
-                        Ok(delivered) => {
-                            if let Ok(mut shared) = shared.lock() {
-                                shared.typed.push_str(&delivered);
-                            }
-                        }
-                        Err(error) => {
-                            *typing_ok = false;
-                            if let Ok(mut shared) = shared.lock()
-                                && shared.error.is_none()
-                            {
-                                shared.error = Some(error.clone());
-                            }
-                            sink.failed(&error);
-                        }
+            if *typing_ok {
+                let outcome = if *is_final {
+                    typist.accept(text, *speech_final, sink)
+                } else {
+                    typist.speculate(text, sink)
+                };
+                if let Err(error) = outcome {
+                    // Typing itself is broken — an elevated window, say.
+                    // Receiving continues so the provider's own transcript
+                    // can still be kept.
+                    *typing_ok = false;
+                    if let Ok(mut shared) = shared.lock()
+                        && shared.error.is_none()
+                    {
+                        shared.error = Some(error.clone());
                     }
+                    sink.failed(&error);
                 }
+            }
+            if let Ok(mut shared) = shared.lock() {
+                shared.typed = typist.delivered().to_owned();
             }
             false
         }
@@ -548,25 +665,47 @@ fn fail(shared: &Mutex<Shared>, sink: &dyn TranscriptSink, message: String) {
 mod tests {
     use super::*;
 
-    fn sink() -> Arc<dyn TranscriptSink> {
-        Arc::new(RecordingSink::default())
-    }
+    use std::sync::atomic::{AtomicBool, Ordering};
 
+    /// Stands in for the target application: text lands, backspaces take it
+    /// away, and the test reads the result like a document.
     #[derive(Default)]
     struct RecordingSink {
-        committed: Mutex<Vec<String>>,
+        document: Mutex<String>,
         failures: Mutex<Vec<String>>,
+        /// Set to make retraction fail, as a moved caret would.
+        retract_fails: AtomicBool,
+    }
+
+    impl RecordingSink {
+        fn document(&self) -> String {
+            self.document.lock().unwrap().clone()
+        }
     }
 
     impl TranscriptSink for RecordingSink {
-        fn commit(&self, text: &str) -> Result<String, String> {
-            self.committed.lock().unwrap().push(text.to_owned());
-            Ok(text.to_owned())
+        fn type_text(&self, text: &str) -> Result<(), String> {
+            self.document.lock().unwrap().push_str(text);
+            Ok(())
+        }
+
+        fn retract(&self, chars: usize) -> Result<(), String> {
+            if self.retract_fails.load(Ordering::SeqCst) {
+                return Err("the caret is not where the words went".into());
+            }
+            let mut document = self.document.lock().unwrap();
+            let keep = document.chars().count().saturating_sub(chars);
+            *document = document.chars().take(keep).collect();
+            Ok(())
         }
 
         fn failed(&self, message: &str) {
             self.failures.lock().unwrap().push(message.to_owned());
         }
+    }
+
+    fn typist() -> (LiveTypist, Arc<RecordingSink>) {
+        (LiveTypist::new(Vec::new()), Arc::new(RecordingSink::default()))
     }
 
     #[test]
@@ -617,83 +756,108 @@ mod tests {
     }
 
     #[test]
-    fn chunk_finals_are_typed_once_each() {
-        let mut tracker = DeltaTracker::default();
+    fn partials_are_typed_as_they_arrive() {
+        let (mut typist, sink) = typist();
 
-        assert_eq!(tracker.accept("Hello", false), Some("Hello".into()));
-        assert_eq!(tracker.accept("world", false), Some(" world".into()));
+        typist.speculate("Dzień", sink.as_ref()).unwrap();
+        typist.speculate("Dzień dobry", sink.as_ref()).unwrap();
+
+        assert_eq!(sink.document(), "Dzień dobry");
     }
 
     #[test]
-    fn an_utterance_final_does_not_repeat_what_was_typed() {
-        let mut tracker = DeltaTracker::default();
-        tracker.accept("Hello", false);
-        tracker.accept("world", false);
+    fn a_changed_partial_is_taken_back_and_retyped() {
+        let (mut typist, sink) = typist();
 
-        // The server stitches the utterance and marks it final.
-        assert_eq!(tracker.accept("Hello world.", true), Some(".".into()));
-        // And the next utterance starts fresh.
-        assert_eq!(tracker.accept("How are you", true), Some(" How are you".into()));
+        typist.speculate("Send it to Anna", sink.as_ref()).unwrap();
+        typist.speculate("Send it to Ala", sink.as_ref()).unwrap();
+
+        assert_eq!(sink.document(), "Send it to Ala");
     }
 
     #[test]
-    fn cumulative_results_only_contribute_their_tail() {
-        let mut tracker = DeltaTracker::default();
+    fn a_locked_segment_replaces_its_speculation() {
+        let (mut typist, sink) = typist();
 
-        assert_eq!(tracker.accept("Hello", false), Some("Hello".into()));
-        assert_eq!(tracker.accept("Hello world", false), Some(" world".into()));
-        assert_eq!(tracker.accept("Hello world", false), None, "nothing new");
-        assert_eq!(tracker.accept("Hello world!", true), Some("!".into()));
+        typist.speculate("Send it to Anna", sink.as_ref()).unwrap();
+        typist.accept("Send it to Ala", false, sink.as_ref()).unwrap();
+
+        assert_eq!(sink.document(), "Send it to Ala");
     }
 
     #[test]
-    fn a_revised_utterance_only_types_what_was_missing() {
-        // Chunk finals lock the first pieces...
-        let mut tracker = DeltaTracker::default();
-        tracker.accept("send it to Ala", false);
+    fn the_finished_utterance_adds_only_its_tail() {
+        let (mut typist, sink) = typist();
 
-        // ...and the stitched utterance spells the name out.
-        assert_eq!(
-            tracker.accept("send it to Alan now", true),
-            Some("n now".into())
-        );
+        typist.speculate("Hello", sink.as_ref()).unwrap();
+        typist.accept("Hello", false, sink.as_ref()).unwrap();
+        typist.accept("Hello world.", true, sink.as_ref()).unwrap();
+
+        assert_eq!(sink.document(), "Hello world.");
     }
 
     #[test]
-    fn a_rewritten_utterance_does_not_repeat_the_typed_prefix() {
-        // The model replaced the name entirely. Typed text cannot be taken
-        // back, but the rest of the sentence still has to arrive.
-        let mut tracker = DeltaTracker::default();
-        tracker.accept("send it to Ala", false);
+    fn a_new_utterance_is_spaced_after_the_previous_one() {
+        let (mut typist, sink) = typist();
 
-        assert_eq!(tracker.accept("send it to Ola", true), Some(" Ola".into()));
+        typist.accept("Pierwsze zdanie.", true, sink.as_ref()).unwrap();
+        typist.accept("Drugie.", true, sink.as_ref()).unwrap();
+
+        assert_eq!(sink.document(), "Pierwsze zdanie. Drugie.");
     }
 
     #[test]
-    fn a_lone_utterance_is_typed_in_full() {
-        let mut tracker = DeltaTracker::default();
+    fn a_revised_utterance_corrects_what_it_can() {
+        let (mut typist, sink) = typist();
 
-        assert_eq!(
-            tracker.accept("Pierwsze zdanie.", true),
-            Some("Pierwsze zdanie.".into())
-        );
-        assert_eq!(tracker.accept("Drugie.", true), Some(" Drugie.".into()));
+        typist.speculate("Send it to Anna", sink.as_ref()).unwrap();
+        typist.accept("Send it to Ala", true, sink.as_ref()).unwrap();
+
+        assert_eq!(sink.document(), "Send it to Ala");
     }
 
     #[test]
-    fn punctuation_is_not_pushed_away_with_a_space() {
-        let mut tracker = DeltaTracker::default();
-        tracker.accept("Gotowe", true);
+    fn vocabulary_lands_with_the_locked_text_not_the_speculation() {
+        let vocabulary = vec![VocabularyEntry {
+            id: 1,
+            heard: "parakit".into(),
+            replacement: "Parakeet".into(),
+        }];
+        let sink = Arc::new(RecordingSink::default());
+        let mut typist = LiveTypist::new(vocabulary);
 
-        assert_eq!(tracker.accept(".", true), Some(".".into()));
+        typist.speculate("parakit", sink.as_ref()).unwrap();
+        assert_eq!(sink.document(), "parakit");
+        typist.accept("parakit", false, sink.as_ref()).unwrap();
+
+        assert_eq!(sink.document(), "Parakeet");
     }
 
     #[test]
-    fn empty_events_contribute_nothing() {
-        let mut tracker = DeltaTracker::default();
+    fn a_caret_that_moved_stops_the_corrections_rather_than_deleting() {
+        let (mut typist, sink) = typist();
+        typist.speculate("Hello", sink.as_ref()).unwrap();
+        typist.speculate("Hello wrld", sink.as_ref()).unwrap();
+        sink.retract_fails.store(true, Ordering::SeqCst);
 
-        assert_eq!(tracker.accept("   ", false), None);
-        assert_eq!(tracker.accept("", true), None);
+        // The model corrects itself, but the caret is no longer ours: the
+        // wrong word stands and nothing is removed.
+        typist.speculate("Hello world", sink.as_ref()).unwrap();
+        assert_eq!(sink.document(), "Hello wrld");
+
+        // And no further corrections are attempted for the rest of the take.
+        typist.accept("Hello world", false, sink.as_ref()).unwrap();
+        assert_eq!(sink.document(), "Hello wrld");
+    }
+
+    #[test]
+    fn empty_events_do_nothing() {
+        let (mut typist, sink) = typist();
+
+        typist.speculate("   ", sink.as_ref()).unwrap();
+        typist.accept("", true, sink.as_ref()).unwrap();
+
+        assert_eq!(sink.document(), "");
     }
 
     #[test]
@@ -709,6 +873,7 @@ mod tests {
         assert!(url.contains("model=grok-voice-transcribe-2.0"), "{url}");
         assert!(url.contains("encoding=pcm"), "{url}");
         assert!(url.contains("sample_rate=16000"), "{url}");
+        assert!(url.contains("interim_results=true"), "{url}");
         assert!(url.contains("language=pl"), "{url}");
         assert!(url.contains("keyterm=Parakeet"), "{url}");
         assert!(url.contains("keyterm=Loquara"), "{url}");
@@ -718,7 +883,7 @@ mod tests {
     fn a_custom_base_url_becomes_a_socket_address() {
         assert_eq!(
             xai_stream_url("http://127.0.0.1:8080/v1/stt", "m", "", &[]),
-            "ws://127.0.0.1:8080/v1/stt?model=m&sample_rate=16000&encoding=pcm"
+            "ws://127.0.0.1:8080/v1/stt?model=m&sample_rate=16000&encoding=pcm&interim_results=true"
         );
     }
 
@@ -833,6 +998,7 @@ mod tests {
         let config = Config {
             url: format!("ws://127.0.0.1:{port}/stt?model=test"),
             api_key: "test-key".into(),
+            vocabulary: Vec::new(),
         };
 
         for _ in 0..3 {
@@ -845,10 +1011,7 @@ mod tests {
             .unwrap();
 
         assert!(matches!(ending, Ending::Flushed));
-        assert_eq!(
-            recorder.committed.lock().unwrap().as_slice(),
-            ["Dzień dobry", ", jak się masz?"]
-        );
+        assert_eq!(recorder.document(), "Dzień dobry, jak się masz?");
         assert_eq!(
             shared.lock().unwrap().final_text,
             "Dzień dobry, jak się masz?"
