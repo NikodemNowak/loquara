@@ -18,6 +18,7 @@ function snapshotFor(state: DictationState, overlaySize: OverlaySize = "mini"): 
 function overlay(state: DictationState, overlaySize: OverlaySize = "mini") {
   let stateListener: ((snapshot: AppSnapshot) => void) | undefined;
   let levelListener: ((level: number) => void) | undefined;
+  let errorListener: ((message: string) => void) | undefined;
   const adapter = adapterStub({
     getAppSnapshot: async () => snapshotFor(state, overlaySize),
     onState: async (listener) => {
@@ -28,6 +29,10 @@ function overlay(state: DictationState, overlaySize: OverlaySize = "mini") {
       levelListener = listener;
       return () => undefined;
     },
+    onError: async (listener) => {
+      errorListener = listener;
+      return () => undefined;
+    },
   });
   const view = renderWithI18n(<RecorderOverlay adapter={adapter} />);
   return {
@@ -36,6 +41,7 @@ function overlay(state: DictationState, overlaySize: OverlaySize = "mini") {
     emitState: (next: DictationState, size: OverlaySize = overlaySize) =>
       stateListener?.(snapshotFor(next, size)),
     emitLevel: (level: number) => levelListener?.(level),
+    emitError: (message: string) => errorListener?.(message),
   };
 }
 
@@ -83,6 +89,20 @@ describe("nakładka dyktowania", () => {
     expect(screen.getByLabelText("Poziom mikrofonu")).toHaveAttribute("data-level", "0.80");
     vi.clearAllTimers();
     vi.useRealTimers();
+  });
+
+  test("błąd dostarczenia tekstu widać na pigułce, nie tylko w ukrytym oknie", async () => {
+    // Okno główne jest schowane, więc toast tam jest bezużyteczny: gdy
+    // wklejenie albo wpisywanie na żywo nie dotrze do okna, pigułka mówi to
+    // sama.
+    const view = overlay({ status: "recording", recordingId: "a", audioPath: "a.wav" });
+    await screen.findByLabelText("Poziom mikrofonu");
+
+    act(() => view.emitError("SendInput typed 0/2 events"));
+
+    const notice = await screen.findByRole("alert");
+    expect(notice).toHaveTextContent("Tekst nie trafił do aktywnego okna");
+    expect(notice).toHaveAttribute("title", "SendInput typed 0/2 events");
   });
 
   test("mini zostaje mała podczas nagrywania i nie otwiera karty pytania", async () => {

@@ -20,6 +20,8 @@ const LARGE_WIDTH = 288;
 const LARGE_HEIGHT = 88;
 /** How long the undo chip waits before the cancelled take stays discarded. */
 const UNDO_TIMEOUT_MS = 5_000;
+/** How long a delivery failure stays visible on the pill. */
+const DELIVERY_NOTICE_MS = 6_000;
 const WAVE_HEIGHT_MINI = 26;
 const WAVE_HEIGHT_LARGE = 36;
 const DRAG_IGNORE = "button, input, a, select, textarea, [role='button'], [role='menuitem']";
@@ -66,6 +68,10 @@ export function RecorderOverlay({ adapter }: { adapter: AppAdapter }) {
   const [level, setLevel] = useState(0);
   const [pending, setPending] = useState(false);
   const [actionError, setActionError] = useState("");
+  /** A transcript that could not reach the focused window, most often
+   *  because that window runs elevated. The main window's toast is no help
+   *  while it is hidden, so the pill says so itself. */
+  const [deliveryError, setDeliveryError] = useState("");
   const [initError, setInitError] = useState("");
   const [initAttempt, setInitAttempt] = useState(0);
   const [elapsed, setElapsed] = useState(0);
@@ -93,8 +99,9 @@ export function RecorderOverlay({ adapter }: { adapter: AppAdapter }) {
       disposeListeners();
       setInitError(normalizeError(error));
     };
+    const expectRegistrations = 3;
     const showWhenReady = () => {
-      if (active && !failed && snapshotReady && registrations === 2 && latestSnapshot) {
+      if (active && !failed && snapshotReady && registrations === expectRegistrations && latestSnapshot) {
         setSnapshot(latestSnapshot);
       }
     };
@@ -130,11 +137,30 @@ export function RecorderOverlay({ adapter }: { adapter: AppAdapter }) {
         }
       })
       .catch(fail);
+    void adapter.onError((message) => {
+      if (!active || failed) return;
+      setDeliveryError(message);
+    })
+      .then((unlisten) => {
+        if (!active || failed) unlisten();
+        else {
+          unlisteners.push(unlisten);
+          registrations += 1;
+          showWhenReady();
+        }
+      })
+      .catch(fail);
     return () => {
       active = false;
       disposeListeners();
     };
   }, [adapter, initAttempt]);
+
+  useEffect(() => {
+    if (!deliveryError) return;
+    const timer = window.setTimeout(() => setDeliveryError(""), DELIVERY_NOTICE_MS);
+    return () => window.clearTimeout(timer);
+  }, [deliveryError]);
 
   const status = snapshot?.dictation.status;
   statusRef.current = status;
@@ -446,7 +472,7 @@ export function RecorderOverlay({ adapter }: { adapter: AppAdapter }) {
 
   return (
     <main
-      className={`recorder-overlay recorder-overlay--${initError ? "init-error" : state?.status ?? "initializing"} recorder-overlay--${overlaySize}`}
+      className={`recorder-overlay recorder-overlay--${initError ? "init-error" : state?.status ?? "initializing"} recorder-overlay--${overlaySize}${deliveryError ? " recorder-overlay--delivery-error" : ""}`}
       aria-live="polite"
       data-tauri-drag-region
       onMouseDown={startDrag}
@@ -479,7 +505,13 @@ export function RecorderOverlay({ adapter }: { adapter: AppAdapter }) {
       )}
       <div className="overlay-pill">
         {body}
-        {actionError && <span className="overlay-note overlay-note--error" role="alert">{actionError}</span>}
+        {actionError ? (
+          <span className="overlay-note overlay-note--error" role="alert">{actionError}</span>
+        ) : deliveryError ? (
+          <span className="overlay-note overlay-note--error" role="alert" title={deliveryError}>
+            {t("overlay.notice.delivery")}
+          </span>
+        ) : null}
       </div>
     </main>
   );

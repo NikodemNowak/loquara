@@ -730,6 +730,9 @@ body.overlay-window #root { width: 100%; height: 100%; overflow: hidden; }
 
 .overlay-note { position: absolute; right: 6px; bottom: 1px; left: 6px; overflow: hidden; color: var(--pill-muted); font-size: 8px; line-height: 10px; text-align: center; text-overflow: ellipsis; white-space: nowrap; pointer-events: none; }
 .overlay-note--error { color: var(--pill-danger); }
+/* A transcript that never reached the window is easy to miss while looking
+ * at another application, so the pill itself turns red for a moment. */
+.recorder-overlay--delivery-error .overlay-pill { border-color: var(--pill-danger); box-shadow: 0 0 0 1px color-mix(in srgb, var(--pill-danger) 45%, transparent); }
 .recorder-overlay--large .overlay-note {
   white-space: normal;
   text-overflow: unset;

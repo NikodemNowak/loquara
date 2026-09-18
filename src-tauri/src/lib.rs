@@ -306,9 +306,9 @@ fn tray_labels(locale: &str) -> TrayLabels {
             submenu_microphones: "Mikrofon",
             toggle: "Start/Zatrzymaj nagrywanie",
             paste: "Wklej ostatni tekst",
-            mic_none: "(no microphones)",
-            open: "Open Loquara",
-            quit: "Quit",
+            mic_none: "(brak mikrofonów)",
+            open: "Otwórz Loquarę",
+            quit: "Zakończ",
         },
         _ => TrayLabels {
             submenu_microphones: "Microphone",

@@ -1277,29 +1277,44 @@ pub fn holds_discardable_audio(state: &DictationState) -> bool {
 /// Watches the idle worker and unloads the model from GPU/RAM after the
 /// configured keep-alive timeout, freeing memory for other apps. With the
 /// default setting (`0` = always) it never unloads.
+/// How often the watchdog lets retention have another pass, in 10s ticks.
+///
+/// Loquara lives in the tray for weeks, so a cleanup that only ran at startup
+/// would let "keep audio for a day" mean "keep it until the next reboot".
+const RETENTION_TICKS: u64 = 180;
+
 pub fn spawn_model_keep_alive_watchdog(state: &AppState) {
     let state = state.clone();
-    std::thread::spawn(move || loop {
-        let keep = state
-            .settings
-            .read()
-            .map(|settings| settings.model_keep_alive_secs)
-            .unwrap_or(0);
-        if keep > 0 {
-            let idle_elapsed = state
-                .engine_last_used
-                .lock()
-                .map(|last| last.elapsed())
-                .unwrap_or_default();
-            if idle_elapsed >= Duration::from_secs(keep) && state.engine.loaded_model().is_some() {
-                state.engine.unload();
-                state.model_warm.forget();
-                if let Ok(mut last) = state.engine_last_used.lock() {
-                    *last = Instant::now();
+    std::thread::spawn(move || {
+        let mut ticks: u64 = 0;
+        loop {
+            let keep = state
+                .settings
+                .read()
+                .map(|settings| settings.model_keep_alive_secs)
+                .unwrap_or(0);
+            if keep > 0 {
+                let idle_elapsed = state
+                    .engine_last_used
+                    .lock()
+                    .map(|last| last.elapsed())
+                    .unwrap_or_default();
+                if idle_elapsed >= Duration::from_secs(keep)
+                    && state.engine.loaded_model().is_some()
+                {
+                    state.engine.unload();
+                    state.model_warm.forget();
+                    if let Ok(mut last) = state.engine_last_used.lock() {
+                        *last = Instant::now();
+                    }
                 }
             }
+            if ticks.is_multiple_of(RETENTION_TICKS) {
+                let _ = cleanup_retention(&state);
+            }
+            ticks = ticks.wrapping_add(1);
+            std::thread::sleep(Duration::from_secs(10));
         }
-        std::thread::sleep(Duration::from_secs(10));
     });
 }
 
