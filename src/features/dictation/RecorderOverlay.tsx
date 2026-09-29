@@ -115,7 +115,7 @@ export function RecorderOverlay({ adapter }: { adapter: AppAdapter }) {
     void adapter.onState((next) => {
       stateEventSeen = true;
       latestSnapshot = next;
-      if (snapshotReady && registrations === 2 && active && !failed) setSnapshot(next);
+      if (snapshotReady && registrations === expectRegistrations && active && !failed) setSnapshot(next);
     }).then((unlisten) => {
       if (!active || failed) unlisten();
       else {

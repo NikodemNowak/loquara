@@ -91,6 +91,19 @@ describe("nakładka dyktowania", () => {
     vi.useRealTimers();
   });
 
+  test("pokazuje falę, gdy nagrywanie zaczyna się po montażu nakładki", async () => {
+    const view = overlay({ status: "idle" });
+    await act(async () => { await Promise.resolve(); });
+
+    act(() => {
+      view.emitState({ status: "recording", recordingId: "a", audioPath: "a.wav" });
+    });
+
+    expect(await screen.findByLabelText("Poziom mikrofonu")).toBeVisible();
+    act(() => view.emitLevel(0.8));
+    expect(screen.getByLabelText("Poziom mikrofonu")).toHaveAttribute("data-level", "0.80");
+  });
+
   test("błąd dostarczenia tekstu widać na pigułce, nie tylko w ukrytym oknie", async () => {
     // Okno główne jest schowane, więc toast tam jest bezużyteczny: gdy
     // wklejenie albo wpisywanie na żywo nie dotrze do okna, pigułka mówi to

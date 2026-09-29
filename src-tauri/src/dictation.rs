@@ -490,9 +490,21 @@ fn start_live_session(
 fn abandon_live_session(state: &AppState) {
     state.audio.set_stream_sink(None);
     if let Ok(mut slot) = state.streaming.lock()
-        && let Some(session) = slot.take()
+        && let Some(live) = slot.take()
     {
-        session.cancel();
+        live.cancellation.cancel();
+    }
+}
+
+struct ActiveLiveSession {
+    recording_id: String,
+    session: Option<streaming::Session>,
+    cancellation: streaming::Cancellation,
+}
+
+impl ActiveLiveSession {
+    fn new(recording_id: String, session: streaming::Session) -> Self {
+        Self { recording_id, cancellation: session.cancellation(), session: Some(session) }
     }
 }
 
@@ -701,7 +713,7 @@ pub struct AppState {
     /// does not paste into the target app.
     transcription_cancel: Arc<AtomicBool>,
     /// The live transcription in flight, if the take is streaming.
-    pub streaming: Arc<Mutex<Option<streaming::Session>>>,
+    streaming: Arc<Mutex<Option<ActiveLiveSession>>>,
 }
 
 /// Tracks model warm-up so transcription never loads the model twice and waits
@@ -1380,8 +1392,9 @@ pub fn start_recording_inner(app: &AppHandle, state: &AppState) -> Result<AppSna
     if let Some(session) = live
         && let Ok(mut slot) = state.streaming.lock()
     {
-        *slot = Some(session);
+        *slot = Some(ActiveLiveSession::new(started.id.clone(), session));
     }
+    state.transcription_cancel.store(false, Ordering::SeqCst);
     let audio_path = started.path.to_string_lossy().into_owned();
     let recording = Recording {
         id: started.id.clone(),
@@ -1467,11 +1480,20 @@ pub async fn stop_recording_inner(app: AppHandle, state: AppState) -> Result<App
     let completed_result = tauri::async_runtime::spawn_blocking(move || {
         let _lifecycle =
             lifecycle_guard(&blocking_state.lifecycle).map_err(|error| error.to_string())?;
-        stop_recording_committed(&blocking_state)
+        let completed = stop_recording_committed(&blocking_state)?;
+        // Detach this take while cancellation/new starts are still excluded.
+        // Delaying this until after releasing the lock could steal a new take.
+        blocking_state.audio.set_stream_sink(None);
+        let live = blocking_state.streaming.lock().ok().and_then(|mut slot| {
+            slot.as_mut()
+                .filter(|live| live.recording_id == completed.id)
+                .and_then(|live| live.session.take())
+        });
+        Ok::<_, String>((completed, live))
     })
     .await
     .map_err(|error| error.to_string())?;
-    let completed = match completed_result {
+    let (completed, live) = match completed_result {
         Ok(completed) => completed,
         Err(error) => {
             emit_state(&app, &state);
@@ -1481,14 +1503,6 @@ pub async fn stop_recording_inner(app: AppHandle, state: AppState) -> Result<App
     crate::sound::play_recording_stopped();
     emit_state(&app, &state);
     let snapshot = state.snapshot()?;
-    // The capture is over, so the live tap can close; the session drains what
-    // is left and the provider flushes its final words.
-    state.audio.set_stream_sink(None);
-    let live = state
-        .streaming
-        .lock()
-        .ok()
-        .and_then(|mut slot| slot.take());
     let background_app = app.clone();
     let background_state = state.clone();
     tauri::async_runtime::spawn(async move {
@@ -1502,6 +1516,7 @@ pub async fn stop_recording_inner(app: AppHandle, state: AppState) -> Result<App
                     background_state,
                     completed.id,
                     completed.path,
+                    false,
                 )
                 .await
             }
@@ -1523,6 +1538,14 @@ async fn finish_live_take(
     session: streaming::Session,
 ) {
     let outcome = session.finish(Duration::from_secs(8)).await;
+    if let Ok(mut slot) = state.streaming.lock()
+        && slot.as_ref().is_some_and(|live| live.recording_id == completed.id)
+    {
+        slot.take();
+    }
+    // A failed input call can still have inserted part of its batch. Never
+    // replay the whole transcript when delivery to the target is uncertain.
+    let suppress_delivery = !outcome.can_auto_deliver();
     let typed = outcome.typed.trim().to_owned();
     let final_text = outcome.final_text.trim().to_owned();
     let model = state
@@ -1549,8 +1572,8 @@ async fn finish_live_take(
         return;
     }
     if !final_text.is_empty() {
-        // Nothing could be typed — an elevated window, say — but the provider
-        // heard every word. Pasting beats transcribing the file again.
+        // The provider heard every word. Deliver only if no input may have
+        // reached the target already; otherwise retain the result in history.
         finish_success(
             &app,
             &state,
@@ -1562,12 +1585,12 @@ async fn finish_live_take(
                 language: None,
                 duration_ms: 0,
             },
-            false,
+            suppress_delivery,
         );
         return;
     }
     // Nothing usable came back; the recording goes the ordinary way.
-    transcribe_recording(app, state, completed.id, completed.path).await;
+    transcribe_recording(app, state, completed.id, completed.path, suppress_delivery).await;
 }
 
 fn stop_recording_committed(state: &AppState) -> Result<CompletedRecording, String> {
@@ -1672,8 +1695,18 @@ async fn transcribe_recording(
     state: AppState,
     recording_id: String,
     audio_path: PathBuf,
+    suppress_delivery: bool,
 ) {
-    state.transcription_cancel.store(false, Ordering::SeqCst);
+    // Cancellation can win between stopping capture and starting this worker.
+    // An old worker must neither reset a new take's flag nor deliver its text.
+    {
+        let Ok(_lifecycle) = lifecycle_guard(&state.lifecycle) else { return };
+        let Ok(machine) = state.machine.lock() else { return };
+        if !matches!(machine.snapshot(), DictationState::Processing { recording_id: active, .. } if active == recording_id) {
+            return;
+        }
+        state.transcription_cancel.store(false, Ordering::SeqCst);
+    }
     let settings = state
         .settings
         .read()
@@ -1717,7 +1750,7 @@ async fn transcribe_recording(
         }
     };
     match outcome {
-        Ok(Ok(result)) => finish_success(&app, &state, &recording_id, &audio_path, result, false),
+        Ok(Ok(result)) => finish_success(&app, &state, &recording_id, &audio_path, result, suppress_delivery),
         Ok(Err(error)) => finish_failure(&app, &state, &recording_id, error),
         Err(error) => finish_failure(&app, &state, &recording_id, error.to_string()),
     }
@@ -1784,7 +1817,7 @@ fn finish_success(
     recording_id: &str,
     audio_path: &Path,
     result: TranscriptionResult,
-    already_typed: bool,
+    suppress_delivery: bool,
 ) {
     if state.transcription_cancel.load(Ordering::SeqCst) {
         return;
@@ -1822,9 +1855,10 @@ fn finish_success(
         },
         || {
             emit_state(app, state);
-            if already_typed {
-                // The words were typed into the application while the user
-                // was speaking; pasting them again would double them.
+            if suppress_delivery {
+                // Live input already reached the application, or may have
+                // partially reached it before failing. Keep the full result
+                // in history without risking a duplicate automatic paste.
                 platform::hide_overlay(app);
                 return;
             }
@@ -2031,6 +2065,7 @@ fn cancel_processing(
     _audio_path: String,
 ) -> Result<AppSnapshot, String> {
     state.transcription_cancel.store(true, Ordering::SeqCst);
+    abandon_live_session(state);
     let _ = state.storage.update_status(
         &recording_id,
         RecordingStatus::Cancelled,
@@ -2211,7 +2246,7 @@ pub fn retry_transcription(
     let background_state = state.inner().clone();
     let background_app = app.clone();
     tauri::async_runtime::spawn(async move {
-        transcribe_recording(background_app, background_state, recording_id, audio_path).await;
+        transcribe_recording(background_app, background_state, recording_id, audio_path, false).await;
     });
     state.snapshot()
 }
@@ -3327,6 +3362,55 @@ mod tests {
             }
             assert!(!awaits_cancel_answer(&state));
         }
+    }
+
+    #[tokio::test]
+    async fn cancelling_processing_stops_a_live_session_already_moved_to_finish() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        struct SilentSink;
+        impl streaming::TranscriptSink for SilentSink {
+            fn type_text(&self, _: &str) -> Result<(), String> { Ok(()) }
+            fn retract(&self, _: usize) -> Result<(), String> { Ok(()) }
+            fn failed(&self, _: &str) {}
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let recordings = temp.path().join("recordings");
+        let state = AppState::new(
+            AudioRecorder::new(&recordings),
+            Storage::open_in_memory(&recordings).unwrap(),
+            temp.path().join("models"),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (flushing_tx, flushing_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            socket.send(Message::text(r#"{"type":"transcript.created"}"#)).await.unwrap();
+            while let Some(Ok(message)) = socket.next().await {
+                if matches!(message, Message::Text(ref text) if text.contains("audio.done")) {
+                    let _ = flushing_tx.send(());
+                    break;
+                }
+            }
+            let _ = socket.next().await;
+        });
+        let (_audio_tx, audio_rx) = tokio::sync::mpsc::channel(1);
+        let session = streaming::spawn(
+            streaming::Config { url: format!("ws://127.0.0.1:{port}"), api_key: "test".into(), vocabulary: vec![] },
+            Arc::new(SilentSink), audio_rx,
+        );
+        *state.streaming.lock().unwrap() = Some(ActiveLiveSession::new("old".into(), session));
+        let session = state.streaming.lock().unwrap().as_mut().unwrap().session.take().unwrap();
+        let finishing = tokio::spawn(session.finish(Duration::from_secs(10)));
+        tokio::time::timeout(Duration::from_secs(2), flushing_rx).await.unwrap().unwrap();
+        abandon_live_session(&state);
+        assert!(tokio::time::timeout(Duration::from_secs(1), finishing).await.is_ok(),
+            "processing cancellation must still own a way to stop the live writer");
+        assert!(state.streaming.lock().unwrap().is_none());
+        server.abort();
     }
 
     #[test]
