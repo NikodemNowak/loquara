@@ -3,265 +3,474 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Loquara — your voice, already written</title>
+    <title>Loquara — private dictation for Windows, macOS and Linux</title>
     <meta
       name="description"
-      content="Private, local dictation for Windows, macOS and Linux. Press a shortcut, speak, and your words appear in any app. No account, no cloud, no word limit."
+      content="Press a shortcut, speak, and the words land at your caret. Loquara transcribes locally on Windows, macOS and Linux. No account, no cloud, no word limit."
     />
-    <meta name="theme-color" content="#08080a" />
+    <meta name="theme-color" content="#e6e9e7" />
     <meta property="og:title" content="Loquara — your voice, already written" />
     <meta
       property="og:description"
-      content="Private, local dictation for Windows, macOS and Linux. One shortcut. Your words, at the caret."
+      content="Private dictation for Windows, macOS and Linux. One shortcut, a local speech model, and your words at the caret."
     />
     <meta property="og:type" content="website" />
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
-    <link rel="preload" href="/fonts/InterVariable.woff2" as="font" type="font/woff2" crossorigin />
+    <link
+      rel="preload"
+      href="/fonts/Archivo-Variable.woff2"
+      as="font"
+      type="font/woff2"
+      crossorigin
+    />
+    <link
+      rel="preload"
+      href="/fonts/SourceSerif4-Variable.woff2"
+      as="font"
+      type="font/woff2"
+      crossorigin
+    />
+    <link rel="preload" href="/spectrogram.png" as="image" />
+    <link rel="stylesheet" href="/src/style.css" />
+    <noscript>
+      <style>
+        .session__controls,
+        .pill__wave {
+          display: none;
+        }
+      </style>
+    </noscript>
     <script type="module" src="/src/main.ts"></script>
   </head>
   <body>
-    <svg class="mark-defs" width="0" height="0" aria-hidden="true" focusable="false">
-      <defs>
-        <g id="loquara-mark">
-          <path d="M5 17.5C5 9.8 9.5 5 17 5H27V11H17C13.4 11 11 13.3 11 17.5V21H5Z" />
-          <path opacity=".72" d="M27 14.5C27 22.2 22.5 27 15 27H5V21H15C18.6 21 21 18.7 21 14.5V11H27Z" />
-        </g>
-      </defs>
-    </svg>
-
     <a class="skip" href="#main">Skip to content</a>
     <div class="grain" aria-hidden="true"></div>
 
-    <header class="site-header">
-      <a class="brand" href="#top" aria-label="Loquara home">
-        <svg class="mark" viewBox="0 0 32 32" aria-hidden="true"><use href="#loquara-mark" /></svg>
-        <span>Loquara</span>
-      </a>
-      <nav class="site-nav" aria-label="Primary">
-        <a href="#product">Interface</a>
-        <a href="#why">Why</a>
-        <a href="#download">Download</a>
-      </nav>
-      <a class="header-cta" href="#download">Get the app</a>
+    <header class="topbar">
+      <div class="topbar__inner">
+        <a class="brand" href="#top" aria-label="Loquara home">
+          <svg class="mark" viewBox="0 0 32 32" aria-hidden="true">
+            <path d="M5 17.5C5 9.8 9.5 5 17 5H27V11H17C13.4 11 11 13.3 11 17.5V21H5Z" />
+            <path opacity=".72" d="M27 14.5C27 22.2 22.5 27 15 27H5V21H15C18.6 21 21 18.7 21 14.5V11H27Z" />
+          </svg>
+          <span>Loquara</span>
+        </a>
+
+        <nav class="nav" aria-label="Primary">
+          <a href="#instrument">Instrument</a>
+          <a href="#why">Why local</a>
+          <a href="#download">Download</a>
+          <a href="https://github.com/NikodemNowak/loquara" target="_blank" rel="noreferrer">GitHub</a>
+        </nav>
+
+        <a
+          class="topbar__download"
+          data-download-primary
+          href="https://github.com/NikodemNowak/loquara/releases/download/v0.10.0/Loquara_0.10.0_x64-setup.exe"
+        >
+          <svg viewBox="0 0 16 16" aria-hidden="true">
+            <path d="M8 2v7.2m0 0 2.8-2.8M8 9.2 5.2 6.4M3 11.5v1.5h10v-1.5" />
+          </svg>
+          <span data-download-label>Download for Windows</span>
+        </a>
+      </div>
     </header>
 
     <main id="main">
       <section class="hero" id="top">
-        <canvas id="ribbon" aria-hidden="true"></canvas>
-        <div class="hero-glow" aria-hidden="true"></div>
-        <div class="hero-inner">
-          <p class="eyebrow"><span class="eyebrow-dot"></span> Private dictation · Windows · macOS · Linux</p>
-          <h1>Your voice,<br /><em>already</em> written.</h1>
-          <p class="lede">
-            Press a shortcut. Speak. Your words appear in whatever app you're in —
-            transcribed on your machine, not someone else's server.
-          </p>
-          <div class="hero-actions">
-            <a class="button button--primary" href="#download">Download Loquara</a>
-            <a
-              class="button button--ghost"
-              href="https://github.com/NikodemNowak/loquara"
-              target="_blank"
-              rel="noreferrer"
-            >
-              Read the source
-            </a>
+        <div class="wrap hero__grid">
+          <h1 class="hero__title">
+            Your voice,<br />already written<span class="hero__period" aria-hidden="true"></span>
+          </h1>
+
+          <div class="hero__copy">
+            <p class="hero__lede">
+              Private dictation for Windows, macOS and Linux. Press a shortcut,
+              speak, and the words land at your caret. Transcribed on this
+              machine, not someone else's.
+            </p>
+
+            <div class="hero__actions">
+              <a
+                class="button button--primary"
+                data-download-primary
+                href="https://github.com/NikodemNowak/loquara/releases/download/v0.10.0/Loquara_0.10.0_x64-setup.exe"
+              >
+                <svg viewBox="0 0 16 16" aria-hidden="true">
+                  <path d="M8 2v7.2m0 0 2.8-2.8M8 9.2 5.2 6.4M3 11.5v1.5h10v-1.5" />
+                </svg>
+                <span data-download-label>Download for Windows</span>
+              </a>
+              <a class="text-link" href="#download">All downloads</a>
+            </div>
+
+            <p class="hero__meta" data-download-meta>
+              Version 0.10.0. Windows installer, 17.6 MB.
+            </p>
+
+            <p class="hero__platforms">
+              <span>Also available</span>
+              <a
+                href="https://github.com/NikodemNowak/loquara/releases/download/v0.10.0/Loquara_0.10.0_universal.dmg"
+                download
+              >macOS .dmg</a>
+              <a
+                href="https://github.com/NikodemNowak/loquara/releases/download/v0.10.0/Loquara_0.10.0_amd64.deb"
+                download
+              >Linux .deb</a>
+            </p>
+
+            <p class="hero__shortcut">
+              <span>Start with</span>
+              <kbd>Ctrl</kbd><kbd>Space</kbd>
+            </p>
           </div>
-          <p class="fineprint">Free · MIT · No account · 25 languages</p>
-        </div>
-        <a class="scroll-cue" href="#product" aria-label="See the interface"><span></span></a>
-      </section>
 
-      <section class="statement reveal" aria-labelledby="statement-title">
-        <p class="section-kicker">The whole idea</p>
-        <p class="statement-text" id="statement-title">
-          Dictation should feel like <em>thinking out loud.</em> Not another tab,
-          another subscription, another upload.
-        </p>
-      </section>
+          <div class="hero__proof">
+            <figure class="session" aria-labelledby="session-title">
+              <div class="session__head">
+                <span class="session__title" id="session-title">Sample session</span>
+                <span class="session__local"><i></i> Local</span>
+                <span class="session__time" data-time>0:00 / 0:10</span>
+              </div>
 
-      <section class="product reveal" id="product" aria-labelledby="product-title">
-        <div class="section-head">
-          <div>
-            <p class="section-kicker">The interface</p>
-            <h2 id="product-title">A pill, not a panel.</h2>
-          </div>
-          <p class="section-lede">
-            One shortcut. One small floating recorder. Your words land at the caret,
-            in the app you already use.
-          </p>
-        </div>
-
-        <figure class="app-stage">
-          <div class="app-frame" aria-hidden="true">
-            <div class="app-body">
-              <aside class="app-sidebar">
-                <div class="app-brand">
-                  <svg class="mark" viewBox="0 0 32 32"><use href="#loquara-mark" /></svg>
-                  <span>Loquara</span>
+              <div class="session__plot">
+                <div class="session__scale" aria-hidden="true">
+                  <span>8k</span>
+                  <span>4k</span>
+                  <span>80</span>
                 </div>
-                <nav class="app-nav">
-                  <span class="app-nav-item is-active">Dictate</span>
-                  <span class="app-nav-item">History</span>
-                  <span class="app-nav-item">Vocabulary</span>
-                  <span class="app-nav-item">Modes</span>
-                </nav>
-                <div class="app-sidebar-foot">
-                  <span>Settings</span>
-                  <span class="app-version">v0.10</span>
-                </div>
-              </aside>
-              <div class="app-main">
-                <header class="app-main-head">
-                  <h3>Dictate</h3>
-                  <span class="app-status"><i></i> Ready</span>
-                </header>
-                <div class="app-transcript">
-                  <p>
-                    Let's ship it on Friday. I'll take the macOS build,
-                    <span class="app-caret"></span>
-                  </p>
-                </div>
-                <div class="app-bottom">
-                  <div class="app-wave" data-wave="56"></div>
-                  <div class="app-meta">
-                    <span>Parakeet TDT</span>
-                    <span>On device</span>
-                    <span>25 languages</span>
-                  </div>
+                <div class="session__spectrogram">
+                  <img
+                    src="/spectrogram.png"
+                    width="2200"
+                    height="520"
+                    alt="Spectrogram of a short spoken sample"
+                  />
+                  <span class="session__played" data-played></span>
+                  <span class="session__playhead" data-playhead></span>
                 </div>
               </div>
+
+              <div class="session__ruler" aria-hidden="true">
+                <span>0:00</span>
+                <span>0:02</span>
+                <span>0:04</span>
+                <span>0:06</span>
+                <span>0:08</span>
+                <span>0:10</span>
+              </div>
+
+              <ol class="transcript">
+                <li>
+                  <button class="transcript__line" type="button" data-segment="0">
+                    <span class="transcript__time">0:00</span>
+                    <span class="transcript__text">Loquara writes what you say.</span>
+                  </button>
+                </li>
+                <li>
+                  <button class="transcript__line" type="button" data-segment="1">
+                    <span class="transcript__time">0:03</span>
+                    <span class="transcript__text">Nothing leaves this machine.</span>
+                  </button>
+                </li>
+                <li>
+                  <button class="transcript__line" type="button" data-segment="2">
+                    <span class="transcript__time">0:06</span>
+                    <span class="transcript__text">One shortcut, anywhere you type.</span>
+                  </button>
+                </li>
+              </ol>
+
+              <div class="session__controls">
+                <button class="play" type="button" data-play aria-pressed="false">
+                  <span class="play__icon play__icon--play" aria-hidden="true">
+                    <svg viewBox="0 0 16 16"><path d="M5 3.2 12.2 8 5 12.8Z" /></svg>
+                  </span>
+                  <span class="play__icon play__icon--pause" aria-hidden="true">
+                    <svg viewBox="0 0 16 16"><path d="M4.2 3.2h2.6v9.6H4.2zM9.2 3.2h2.6v9.6H9.2z" /></svg>
+                  </span>
+                  <span data-play-label>Play sample</span>
+                </button>
+
+                <input
+                  class="seek"
+                  data-seek
+                  type="range"
+                  min="0"
+                  max="10.237"
+                  step="0.01"
+                  value="0"
+                  aria-label="Seek the sample transcript"
+                />
+
+                <span class="session__hint">Synthesized voice</span>
+              </div>
+
+              <figcaption class="sr-only">
+                A sample dictation: a spectrogram of the spoken words and the
+                transcript produced from it.
+              </figcaption>
+              <audio data-audio src="/demo.wav" preload="auto"></audio>
+            </figure>
+
+            <div class="pill" aria-hidden="true">
+              <span class="pill__dot"></span>
+              <span class="pill__wave" data-wave="9"></span>
+              <span class="pill__time">0:10</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="instrument" id="instrument">
+        <div class="wrap">
+          <div class="section-head">
+            <h2>The instrument.</h2>
+            <p>
+              A speech-to-text engine that lives on your computer. One model
+              download, then no network in the loop.
+            </p>
+          </div>
+
+          <dl class="spec">
+            <div><dt>Speech engine</dt><dd>NVIDIA Parakeet TDT 0.6B v3</dd></div>
+            <div><dt>Acceleration</dt><dd>DirectML on Windows; CPU on macOS and Linux</dd></div>
+            <div><dt>Languages</dt><dd>25</dd></div>
+            <div><dt>Model</dt><dd>670 MB, downloaded once</dd></div>
+            <div><dt>Audio</dt><dd>16 kHz mono for recognition, local by default</dd></div>
+            <div><dt>Cloud</dt><dd>Optional, your own key and provider</dd></div>
+            <div><dt>Platforms</dt><dd>Windows, macOS, Linux</dd></div>
+            <div><dt>License</dt><dd>MIT. The source is yours.</dd></div>
+          </dl>
+        </div>
+      </section>
+
+      <section class="why" id="why">
+        <div class="wrap">
+          <div class="why__head">
+            <h2>The words stay here.</h2>
+            <p>
+              Loquara runs the speech model on your computer. A dictation never
+              leaves the machine, and there is no account to create or word
+              count to watch.
+            </p>
+          </div>
+
+          <div class="why__grid">
+            <article class="why__item">
+              <h3>Private by default</h3>
+              <p>Audio, text, and history stay on this computer. The engine runs locally, and the app never asks you to sign in.</p>
+            </article>
+            <article class="why__item">
+              <h3>One download, then yours</h3>
+              <p>One model download buys the whole app. It does not count minutes, words, or requests.</p>
+            </article>
+            <article class="why__item">
+              <h3>Yours to change</h3>
+              <p>MIT source. Change the shortcut, the vocabulary, the modes, or the code itself.</p>
+            </article>
+            <article class="why__item">
+              <h3>Already fast</h3>
+              <p>The model is local, so the only wait is the time it takes to speak.</p>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section class="recorder" id="recorder">
+        <div class="wrap recorder__grid">
+          <div class="recorder__copy">
+            <h2>One shortcut.<br />A 136 px recorder.</h2>
+            <p>
+              Hold to talk or tap to toggle. The recorder floats over any app,
+              then disappears when the words land. Terminals, IDEs, browsers,
+              chat, and every text field work the same way.
+            </p>
+            <div class="keys">
+              <kbd>Ctrl</kbd><kbd>Space</kbd>
+              <span>or your own shortcut</span>
+            </div>
+            <p class="recorder__note">Ctrl + Shift + Space on macOS. Push-to-talk is one setting away.</p>
+          </div>
+
+          <figure class="recorder__object">
+            <div class="recorder__pill-wrap">
+              <div class="pill pill--large" aria-hidden="true">
+                <span class="pill__dot"></span>
+                <span class="pill__wave" data-wave="13"></span>
+                <span class="pill__time">0:04</span>
+              </div>
+              <span class="dimension dimension--w" aria-hidden="true">136 px</span>
+              <span class="dimension dimension--h" aria-hidden="true">36 px</span>
+            </div>
+            <figcaption class="recorder__caption">
+              Floating recorder. Actual size 136 × 36 px.
+            </figcaption>
+          </figure>
+        </div>
+      </section>
+
+      <section class="download" id="download">
+        <div class="wrap">
+          <div class="download__head">
+            <h2>Download Loquara.</h2>
+            <p>
+              Version 0.10.0. Free and MIT. Windows and Linux builds are x64;
+              macOS is universal. The speech model downloads once, inside the app.
+            </p>
+          </div>
+
+          <div class="download__cta">
+            <a
+              class="button button--primary"
+              data-download-primary
+              href="https://github.com/NikodemNowak/loquara/releases/download/v0.10.0/Loquara_0.10.0_x64-setup.exe"
+            >
+              <svg viewBox="0 0 16 16" aria-hidden="true">
+                <path d="M8 2v7.2m0 0 2.8-2.8M8 9.2 5.2 6.4M3 11.5v1.5h10v-1.5" />
+              </svg>
+              <span data-download-label>Download for Windows</span>
+            </a>
+            <p class="download__meta" data-download-meta="short">
+              Windows installer, 17.6 MB.
+            </p>
+          </div>
+
+          <div class="download__table">
+            <div class="dl" data-os="windows">
+              <div class="dl__os">
+                <span class="dl__dot" aria-hidden="true"></span>
+                <span>Windows</span>
+                <span class="dl__current">This machine</span>
+              </div>
+              <div class="dl__files">
+                <a
+                  class="dl__file"
+                  href="https://github.com/NikodemNowak/loquara/releases/download/v0.10.0/Loquara_0.10.0_x64-setup.exe"
+                  download
+                >
+                  <span class="dl__file-name">Windows installer</span>
+                  <span class="dl__file-meta">Loquara_0.10.0_x64-setup.exe, 17.6 MB</span>
+                </a>
+                <a
+                  class="dl__file"
+                  href="https://github.com/NikodemNowak/loquara/releases/download/v0.10.0/Loquara_0.10.0_x64_en-US.msi"
+                  download
+                >
+                  <span class="dl__file-name">MSI package</span>
+                  <span class="dl__file-meta">Loquara_0.10.0_x64_en-US.msi, 22.3 MB</span>
+                </a>
+              </div>
+              <a
+                class="dl__action"
+                href="https://github.com/NikodemNowak/loquara/releases/download/v0.10.0/Loquara_0.10.0_x64-setup.exe"
+                download
+              >
+                Download
+                <svg viewBox="0 0 16 16" aria-hidden="true">
+                  <path d="M8 2v7.2m0 0 2.8-2.8M8 9.2 5.2 6.4M3 11.5v1.5h10v-1.5" />
+                </svg>
+              </a>
+            </div>
+
+            <div class="dl" data-os="macos">
+              <div class="dl__os">
+                <span class="dl__dot" aria-hidden="true"></span>
+                <span>macOS</span>
+                <span class="dl__current">This machine</span>
+              </div>
+              <div class="dl__files">
+                <a
+                  class="dl__file"
+                  href="https://github.com/NikodemNowak/loquara/releases/download/v0.10.0/Loquara_0.10.0_universal.dmg"
+                  download
+                >
+                  <span class="dl__file-name">Disk image, Apple silicon and Intel</span>
+                  <span class="dl__file-meta">Loquara_0.10.0_universal.dmg, 44.0 MB</span>
+                </a>
+              </div>
+              <a
+                class="dl__action"
+                href="https://github.com/NikodemNowak/loquara/releases/download/v0.10.0/Loquara_0.10.0_universal.dmg"
+                download
+              >
+                Download
+                <svg viewBox="0 0 16 16" aria-hidden="true">
+                  <path d="M8 2v7.2m0 0 2.8-2.8M8 9.2 5.2 6.4M3 11.5v1.5h10v-1.5" />
+                </svg>
+              </a>
+            </div>
+
+            <div class="dl" data-os="linux">
+              <div class="dl__os">
+                <span class="dl__dot" aria-hidden="true"></span>
+                <span>Linux</span>
+                <span class="dl__current">This machine</span>
+              </div>
+              <div class="dl__files">
+                <a
+                  class="dl__file"
+                  href="https://github.com/NikodemNowak/loquara/releases/download/v0.10.0/Loquara_0.10.0_amd64.deb"
+                  download
+                >
+                  <span class="dl__file-name">Debian package</span>
+                  <span class="dl__file-meta">Loquara_0.10.0_amd64.deb, 22.1 MB</span>
+                </a>
+                <a
+                  class="dl__file"
+                  href="https://github.com/NikodemNowak/loquara/releases/download/v0.10.0/Loquara_0.10.0_amd64.AppImage"
+                  download
+                >
+                  <span class="dl__file-name">AppImage</span>
+                  <span class="dl__file-meta">Loquara_0.10.0_amd64.AppImage, 93.0 MB</span>
+                </a>
+              </div>
+              <a
+                class="dl__action"
+                href="https://github.com/NikodemNowak/loquara/releases/download/v0.10.0/Loquara_0.10.0_amd64.deb"
+                download
+              >
+                Download
+                <svg viewBox="0 0 16 16" aria-hidden="true">
+                  <path d="M8 2v7.2m0 0 2.8-2.8M8 9.2 5.2 6.4M3 11.5v1.5h10v-1.5" />
+                </svg>
+              </a>
             </div>
           </div>
 
-          <div class="app-pill" aria-hidden="true">
-            <span class="pill-dot"></span>
-            <span class="pill-wave" data-wave="9"></span>
-            <span class="pill-time">0:04</span>
-          </div>
-          <figcaption class="sr-only">
-            Loquara's main window: a dark transcript view and a compact floating
-            recorder pill.
-          </figcaption>
-        </figure>
-
-        <ul class="micro-points">
-          <li>
-            <strong>Stays out of the way.</strong>
-            A 136 px recorder, not a window to manage.
-          </li>
-          <li>
-            <strong>Lands where you type.</strong>
-            Clipboard, terminals and SSH included.
-          </li>
-          <li>
-            <strong>Yours to shape.</strong>
-            Custom vocabulary, modes and shortcuts.
-          </li>
-        </ul>
-      </section>
-
-      <section class="why" id="why" aria-labelledby="why-title">
-        <div class="section-head">
-          <div>
-            <p class="section-kicker">Why Loquara</p>
-            <h2 id="why-title">Quietly better.</h2>
-          </div>
-          <p class="section-lede">
-            No account to create, no audio to upload, no word count to watch.
+          <p class="download__all">
+            <a href="https://github.com/NikodemNowak/loquara/releases">All releases on GitHub</a>
+          </p>
+          <p class="download__requirements">
+            Windows 10 or newer, macOS 11 or newer, Linux X11 or XWayland.
+            Automatic paste on Linux needs xdotool.
           </p>
         </div>
-
-        <div class="why-grid">
-          <article class="why-card reveal">
-            <span class="why-index">01</span>
-            <h3>It stays here.</h3>
-            <p>
-              Audio, transcripts and history never leave your machine. No telemetry,
-              no “improve the product”, no quiet upload.
-            </p>
-          </article>
-          <article class="why-card reveal">
-            <span class="why-index">02</span>
-            <h3>It keeps up.</h3>
-            <p>
-              Parakeet TDT runs on your GPU or CPU. The model is already local, so the
-              only wait is the time it takes to speak.
-            </p>
-          </article>
-          <article class="why-card reveal">
-            <span class="why-index">03</span>
-            <h3>It's yours.</h3>
-            <p>
-              MIT-licensed and built to be changed. New mode, new shortcut, new
-              language — edit it, fork it, keep it.
-            </p>
-          </article>
-        </div>
       </section>
+    </main>
 
-      <section class="numbers reveal" aria-label="Loquara at a glance">
-        <div><span class="number">25</span><span class="number-label">languages</span></div>
-        <div><span class="number">100%</span><span class="number-label">local by default</span></div>
-        <div><span class="number">1</span><span class="number-label">shortcut</span></div>
-        <div><span class="number">∞</span><span class="number-label">words</span></div>
-      </section>
-
-      <section class="download reveal" id="download" aria-labelledby="download-title">
-        <div class="download-glow" aria-hidden="true"></div>
-        <p class="section-kicker">Download</p>
-        <h2 id="download-title">Take your voice<br />with you.</h2>
-        <p class="download-lede">
-          Windows, macOS and Linux. The app is free; the speech model downloads once,
-          inside the app.
-        </p>
-        <div class="os-actions">
-          <a
-            class="os"
-            data-os="windows"
-            href="https://github.com/NikodemNowak/loquara/releases"
-            target="_blank"
-            rel="noreferrer"
-          >
-            <span>Windows</span><small>10 / 11</small>
-          </a>
-          <a
-            class="os"
-            data-os="macos"
-            href="https://github.com/NikodemNowak/loquara/releases"
-            target="_blank"
-            rel="noreferrer"
-          >
-            <span>macOS</span><small>Apple silicon &amp; Intel</small>
-          </a>
-          <a
-            class="os"
-            data-os="linux"
-            href="https://github.com/NikodemNowak/loquara/releases"
-            target="_blank"
-            rel="noreferrer"
-          >
-            <span>Linux</span><small>.deb / AppImage</small>
-          </a>
+    <footer class="footer">
+      <div class="wrap footer__inner">
+        <div class="footer__brand">
+          <svg class="mark" viewBox="0 0 32 32" aria-hidden="true">
+            <path d="M5 17.5C5 9.8 9.5 5 17 5H27V11H17C13.4 11 11 13.3 11 17.5V21H5Z" />
+            <path opacity=".72" d="M27 14.5C27 22.2 22.5 27 15 27H5V21H15C18.6 21 21 18.7 21 14.5V11H27Z" />
+          </svg>
+          <div>
+            <span>Loquara</span>
+            <p>Local dictation for people who write.</p>
+          </div>
         </div>
-        <p class="fineprint">
-          Windows 10+ · macOS 11+ · Linux X11 / XWayland · ~670 MB local model
-        </p>
-      </section>
 
-      <footer class="site-footer">
-        <div class="footer-brand">
-          <svg class="mark" viewBox="0 0 32 32" aria-hidden="true"><use href="#loquara-mark" /></svg>
-          <span>Loquara</span>
-          <small>Speak. It's already written.</small>
-        </div>
-        <nav class="footer-links" aria-label="Footer">
+        <nav class="footer__links" aria-label="Footer">
           <a href="https://github.com/NikodemNowak/loquara" target="_blank" rel="noreferrer">GitHub</a>
           <a href="https://github.com/NikodemNowak/loquara/releases" target="_blank" rel="noreferrer">Releases</a>
-          <a href="mailto:hello@nikodemnowak.pl">Contact</a>
+          <a href="mailto:hello@nikodemnowak.pl">Email</a>
         </nav>
-        <p>MIT © <span data-year>2026</span> Nikodem Nowak</p>
-      </footer>
-    </main>
+
+        <p class="footer__legal">MIT, 2026 Nikodem Nowak.</p>
+      </div>
+    </footer>
   </body>
 </html>
