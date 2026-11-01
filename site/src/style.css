@@ -269,11 +269,15 @@ html[lang="pl"] .bi-en {
 h1 {
   margin: 0;
   font-family: var(--font);
-  font-size: clamp(4rem, 13vw, 13rem);
-  font-weight: 800;
-  line-height: 0.82;
-  letter-spacing: -0.075em;
+  font-size: clamp(2.6rem, 6vw, 6rem);
+  font-weight: 780;
+  line-height: 0.92;
+  letter-spacing: -0.06em;
   color: var(--fg);
+}
+
+.headline__second {
+  display: inline;
 }
 
 .hero__sub {
@@ -1369,10 +1373,6 @@ html[lang="pl"] .app-date .bi-pl {
     padding-top: clamp(48px, 10vh, 88px);
   }
 
-  h1 {
-    font-size: clamp(3.3rem, 13.5vw, 6rem);
-  }
-
   .hero__sub {
     max-width: 32ch;
   }
@@ -1409,15 +1409,17 @@ html[lang="pl"] .app-date .bi-pl {
   }
 }
 
+@media (max-width: 600px) {
+  .headline__second {
+    display: block;
+  }
+}
+
 @media (max-width: 480px) {
   .button {
     height: 36px;
     padding: 0 10px;
     font-size: 11.5px;
-  }
-
-  h1 {
-    font-size: clamp(2.9rem, 13.5vw, 4.4rem);
   }
 
   .hero__sub {
