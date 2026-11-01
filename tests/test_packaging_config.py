@@ -116,6 +116,9 @@ class PackagingConfigTests(unittest.TestCase):
         self.assertIn("NSMicrophoneUsageDescription", info)
         self.assertIn("com.apple.security.device.audio-input", entitlements)
         self.assertIn("com.apple.security.automation.apple-events", entitlements)
+        self.assertIn(
+            "com.apple.security.cs.disable-library-validation", entitlements
+        )
 
 
 if __name__ == "__main__":

@@ -6,5 +6,10 @@
   <true/>
   <key>com.apple.security.automation.apple-events</key>
   <true/>
+  <!-- The speech engine ships as third-party dylibs signed ad hoc rather than
+       with an Apple Developer ID; hardened runtime would otherwise refuse to
+       load them. -->
+  <key>com.apple.security.cs.disable-library-validation</key>
+  <true/>
 </dict>
 </plist>

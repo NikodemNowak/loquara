@@ -5292,7 +5292,13 @@ mod buffered_delivery_tests {
 
     #[test]
     fn ptt_repressed_main_key_waits_and_focus_time_cancel_or_repress_never_injects() {
-        for action in ["wait_repress", "focus_repress", "focus_cancel"] {
+        // Focus restoration, and therefore a cancel or repress that happens
+        // while the target window is being restored, is Windows-only.
+        #[cfg(windows)]
+        let actions = ["wait_repress", "focus_repress", "focus_cancel"];
+        #[cfg(not(windows))]
+        let actions = ["wait_repress"];
+        for action in actions {
             let (_dir, state, mut take) = fixture();
             let gesture = state.hold.lock().unwrap().press(true).unwrap();
             state.hold.lock().unwrap().sample(&gesture, false, false, false);
