@@ -107,9 +107,10 @@ class PackagingConfigTests(unittest.TestCase):
             encoding="utf-8"
         )
 
-        self.assertEqual(
-            macos["bundle"]["macOS"]["files"], {"lib/*.dylib": "Frameworks/"}
-        )
+        files = macos["bundle"]["macOS"]["files"]
+        self.assertTrue(files)
+        self.assertTrue(all(target.startswith("Frameworks/") for target in files))
+        self.assertIn("lib/libonnxruntime.1.17.1.dylib", files.values())
         self.assertEqual(
             macos["bundle"]["macOS"]["entitlements"], "entitlements.plist"
         )

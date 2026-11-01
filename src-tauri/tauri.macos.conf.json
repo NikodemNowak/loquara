@@ -7,7 +7,10 @@
       "signingIdentity": "-",
       "entitlements": "entitlements.plist",
       "files": {
-        "Frameworks/": "lib/*.dylib"
+        "Frameworks/libsherpa-onnx-c-api.dylib": "lib/libsherpa-onnx-c-api.dylib",
+        "Frameworks/libsherpa-onnx-cxx-api.dylib": "lib/libsherpa-onnx-cxx-api.dylib",
+        "Frameworks/libonnxruntime.1.17.1.dylib": "lib/libonnxruntime.1.17.1.dylib",
+        "Frameworks/libonnxruntime.dylib": "lib/libonnxruntime.dylib"
       }
     }
   }
