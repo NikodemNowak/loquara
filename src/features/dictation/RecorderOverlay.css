@@ -1,0 +1,36 @@
+body.overlay-window { width:100%; height:100%; overflow:hidden; background:transparent; }
+body.overlay-window #root { width:100%; height:100%; overflow:hidden; }
+.recorder-overlay { display:flex; align-items:center; justify-content:center; width:100%; height:100%; color:var(--pill-text); font:12px/1.2 var(--font-ui, "Inter", sans-serif); user-select:none; cursor:grab; }
+.recorder-overlay:active { cursor:grabbing; }
+.overlay-pill { box-sizing:border-box; flex:0 0 auto; width:136px; height:32px; overflow:hidden; background:var(--pill-bg); border:1px solid var(--pill-border); border-radius:16px; transition:width 380ms cubic-bezier(.16,1,.3,1); }
+.overlay-pill--recording { width:104px; }
+.overlay-pill--solo { width:56px; }
+.overlay-main { position:relative; display:flex; align-items:center; justify-content:center; box-sizing:border-box; width:100%; min-width:0; height:100%; padding:0 10px; gap:7px; }
+.overlay-main > svg,.overlay-reading > svg { flex-shrink:0; }
+.overlay-reading { display:flex; align-items:center; justify-content:center; width:100%; gap:10px; opacity:1; transition:opacity 120ms ease-out; }
+.overlay-main--recording,.overlay-main--processing { padding:0; }
+.overlay-main--recording .overlay-reading,.overlay-main--processing .overlay-reading { position:absolute; inset:0; }
+.overlay-main--recording .loquara-mark,.overlay-main--processing .loquara-mark { position:absolute; left:calc(50% - 10px); transform:translateX(0); transition:transform 380ms cubic-bezier(.16,1,.3,1); }
+.overlay-main--recording .loquara-mark { transform:translateX(-26px); }
+.overlay-label { min-width:0; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; color:var(--pill-text); }
+.overlay-label--error,.overlay-failure-icon { color:var(--pill-danger); }
+.overlay-failure-icon { display:flex; align-items:center; justify-content:center; width:16px; height:16px; flex:0 0 16px;  }
+.recorder-overlay .overlay-wave { position:absolute; left:43px; display:block; width:46px; min-width:46px; max-width:46px; height:18px; flex:0 0 46px; }
+.overlay-actions { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; gap:12px; padding:0 5px; opacity:0; pointer-events:none; transition:opacity 120ms ease-out; }
+.overlay-main--interactive:has(.overlay-actions):hover .overlay-reading,.overlay-main--interactive:focus-within .overlay-reading { opacity:0; }
+.overlay-main--interactive:hover .overlay-actions,.overlay-main--interactive:focus-within .overlay-actions { opacity:1; pointer-events:auto; }
+.overlay-icon-button { display:inline-flex; align-items:center; justify-content:center; flex:0 0 26px; width:26px; height:26px; padding:0; border:0; border-radius:50%; color:var(--pill-text); background:transparent; cursor:pointer; }
+.overlay-icon-button--stop { background:var(--surface-active); }
+.overlay-icon-button--cancel { color:var(--pill-muted); }
+.overlay-icon-button:hover:not(:disabled),.overlay-text-button:hover:not(:disabled) { background:var(--border); color:var(--pill-text); }
+.overlay-icon-button:focus-visible,.overlay-undo:focus-visible,.overlay-text-button:focus-visible { outline:2px solid var(--pill-accent); outline-offset:0; }
+.overlay-icon-button:disabled,.overlay-undo:disabled,.overlay-text-button:disabled { opacity:.45; cursor:wait; }
+.overlay-text-button { border:0; color:inherit; background:transparent; font:inherit; cursor:pointer; min-height:26px; padding:0 3px; white-space:nowrap; border-radius:6px; }
+.overlay-undo { min-height:26px; padding:0 4px; flex:0 0 auto; border:1px solid var(--pill-border); border-radius:12px; color:var(--pill-text); background:var(--surface-raised); font:inherit; cursor:pointer; }
+.overlay-undo:hover:not(:disabled) { background:var(--surface-active); }
+.recorder-overlay--cancelling .overlay-main { padding:0 4px; gap:2px; }
+.overlay-sr-only { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip-path:inset(50%); white-space:nowrap; border:0; }
+.overlay-success { animation:overlay-confirm 220ms cubic-bezier(.16,1,.3,1) both; }
+@keyframes overlay-confirm { from { opacity:.4; transform:scale(.85); } to { opacity:1; transform:scale(1); } }
+@media (prefers-reduced-motion:reduce) { .overlay-pill,.overlay-reading,.overlay-actions,.overlay-reading .loquara-mark { transition:none; } .overlay-success { animation:none; } }
+.overlay-main--interactive:has(.overlay-actions):hover .loquara-mark *, .overlay-main--interactive:focus-within .loquara-mark * { animation-play-state:paused; }

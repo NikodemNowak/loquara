@@ -68,8 +68,50 @@ fn play_wav(wav: &[u8]) {
     });
 }
 
+/// Plays a cue through the desktop's own audio player.
+///
+/// The SDKs that expose a "play this buffer" call are platform-specific, and
+/// spending a sound-library dependency on three short beeps is not worth it.
+/// A temporary WAV and the player every desktop already has is.
 #[cfg(not(windows))]
-fn play_wav(_wav: &[u8]) {}
+fn play_wav(wav: &[u8]) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_CUE: AtomicU64 = AtomicU64::new(0);
+    let path = std::env::temp_dir().join(format!(
+        "loquara-cue-{}-{}.wav",
+        std::process::id(),
+        NEXT_CUE.fetch_add(1, Ordering::Relaxed)
+    ));
+    if std::fs::write(&path, wav).is_err() {
+        return;
+    }
+
+    std::thread::spawn(move || {
+        #[cfg(target_os = "macos")]
+        let players: &[(&str, &[&str])] = &[("afplay", &[])];
+        #[cfg(all(unix, not(target_os = "macos")))]
+        let players: &[(&str, &[&str])] = &[
+            ("pw-play", &[]),
+            ("paplay", &[]),
+            ("aplay", &["-q"]),
+        ];
+
+        for (program, args) in players {
+            let Ok(status) = std::process::Command::new(program)
+                .args(*args)
+                .arg(&path)
+                .status()
+            else {
+                continue;
+            };
+            if status.success() {
+                break;
+            }
+        }
+        let _ = std::fs::remove_file(&path);
+    });
+}
 pub fn play_file(path: &std::path::Path) -> Result<(), String> {
     if !path.is_file() {
         return Err(format!("Nie znaleziono pliku audio: {}", path.display()));
@@ -90,20 +132,31 @@ pub fn play_file(path: &std::path::Path) -> Result<(), String> {
             );
         }
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
     {
-        let mut command = if cfg!(target_os = "macos") {
-            let mut command = std::process::Command::new("afplay");
-            command.arg(path);
-            command
-        } else {
-            let mut command = std::process::Command::new("paplay");
-            command.arg(path);
-            command
-        };
-        command
+        std::process::Command::new("afplay")
+            .arg(path)
             .spawn()
             .map_err(|error| format!("Could not start the audio player: {error}"))?;
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let mut last_error = None;
+        for program in ["pw-play", "paplay", "aplay"] {
+            match std::process::Command::new(program).arg(path).spawn() {
+                Ok(_) => return Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => last_error = Some(error),
+                Err(error) => {
+                    return Err(format!("Could not start the audio player: {error}"));
+                }
+            }
+        }
+        return Err(format!(
+            "Could not start an audio player: {}",
+            last_error
+                .map(|error| error.to_string())
+                .unwrap_or_else(|| "none is installed".into())
+        ));
     }
     Ok(())
 }

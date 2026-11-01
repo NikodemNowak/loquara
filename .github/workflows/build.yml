@@ -2,13 +2,16 @@ name: ci
 
 on:
   push:
-    branches: [main]
+    tags-ignore: ["**"]
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
-  test:
-    runs-on: ubuntu-latest
+  frontend:
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
 
@@ -25,8 +28,76 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Check versions agree
+        run: node scripts/check-version.mjs
+
       - name: Type check
         run: pnpm tsc -b
 
       - name: Frontend tests
         run: pnpm test
+
+      - name: Packaging configuration tests
+        run: python3 -m unittest tests.test_packaging_config -v
+
+  rust:
+    name: rust (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-14, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libasound2-dev \
+            libxdo-dev \
+            libx11-dev \
+            libdbus-1-dev \
+            libssl-dev \
+            cmake
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.15.1
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      # `tauri::generate_context!` embeds the frontend, so it has to exist
+      # before the Rust tests can compile.
+      - name: Build frontend
+        run: pnpm build
+
+      # The app's build script stages the engine libraries, and Cargo does not
+      # order it after sherpa-rs-sys. Building the engine first is what makes
+      # the staging deterministic.
+      - name: Build speech engine
+        run: cargo build --manifest-path src-tauri/Cargo.toml -p sherpa-rs-sys
+
+      - name: Rust tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml --lib

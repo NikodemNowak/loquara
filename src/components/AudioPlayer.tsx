@@ -66,8 +66,8 @@ export function AudioPlayer({
     const prepared = prepareCanvas(canvas, WAVE_HEIGHT);
     if (!prepared) return;
     drawPeaks(prepared.context, recording.peaks ?? [], prepared.width, prepared.height, {
-      played: cssColor("--accent", "#4c8dff"),
-      pending: cssColor("--border-strong", "#2f343a"),
+      played: cssColor("--accent", "#e5e5e5"),
+      pending: cssColor("--border-strong", "#464646"),
       progress,
     });
   }, [recording.peaks, progress]);

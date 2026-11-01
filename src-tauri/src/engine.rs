@@ -52,7 +52,17 @@ pub enum Accelerator {
 /// asking the provider to start and seeing whether it does is the same answer
 /// with none of the guesswork. DirectML covers every DirectX 12 card, so one
 /// attempt serves NVIDIA, AMD and Intel, and the CPU below it always works.
+#[cfg(windows)]
 const PROVIDERS: &[(&str, Accelerator)] = &[("directml", Accelerator::Gpu), ("cpu", Accelerator::Cpu)];
+
+/// macOS and Linux run on the processor.
+///
+/// The prebuilt sherpa-onnx libraries those platforms ship with are the CPU
+/// build: DirectML is a Windows API, and CoreML is not compiled into the
+/// universal macOS library. Asking for a provider the library does not have
+/// only produces a failed load, so the list is honest about what exists.
+#[cfg(not(windows))]
+const PROVIDERS: &[(&str, Accelerator)] = &[("cpu", Accelerator::Cpu)];
 
 /// Threads to give ONNX Runtime.
 ///
@@ -215,6 +225,21 @@ impl Engine {
         }
         self.set_status(Status::default());
         Err(EngineError::Load(last_error))
+    }
+
+    /// Bounded local preview through the same resident native runtime as final
+    /// WAV recognition. The model mutex permits only one inference at a time.
+    pub fn transcribe_audio_samples(&self, key: &str, samples: &[f32], cancel: &AtomicBool) -> Result<String, EngineError> {
+        if samples.len() > TRANSCRIBE_WINDOW_SAMPLES {
+            return Err(EngineError::Decode("preview exceeds thirty seconds".into()));
+        }
+        if cancel.load(Ordering::SeqCst) { return Err(EngineError::Decode("preview cancelled".into())); }
+        self.ensure_loaded(key)?;
+        let mut guard = self.loaded.lock().map_err(|_| EngineError::Decode("engine lock poisoned".into()))?;
+        let loaded = guard.as_mut().ok_or_else(|| EngineError::Decode("model unloaded".into()))?;
+        let text = transcribe_samples(&mut loaded.recogniser, samples, Some(cancel))?;
+        if cancel.load(Ordering::SeqCst) { return Err(EngineError::Decode("preview cancelled".into())); }
+        Ok(text)
     }
 
     /// Transcribes a recording, loading the model first if necessary.
@@ -589,6 +614,7 @@ mod tests {
         );
     }
 
+    #[cfg(windows)]
     #[test]
     fn the_graphics_card_is_tried_before_the_processor() {
         assert_eq!(PROVIDERS.first().map(|(_, kind)| *kind), Some(Accelerator::Gpu));

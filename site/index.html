@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Loquara — your voice, already written</title>
+    <meta
+      name="description"
+      content="Private, local dictation for Windows, macOS and Linux. Press a shortcut, speak, and your words appear in any app. No account, no cloud, no word limit."
+    />
+    <meta name="theme-color" content="#08080a" />
+    <meta property="og:title" content="Loquara — your voice, already written" />
+    <meta
+      property="og:description"
+      content="Private, local dictation for Windows, macOS and Linux. One shortcut. Your words, at the caret."
+    />
+    <meta property="og:type" content="website" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="preload" href="/fonts/InterVariable.woff2" as="font" type="font/woff2" crossorigin />
+    <script type="module" src="/src/main.ts"></script>
+  </head>
+  <body>
+    <svg class="mark-defs" width="0" height="0" aria-hidden="true" focusable="false">
+      <defs>
+        <g id="loquara-mark">
+          <path d="M5 17.5C5 9.8 9.5 5 17 5H27V11H17C13.4 11 11 13.3 11 17.5V21H5Z" />
+          <path opacity=".72" d="M27 14.5C27 22.2 22.5 27 15 27H5V21H15C18.6 21 21 18.7 21 14.5V11H27Z" />
+        </g>
+      </defs>
+    </svg>
+
+    <a class="skip" href="#main">Skip to content</a>
+    <div class="grain" aria-hidden="true"></div>
+
+    <header class="site-header">
+      <a class="brand" href="#top" aria-label="Loquara home">
+        <svg class="mark" viewBox="0 0 32 32" aria-hidden="true"><use href="#loquara-mark" /></svg>
+        <span>Loquara</span>
+      </a>
+      <nav class="site-nav" aria-label="Primary">
+        <a href="#product">Interface</a>
+        <a href="#why">Why</a>
+        <a href="#download">Download</a>
+      </nav>
+      <a class="header-cta" href="#download">Get the app</a>
+    </header>
+
+    <main id="main">
+      <section class="hero" id="top">
+        <canvas id="ribbon" aria-hidden="true"></canvas>
+        <div class="hero-glow" aria-hidden="true"></div>
+        <div class="hero-inner">
+          <p class="eyebrow"><span class="eyebrow-dot"></span> Private dictation · Windows · macOS · Linux</p>
+          <h1>Your voice,<br /><em>already</em> written.</h1>
+          <p class="lede">
+            Press a shortcut. Speak. Your words appear in whatever app you're in —
+            transcribed on your machine, not someone else's server.
+          </p>
+          <div class="hero-actions">
+            <a class="button button--primary" href="#download">Download Loquara</a>
+            <a
+              class="button button--ghost"
+              href="https://github.com/NikodemNowak/loquara"
+              target="_blank"
+              rel="noreferrer"
+            >
+              Read the source
+            </a>
+          </div>
+          <p class="fineprint">Free · MIT · No account · 25 languages</p>
+        </div>
+        <a class="scroll-cue" href="#product" aria-label="See the interface"><span></span></a>
+      </section>
+
+      <section class="statement reveal" aria-labelledby="statement-title">
+        <p class="section-kicker">The whole idea</p>
+        <p class="statement-text" id="statement-title">
+          Dictation should feel like <em>thinking out loud.</em> Not another tab,
+          another subscription, another upload.
+        </p>
+      </section>
+
+      <section class="product reveal" id="product" aria-labelledby="product-title">
+        <div class="section-head">
+          <div>
+            <p class="section-kicker">The interface</p>
+            <h2 id="product-title">A pill, not a panel.</h2>
+          </div>
+          <p class="section-lede">
+            One shortcut. One small floating recorder. Your words land at the caret,
+            in the app you already use.
+          </p>
+        </div>
+
+        <figure class="app-stage">
+          <div class="app-frame" aria-hidden="true">
+            <div class="app-body">
+              <aside class="app-sidebar">
+                <div class="app-brand">
+                  <svg class="mark" viewBox="0 0 32 32"><use href="#loquara-mark" /></svg>
+                  <span>Loquara</span>
+                </div>
+                <nav class="app-nav">
+                  <span class="app-nav-item is-active">Dictate</span>
+                  <span class="app-nav-item">History</span>
+                  <span class="app-nav-item">Vocabulary</span>
+                  <span class="app-nav-item">Modes</span>
+                </nav>
+                <div class="app-sidebar-foot">
+                  <span>Settings</span>
+                  <span class="app-version">v0.10</span>
+                </div>
+              </aside>
+              <div class="app-main">
+                <header class="app-main-head">
+                  <h3>Dictate</h3>
+                  <span class="app-status"><i></i> Ready</span>
+                </header>
+                <div class="app-transcript">
+                  <p>
+                    Let's ship it on Friday. I'll take the macOS build,
+                    <span class="app-caret"></span>
+                  </p>
+                </div>
+                <div class="app-bottom">
+                  <div class="app-wave" data-wave="56"></div>
+                  <div class="app-meta">
+                    <span>Parakeet TDT</span>
+                    <span>On device</span>
+                    <span>25 languages</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="app-pill" aria-hidden="true">
+            <span class="pill-dot"></span>
+            <span class="pill-wave" data-wave="9"></span>
+            <span class="pill-time">0:04</span>
+          </div>
+          <figcaption class="sr-only">
+            Loquara's main window: a dark transcript view and a compact floating
+            recorder pill.
+          </figcaption>
+        </figure>
+
+        <ul class="micro-points">
+          <li>
+            <strong>Stays out of the way.</strong>
+            A 136 px recorder, not a window to manage.
+          </li>
+          <li>
+            <strong>Lands where you type.</strong>
+            Clipboard, terminals and SSH included.
+          </li>
+          <li>
+            <strong>Yours to shape.</strong>
+            Custom vocabulary, modes and shortcuts.
+          </li>
+        </ul>
+      </section>
+
+      <section class="why" id="why" aria-labelledby="why-title">
+        <div class="section-head">
+          <div>
+            <p class="section-kicker">Why Loquara</p>
+            <h2 id="why-title">Quietly better.</h2>
+          </div>
+          <p class="section-lede">
+            No account to create, no audio to upload, no word count to watch.
+          </p>
+        </div>
+
+        <div class="why-grid">
+          <article class="why-card reveal">
+            <span class="why-index">01</span>
+            <h3>It stays here.</h3>
+            <p>
+              Audio, transcripts and history never leave your machine. No telemetry,
+              no “improve the product”, no quiet upload.
+            </p>
+          </article>
+          <article class="why-card reveal">
+            <span class="why-index">02</span>
+            <h3>It keeps up.</h3>
+            <p>
+              Parakeet TDT runs on your GPU or CPU. The model is already local, so the
+              only wait is the time it takes to speak.
+            </p>
+          </article>
+          <article class="why-card reveal">
+            <span class="why-index">03</span>
+            <h3>It's yours.</h3>
+            <p>
+              MIT-licensed and built to be changed. New mode, new shortcut, new
+              language — edit it, fork it, keep it.
+            </p>
+          </article>
+        </div>
+      </section>
+
+      <section class="numbers reveal" aria-label="Loquara at a glance">
+        <div><span class="number">25</span><span class="number-label">languages</span></div>
+        <div><span class="number">100%</span><span class="number-label">local by default</span></div>
+        <div><span class="number">1</span><span class="number-label">shortcut</span></div>
+        <div><span class="number">∞</span><span class="number-label">words</span></div>
+      </section>
+
+      <section class="download reveal" id="download" aria-labelledby="download-title">
+        <div class="download-glow" aria-hidden="true"></div>
+        <p class="section-kicker">Download</p>
+        <h2 id="download-title">Take your voice<br />with you.</h2>
+        <p class="download-lede">
+          Windows, macOS and Linux. The app is free; the speech model downloads once,
+          inside the app.
+        </p>
+        <div class="os-actions">
+          <a
+            class="os"
+            data-os="windows"
+            href="https://github.com/NikodemNowak/loquara/releases"
+            target="_blank"
+            rel="noreferrer"
+          >
+            <span>Windows</span><small>10 / 11</small>
+          </a>
+          <a
+            class="os"
+            data-os="macos"
+            href="https://github.com/NikodemNowak/loquara/releases"
+            target="_blank"
+            rel="noreferrer"
+          >
+            <span>macOS</span><small>Apple silicon &amp; Intel</small>
+          </a>
+          <a
+            class="os"
+            data-os="linux"
+            href="https://github.com/NikodemNowak/loquara/releases"
+            target="_blank"
+            rel="noreferrer"
+          >
+            <span>Linux</span><small>.deb / AppImage</small>
+          </a>
+        </div>
+        <p class="fineprint">
+          Windows 10+ · macOS 11+ · Linux X11 / XWayland · ~670 MB local model
+        </p>
+      </section>
+
+      <footer class="site-footer">
+        <div class="footer-brand">
+          <svg class="mark" viewBox="0 0 32 32" aria-hidden="true"><use href="#loquara-mark" /></svg>
+          <span>Loquara</span>
+          <small>Speak. It's already written.</small>
+        </div>
+        <nav class="footer-links" aria-label="Footer">
+          <a href="https://github.com/NikodemNowak/loquara" target="_blank" rel="noreferrer">GitHub</a>
+          <a href="https://github.com/NikodemNowak/loquara/releases" target="_blank" rel="noreferrer">Releases</a>
+          <a href="mailto:hello@nikodemnowak.pl">Contact</a>
+        </nav>
+        <p>MIT © <span data-year>2026</span> Nikodem Nowak</p>
+      </footer>
+    </main>
+  </body>
+</html>

@@ -7,7 +7,14 @@ export default defineConfig({
     environment: "jsdom",
     setupFiles: "./src/test/setup.ts",
     css: true,
-    exclude: ["**/node_modules/**", "**/dist/**", "**/.claude/**", "**/.git/**"],
+    exclude: [
+      "**/node_modules/**",
+      "**/dist/**",
+      "**/.claude/**",
+      "**/.worktrees/**",
+      "**/.commandcode/**",
+      "**/.git/**",
+    ],
   },
   clearScreen: false,
   server: {

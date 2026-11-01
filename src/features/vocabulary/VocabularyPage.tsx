@@ -57,7 +57,7 @@ export function VocabularyPage({
 
   return (
     <section className="page vocabulary-page">
-      <header className="page-header"><div><p className="eyebrow">{t("vocab.eyebrow")}</p><h1>{t("vocab.title")}</h1><p>{t("vocab.subtitle")}</p></div></header>
+      <header className="page-header"><div><h1>{t("vocab.title")}</h1><p>{t("vocab.subtitle")}</p></div></header>
       <div className="vocabulary-add">
         <label><span>{t("vocab.heard.label")}</span><input value={heard} onChange={(event) => setHeard(event.target.value)} placeholder={t("vocab.heard.placeholder")} /></label>
         <span className="replace-arrow" aria-hidden="true">→</span>

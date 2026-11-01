@@ -1,13 +1,15 @@
 {
   "name": "loquara",
   "private": true,
-  "version": "0.6.4",
+  "version": "0.10.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
     "test": "vitest run",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "site:dev": "vite --config site/vite.config.ts",
+    "site:build": "vite build --config site/vite.config.ts"
   },
   "dependencies": {
     "@fluentui/react-icons": "^2.0.334",
@@ -23,8 +25,10 @@
     "@testing-library/user-event": "^14.6.1",
     "@types/react": "19.2.17",
     "@types/react-dom": "19.2.3",
+    "@types/three": "0.187.0",
     "@vitejs/plugin-react": "6.0.4",
     "jsdom": "^30.0.1",
+    "three": "0.187.0",
     "typescript": "7.0.2",
     "vite": "8.1.5",
     "vitest": "4.1.10"

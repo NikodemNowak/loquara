@@ -17,6 +17,7 @@ pub struct InputDeviceInfo {
     pub id: String,
     pub name: String,
     pub is_default: bool,
+    pub available: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -131,13 +132,45 @@ impl<T: Send> ActiveInput for T {}
 
 pub trait InputBackend: Send + Sync {
     fn list_devices(&self) -> Result<Vec<InputDeviceInfo>, AudioError>;
-    fn format(&self, device_id: Option<&str>) -> Result<AudioFormat, AudioError>;
+    fn prepare(&self, device_id: Option<&str>) -> Result<Box<dyn PreparedInput>, AudioError>;
+}
+
+pub trait PreparedInput: Send {
+    fn device_id(&self) -> &str;
+    fn format(&self) -> AudioFormat;
     fn start(
-        &self,
-        device_id: Option<&str>,
+        self: Box<Self>,
         samples: SyncSender<AudioSamples>,
         overflowed: Arc<AtomicBool>,
+        fault: CaptureFaultSink,
     ) -> Result<Box<dyn ActiveInput>, AudioError>;
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CaptureFault {
+    pub recording_id: String,
+    pub device_id: String,
+    pub message: String,
+}
+
+/// Separate from the bounded PCM queue; one fatal fault is retained per take.
+#[derive(Clone)]
+pub struct CaptureFaultSink {
+    owner: CaptureFault,
+    message: Arc<Mutex<Option<String>>>,
+    sender: Option<mpsc::Sender<CaptureFault>>,
+}
+
+impl CaptureFaultSink {
+    pub fn report(&self, message: String) {
+        if let Ok(mut slot) = self.message.lock() && slot.is_none() {
+            *slot = Some(message.clone());
+            if let Some(sender) = &self.sender {
+                let _ = sender.send(CaptureFault { message, ..self.owner.clone() });
+            }
+        }
+    }
+    fn message(&self) -> Option<String> { self.message.lock().ok().and_then(|slot| slot.clone()) }
 }
 
 fn try_send_samples(
@@ -160,71 +193,80 @@ impl CpalInputBackend {
                 .input_devices()
                 .map_err(|error| AudioError::Io(error.to_string()))?;
             for device in devices {
-                if device.name().ok().as_deref() == Some(requested) {
+                if device.id().ok().map(|id| id.to_string()).as_deref() == Some(requested) {
                     return Ok(device);
                 }
             }
             return Err(AudioError::NoInputDevice);
         }
-        host.default_input_device().ok_or(AudioError::NoInputDevice)
+        // CPAL's default handle may reroute dynamically. Resolve its ID and
+        // reopen the enumerated, fixed endpoint before negotiating a format.
+        let id = host.default_input_device().ok_or(AudioError::NoInputDevice)?
+            .id().map_err(|error| AudioError::Io(error.to_string()))?.to_string();
+        self.device(Some(&id))
     }
 }
 
 impl InputBackend for CpalInputBackend {
     fn list_devices(&self) -> Result<Vec<InputDeviceInfo>, AudioError> {
         let host = cpal::default_host();
-        let default_name = host
+        let default_id = host
             .default_input_device()
-            .and_then(|device| device.name().ok());
+            .and_then(|device| device.id().ok()).map(|id| id.to_string());
         host.input_devices()
             .map_err(|error| AudioError::Io(error.to_string()))?
             .map(|device| {
-                let name = device
-                    .name()
-                    .map_err(|error| AudioError::Io(error.to_string()))?;
+                let name = device.description().map_err(|error| AudioError::Io(error.to_string()))?.name().to_owned();
+                let id = device.id().map_err(|error| AudioError::Io(error.to_string()))?.to_string();
                 Ok(InputDeviceInfo {
-                    id: name.clone(),
-                    is_default: default_name.as_deref() == Some(name.as_str()),
+                    is_default: default_id.as_deref() == Some(id.as_str()),
+                    id,
                     name,
+                    available: true,
                 })
             })
             .collect()
     }
 
-    fn format(&self, device_id: Option<&str>) -> Result<AudioFormat, AudioError> {
-        let config = self
-            .device(device_id)?
-            .default_input_config()
-            .map_err(|error| AudioError::Io(error.to_string()))?;
-        Ok(AudioFormat {
-            channels: config.channels(),
-            sample_rate: config.sample_rate().0,
-        })
+    fn prepare(&self, device_id: Option<&str>) -> Result<Box<dyn PreparedInput>, AudioError> {
+        let device = self.device(device_id)?;
+        let id = device.id().map_err(|error| AudioError::Io(error.to_string()))?.to_string();
+        let supported = device.default_input_config().map_err(|error| AudioError::Io(error.to_string()))?;
+        Ok(Box::new(PreparedCpalInput { device, id, supported }))
+    }
+}
+
+struct PreparedCpalInput {
+    device: cpal::Device,
+    id: String,
+    supported: cpal::SupportedStreamConfig,
+}
+
+impl PreparedInput for PreparedCpalInput {
+    fn device_id(&self) -> &str { &self.id }
+    fn format(&self) -> AudioFormat {
+        AudioFormat { channels: self.supported.channels(), sample_rate: self.supported.sample_rate() }
     }
 
     fn start(
-        &self,
-        device_id: Option<&str>,
+        self: Box<Self>,
         samples: SyncSender<AudioSamples>,
         overflowed: Arc<AtomicBool>,
+        fault: CaptureFaultSink,
     ) -> Result<Box<dyn ActiveInput>, AudioError> {
-        let device = self.device(device_id)?;
-        let supported = device
-            .default_input_config()
-            .map_err(|error| AudioError::Io(error.to_string()))?;
+        let Self { device, supported, .. } = *self;
         let config = supported.config();
-        let errors = samples.clone();
         let error_overflowed = overflowed.clone();
-        let error_callback = move |error: cpal::StreamError| {
-            try_send_samples(
-                &errors,
-                &error_overflowed,
-                AudioSamples::Error(error.to_string()),
-            );
+        let error_callback = move |error: cpal::Error| {
+            match error.kind() {
+                cpal::ErrorKind::Xrun => { error_overflowed.store(true, Ordering::Release); }
+                cpal::ErrorKind::RealtimeDenied => {}
+                _ => fault.report(error.to_string()),
+            }
         };
         let stream = match supported.sample_format() {
             cpal::SampleFormat::I8 => device.build_input_stream(
-                &config,
+                config,
                 move |data: &[i8], _| {
                     try_send_samples(&samples, &overflowed, AudioSamples::I8(data.to_vec()));
                 },
@@ -232,7 +274,7 @@ impl InputBackend for CpalInputBackend {
                 None,
             ),
             cpal::SampleFormat::F32 => device.build_input_stream(
-                &config,
+                config,
                 move |data: &[f32], _| {
                     try_send_samples(&samples, &overflowed, AudioSamples::F32(data.to_vec()));
                 },
@@ -240,7 +282,7 @@ impl InputBackend for CpalInputBackend {
                 None,
             ),
             cpal::SampleFormat::I16 => device.build_input_stream(
-                &config,
+                config,
                 move |data: &[i16], _| {
                     try_send_samples(&samples, &overflowed, AudioSamples::I16(data.to_vec()));
                 },
@@ -248,7 +290,7 @@ impl InputBackend for CpalInputBackend {
                 None,
             ),
             cpal::SampleFormat::I24 => device.build_input_stream(
-                &config,
+                config,
                 move |data: &[cpal::I24], _| {
                     try_send_samples(&samples, &overflowed, AudioSamples::I24(data.to_vec()));
                 },
@@ -256,7 +298,7 @@ impl InputBackend for CpalInputBackend {
                 None,
             ),
             cpal::SampleFormat::I32 => device.build_input_stream(
-                &config,
+                config,
                 move |data: &[i32], _| {
                     try_send_samples(&samples, &overflowed, AudioSamples::I32(data.to_vec()));
                 },
@@ -264,7 +306,7 @@ impl InputBackend for CpalInputBackend {
                 None,
             ),
             cpal::SampleFormat::I64 => device.build_input_stream(
-                &config,
+                config,
                 move |data: &[i64], _| {
                     try_send_samples(&samples, &overflowed, AudioSamples::I64(data.to_vec()));
                 },
@@ -272,7 +314,7 @@ impl InputBackend for CpalInputBackend {
                 None,
             ),
             cpal::SampleFormat::U8 => device.build_input_stream(
-                &config,
+                config,
                 move |data: &[u8], _| {
                     try_send_samples(&samples, &overflowed, AudioSamples::U8(data.to_vec()));
                 },
@@ -280,7 +322,7 @@ impl InputBackend for CpalInputBackend {
                 None,
             ),
             cpal::SampleFormat::U16 => device.build_input_stream(
-                &config,
+                config,
                 move |data: &[u16], _| {
                     try_send_samples(&samples, &overflowed, AudioSamples::U16(data.to_vec()));
                 },
@@ -288,7 +330,7 @@ impl InputBackend for CpalInputBackend {
                 None,
             ),
             cpal::SampleFormat::U32 => device.build_input_stream(
-                &config,
+                config,
                 move |data: &[u32], _| {
                     try_send_samples(&samples, &overflowed, AudioSamples::U32(data.to_vec()));
                 },
@@ -296,7 +338,7 @@ impl InputBackend for CpalInputBackend {
                 None,
             ),
             cpal::SampleFormat::U64 => device.build_input_stream(
-                &config,
+                config,
                 move |data: &[u64], _| {
                     try_send_samples(&samples, &overflowed, AudioSamples::U64(data.to_vec()));
                 },
@@ -304,7 +346,7 @@ impl InputBackend for CpalInputBackend {
                 None,
             ),
             cpal::SampleFormat::F64 => device.build_input_stream(
-                &config,
+                config,
                 move |data: &[f64], _| {
                     try_send_samples(&samples, &overflowed, AudioSamples::F64(data.to_vec()));
                 },
@@ -339,6 +381,7 @@ struct ActiveRecording {
     bridge: JoinHandle<()>,
     writer: JoinHandle<Result<Vec<f32>, AudioError>>,
     overflowed: Arc<AtomicBool>,
+    fault: CaptureFaultSink,
     _input: Box<dyn ActiveInput>,
 }
 
@@ -356,6 +399,7 @@ pub struct CompletedRecording {
     pub id: String,
     pub path: PathBuf,
     pub duration_ms: u64,
+    pub interrupted: Option<String>,
     /// Amplitude envelope of the capture, `PEAK_BUCKETS` values in `0.0..=1.0`,
     /// evenly spaced across the recording. Drawn in the history list and used
     /// as the scrub track in the player, so it is computed once here rather
@@ -433,6 +477,8 @@ pub struct AudioRecorder {
     active: Mutex<Option<ActiveRecording>>,
     level_sender: Mutex<Option<SyncSender<f32>>>,
     stream_sink: Mutex<Option<StreamSink>>,
+    fault_sender: Mutex<Option<mpsc::Sender<CaptureFault>>>,
+    capture_fault_owner: Mutex<Option<CaptureFaultSink>>,
 }
 
 impl AudioRecorder {
@@ -450,6 +496,8 @@ impl AudioRecorder {
             active: Mutex::new(None),
             level_sender: Mutex::new(None),
             stream_sink: Mutex::new(None),
+            fault_sender: Mutex::new(None),
+            capture_fault_owner: Mutex::new(None),
         }
     }
 
@@ -471,6 +519,24 @@ impl AudioRecorder {
         self.backend.list_devices()
     }
 
+    pub fn set_fault_sender(&self, sender: mpsc::Sender<CaptureFault>) {
+        *self.fault_sender.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(sender);
+    }
+
+    pub fn invalidate_endpoint(&self, device_id: &str) {
+        // This small owner slot never holds the recorder/stream lock; COM
+        // callbacks must not wait for stream creation or writer shutdown.
+        let owner = self.capture_fault_owner.lock().ok().and_then(|owner| owner.clone());
+        if let Some(fault) = owner
+            && (fault.owner.device_id == device_id || fault.owner.device_id.parse::<cpal::DeviceId>().is_ok_and(|id| id.id() == device_id)) {
+            fault.report("Microphone disconnected. Recording interrupted; retained audio is available in History.".into());
+        }
+    }
+
+    pub fn owns_capture(&self, recording_id: &str) -> bool {
+        self.active.lock().is_ok_and(|active| active.as_ref().is_some_and(|active| active.id == recording_id))
+    }
+
     pub fn start(&self, device_id: Option<&str>) -> Result<StartedRecording, AudioError> {
         let mut active = self
             .active
@@ -490,7 +556,13 @@ impl AudioRecorder {
         let id = recording_id(epoch_ms, nonce);
         let path = self.recordings_dir.join(format!("{id}.wav"));
         let part_path = part_path_for(&path);
-        let format = self.backend.format(device_id)?;
+        let prepared = self.backend.prepare(device_id)?;
+        let format = prepared.format();
+        let fault = CaptureFaultSink {
+            owner: CaptureFault { recording_id: id.clone(), device_id: prepared.device_id().to_owned(), message: String::new() },
+            message: Arc::new(Mutex::new(None)),
+            sender: self.fault_sender.lock().ok().and_then(|sender| sender.clone()),
+        };
         let spec = hound::WavSpec {
             channels: format.channels,
             sample_rate: format.sample_rate,
@@ -514,19 +586,24 @@ impl AudioRecorder {
             .ok()
             .and_then(|sink| sink.clone());
         let bridge_sender = writer_sender.clone();
-        let input = match self
-            .backend
-            .start(device_id, packet_sender, overflowed.clone())
+        *self.capture_fault_owner.lock().map_err(|_| AudioError::Io("capture owner lock poisoned".into()))? = Some(fault.clone());
+        let input = match prepared.start(packet_sender, overflowed.clone(), fault.clone())
         {
             Ok(input) => input,
             Err(error) => {
+                if let Ok(mut owner) = self.capture_fault_owner.lock() { *owner = None; }
                 drop(writer);
                 let _ = fs::remove_file(&part_path);
                 return Err(error);
             }
         };
+        let bridge_fault = fault.clone();
         let bridge = thread::spawn(move || {
             while let Ok(packet) = packet_receiver.recv() {
+                if let AudioSamples::Error(message) = packet {
+                    bridge_fault.report(message);
+                    continue;
+                }
                 if bridge_sender.send(WriterMessage::Samples(packet)).is_err() {
                     break;
                 }
@@ -578,6 +655,7 @@ impl AudioRecorder {
             bridge,
             writer: writer_handle,
             overflowed,
+            fault,
             _input: input,
         });
         Ok(started)
@@ -607,8 +685,10 @@ impl AudioRecorder {
             bridge,
             writer,
             overflowed: _overflowed,
+            fault,
             _input,
         } = recording;
+        if let Ok(mut owner) = self.capture_fault_owner.lock() && owner.as_ref().is_some_and(|owner| owner.owner.recording_id == id) { *owner = None; }
         let duration_ms = started_at
             .elapsed()
             .as_millis()
@@ -648,6 +728,7 @@ impl AudioRecorder {
             id,
             path,
             duration_ms,
+            interrupted: fault.message(),
             peaks,
         })
     }
@@ -779,13 +860,13 @@ pub fn finalize_atomic(part_path: &Path, final_path: &Path) -> Result<(), AudioE
 
 #[cfg(test)]
 #[derive(Default)]
-struct FakeInputBackend {
+pub(crate) struct FakeInputBackend {
     samples: Vec<AudioSamples>,
 }
 
 #[cfg(test)]
 impl FakeInputBackend {
-    fn with_samples(samples: Vec<AudioSamples>) -> Self {
+    pub(crate) fn with_samples(samples: Vec<AudioSamples>) -> Self {
         Self { samples }
     }
 }
@@ -797,24 +878,34 @@ impl InputBackend for FakeInputBackend {
             id: "fake".into(),
             name: "Fake microphone".into(),
             is_default: true,
+            available: true,
         }])
     }
 
-    fn format(&self, _device_id: Option<&str>) -> Result<AudioFormat, AudioError> {
-        Ok(AudioFormat {
+    fn prepare(&self, _device_id: Option<&str>) -> Result<Box<dyn PreparedInput>, AudioError> {
+        Ok(Box::new(Self::with_samples(self.samples.clone())))
+    }
+}
+
+#[cfg(test)]
+impl PreparedInput for FakeInputBackend {
+    fn device_id(&self) -> &str { "fake" }
+    fn format(&self) -> AudioFormat {
+        AudioFormat {
             channels: 1,
             sample_rate: 48_000,
-        })
+        }
     }
 
     fn start(
-        &self,
-        _device_id: Option<&str>,
+        self: Box<Self>,
         sender: SyncSender<AudioSamples>,
         overflowed: Arc<AtomicBool>,
+        fault: CaptureFaultSink,
     ) -> Result<Box<dyn ActiveInput>, AudioError> {
         for samples in &self.samples {
-            try_send_samples(&sender, &overflowed, samples.clone());
+            if let AudioSamples::Error(message) = samples { fault.report(message.clone()); }
+            else { try_send_samples(&sender, &overflowed, samples.clone()); }
         }
         Ok(Box::new(()))
     }
@@ -825,6 +916,62 @@ mod tests {
     use super::*;
     use std::fs;
     use std::sync::Arc;
+
+    #[test]
+    fn prepared_endpoint_supplies_both_wav_format_and_samples_without_re_resolving_default() {
+        struct Backend;
+        struct Prepared;
+        impl InputBackend for Backend {
+            fn list_devices(&self) -> Result<Vec<InputDeviceInfo>, AudioError> {
+                Ok(vec![InputDeviceInfo { id: "endpoint-a".into(), name: "Same".into(), is_default: true, available: true },
+                    InputDeviceInfo { id: "endpoint-b".into(), name: "Same".into(), is_default: false, available: true }])
+            }
+            fn prepare(&self, requested: Option<&str>) -> Result<Box<dyn PreparedInput>, AudioError> {
+                if requested != Some("endpoint-b") { return Err(AudioError::NoInputDevice); }
+                Ok(Box::new(Prepared))
+            }
+        }
+        impl PreparedInput for Prepared {
+            fn device_id(&self) -> &str { "endpoint-b" }
+            fn format(&self) -> AudioFormat { AudioFormat { channels: 2, sample_rate: 44_100 } }
+            fn start(self: Box<Self>, sender: SyncSender<AudioSamples>, overflowed: Arc<AtomicBool>, _fault: CaptureFaultSink) -> Result<Box<dyn ActiveInput>, AudioError> {
+                try_send_samples(&sender, &overflowed, AudioSamples::I16(vec![111, -222, 333, -444]));
+                Ok(Box::new(()))
+            }
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let recorder = AudioRecorder::with_backend(temp.path(), Arc::new(Backend));
+        let preferences = crate::microphones::MicrophonePreferences { selected_id: Some("endpoint-b".into()), ..Default::default() };
+        let devices = recorder.list_devices().unwrap();
+        let selected = crate::microphones::resolve_preference(&preferences, &devices).unwrap();
+        recorder.start(Some(&selected.id)).unwrap();
+        let completed = recorder.stop().unwrap();
+        let mut wav = hound::WavReader::open(completed.path).unwrap();
+        assert_eq!(wav.spec().sample_rate, 44_100);
+        assert_eq!(wav.spec().channels, 2);
+        assert_eq!(wav.samples::<i16>().collect::<Result<Vec<_>, _>>().unwrap(), vec![111, -222, 333, -444]);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn cpal_0182_public_device_id_preserves_opaque_case_in_roundtrip() {
+        let endpoint = cpal::DeviceId::new(cpal::HostId::Wasapi, "{0.0.1.00000000}.{AbCd-opaque}");
+        assert_eq!(endpoint.to_string().parse::<cpal::DeviceId>().unwrap(), endpoint);
+        assert_eq!(endpoint.id(), "{0.0.1.00000000}.{AbCd-opaque}");
+    }
+
+    #[test]
+    fn microphone_loss_preserves_the_captured_prefix_for_manual_recovery() {
+        let temp = tempfile::tempdir().unwrap();
+        let recorder = AudioRecorder::with_backend(temp.path(), Arc::new(FakeInputBackend::with_samples(vec![
+            AudioSamples::I16(vec![123, -456]),
+            AudioSamples::Error("device disconnected".into()),
+        ])));
+        recorder.start(None).unwrap();
+        let completed = recorder.stop().expect("loss must finalize retained audio");
+        let mut wav = hound::WavReader::open(completed.path).unwrap();
+        assert_eq!(wav.samples::<i16>().collect::<Result<Vec<_>, _>>().unwrap(), vec![123, -456]);
+    }
 
     #[test]
     fn converts_supported_samples_to_pcm16_without_overflow() {
@@ -932,45 +1079,22 @@ mod tests {
     }
 
     #[test]
-    fn recorder_surfaces_asynchronous_input_errors_as_io() {
+    fn recorder_surfaces_fault_outside_the_saturated_sample_queue() {
         let temp = tempfile::tempdir().unwrap();
-        let backend = Arc::new(FakeInputBackend::with_samples(vec![AudioSamples::Error(
-            "device disconnected".into(),
-        )]));
-        let recorder = AudioRecorder::with_backend(temp.path(), backend);
+        let mut samples: Vec<_> = (0..10000).map(|_| AudioSamples::I16(vec![1;64])).collect();
+        samples.push(AudioSamples::Error("device disconnected".into()));
+        let recorder = AudioRecorder::with_backend(temp.path(), Arc::new(FakeInputBackend::with_samples(samples)));
+        let (sender, receiver) = mpsc::channel();
+        recorder.set_fault_sender(sender);
         let started = recorder.start(None).unwrap();
-
-        let error = recorder.stop().unwrap_err();
-
-        assert_eq!(error, AudioError::Io("device disconnected".into()));
-        assert!(!started.part_path.exists());
-        assert!(recorder.start(None).is_ok());
-    }
-
-    #[test]
-    fn shutdown_preserves_device_error_after_writer_has_already_exited() {
-        let temp = tempfile::tempdir().unwrap();
-        let backend = Arc::new(FakeInputBackend::with_samples(vec![AudioSamples::Error(
-            "device disconnected".into(),
-        )]));
-        let recorder = AudioRecorder::with_backend(temp.path(), backend);
+        let fault = receiver.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert_eq!(fault.recording_id, started.id);
+        let completed = recorder.stop().unwrap();
+        assert_eq!(completed.interrupted.as_deref(), Some("device disconnected"));
+        assert!(completed.path.is_file());
         recorder.start(None).unwrap();
-        while !recorder
-            .active
-            .lock()
-            .unwrap()
-            .as_ref()
-            .unwrap()
-            .writer
-            .is_finished()
-        {
-            std::thread::yield_now();
-        }
-
-        assert_eq!(
-            recorder.stop().unwrap_err(),
-            AudioError::Io("device disconnected".into())
-        );
+        assert!(!recorder.owns_capture(&fault.recording_id));
+        recorder.cancel().unwrap();
     }
 
     #[test]

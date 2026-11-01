@@ -3,6 +3,7 @@ dist/
 target/
 .worktrees/
 .claude/
+.cc-target/
 .env
 .venv/
 __pycache__/

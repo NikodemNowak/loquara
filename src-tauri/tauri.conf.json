@@ -1,15 +1,16 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "Loquara",
-  "version": "0.6.4",
+  "version": "0.10.0",
   "identifier": "io.loquara.desktop",
   "build": {
     "beforeDevCommand": "pnpm dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "pnpm build && cargo build --release --manifest-path src-tauri/Cargo.toml -p sherpa-rs-sys",
+    "beforeBuildCommand": "pnpm build && node scripts/prebuild-engine.mjs",
     "frontendDist": "../dist"
   },
   "app": {
+    "macOSPrivateApi": true,
     "security": {
       "assetProtocol": {
         "enable": true,
@@ -22,8 +23,11 @@
       {
         "label": "main",
         "title": "Loquara",
-        "width": 1080,
-        "height": 720,
+        "width": 980,
+        "height": 680,
+        "minWidth": 720,
+        "minHeight": 520,
+        "backgroundColor": "#151515",
         "decorations": false,
         "visible": false
       },
@@ -31,8 +35,8 @@
         "label": "overlay",
         "title": "Loquara — dyktowanie",
         "url": "index.html?window=overlay",
-        "width": 80,
-        "height": 42,
+        "width": 136,
+        "height": 36,
         "decorations": false,
         "resizable": false,
         "alwaysOnTop": true,
@@ -46,6 +50,10 @@
   },
   "bundle": {
     "active": true,
+    "category": "Productivity",
+    "shortDescription": "Private, local speech-to-text dictation.",
+    "longDescription": "Press a shortcut, speak, and Loquara writes in the active window. Speech is transcribed on your own machine with NVIDIA Parakeet; audio and text never leave it unless you configure a cloud engine.",
+    "homepage": "https://loquara.nikodemnowak.pl",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -57,9 +65,6 @@
       "nsis": {
         "installMode": "currentUser"
       }
-    },
-    "resources": {
-      "lib/*.dll": "./"
     }
   }
 }

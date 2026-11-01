@@ -1,10 +1,10 @@
-import { screen, waitFor } from "@testing-library/react";
+import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, test, vi } from "vitest";
 
 import { renderWithI18n } from "../../test/renderWithI18n";
 import { adapterStub, recordings, settings } from "../../test/fixtures";
-import type { DictationState } from "../../lib/types";
+import type { AppSnapshot, DictationState } from "../../lib/types";
 import { DictatePage } from "./DictatePage";
 
 function renderState(state: DictationState, overrides = {}) {
@@ -22,6 +22,185 @@ function renderState(state: DictationState, overrides = {}) {
 }
 
 describe("ekran Dyktuj", () => {
+  test.each(["pl", "en"] as const)("opisuje przytrzymanie skrótu, ale przyciski nadal zaczynają i kończą kliknięciem (%s)", async (language) => {
+    const holdSettings = { ...settings, activationMode: "push_to_talk" as const, shortcut: "Ctrl+Shift+M" };
+    const idle: AppSnapshot = { settings: holdSettings, modelLoading: false, dictation: { status: "idle" } };
+    const startRecording = vi.fn(async () => idle);
+    const stopRecording = vi.fn(async () => idle);
+    const props = { adapter: adapterStub({ startRecording, stopRecording }), recordings: [], onSnapshot: vi.fn(), onHistory: vi.fn(), onToast: vi.fn() };
+    const view = renderWithI18n(<DictatePage {...props} snapshot={idle} />, { language });
+    expect(screen.getByText(language === "pl" ? "Ustaw kursor w polu tekstowym. Przytrzymaj skrót i mów, puść, aby zakończyć." : "Place your cursor in a text field. Hold the shortcut and speak, release it to finish.")).toBeVisible();
+    expect(screen.getByLabelText(language === "pl" ? "Skrót klawiszowy: Ctrl + Shift + M" : "Keyboard shortcut: Ctrl + Shift + M")).toBeVisible();
+    await userEvent.click(screen.getByRole("button", { name: language === "pl" ? "Zacznij nagrywać" : "Start recording" }));
+    expect(startRecording).toHaveBeenCalledOnce();
+    expect(stopRecording).not.toHaveBeenCalled();
+    view.rerender(<DictatePage {...props} snapshot={{ ...idle, dictation: { status: "recording", recordingId: "r", audioPath: "r.wav" } }} />);
+    expect(screen.getByText(language === "pl" ? "Jeśli nagrywasz skrótem, puść klawisze. Możesz też kliknąć Zatrzymaj." : "If you started with the shortcut, release the keys. You can also click Stop.")).toBeVisible();
+    await userEvent.click(screen.getByRole("button", { name: language === "pl" ? "Zatrzymaj" : "Stop" }));
+    expect(stopRecording).toHaveBeenCalledOnce();
+    view.rerender(<DictatePage {...props} snapshot={{ ...idle, settings }} />);
+    expect(screen.getByText(language === "pl" ? "Ustaw kursor w polu tekstowym i użyj skrótu." : "Place your cursor in a text field and use the shortcut.")).toBeVisible();
+  });
+
+  test("stan gotowy wyjaśnia rozpoczęcie zamiast zatrzymania nagrania", () => {
+    renderState({ status: "idle" });
+    expect(screen.getAllByText("Ustaw kursor w polu tekstowym i użyj skrótu.")[0]).toBeVisible();
+    expect(screen.queryByText("Zatrzymaj nagranie, aby przekazać gotowy tekst.")).not.toBeInTheDocument();
+  });
+
+  test.each(["pl", "en"] as const)("pusty ekran nagrania opisuje faktyczną fazę podglądu (%s)", (language) => {
+    const props = { adapter: adapterStub(), recordings: [], onSnapshot: vi.fn(), onHistory: vi.fn(), onToast: vi.fn() };
+    const phaseCopy = language === "pl" ? {
+      after: "Tekst pojawi się po zatrzymaniu nagrania.", connecting: "Łączenie z podglądem na żywo…",
+      listening: "Mów dalej. Czekamy na pierwsze słowa.", finalizing: "Kończymy transkrypcję…",
+    } : {
+      after: "Your text appears after you stop recording.", connecting: "Connecting to live preview…",
+      listening: "Keep speaking. Waiting for the first words.", finalizing: "Finalizing the transcript…",
+    };
+    const cases = [
+      [null, phaseCopy.after], ["connecting", phaseCopy.connecting], ["listening", phaseCopy.listening],
+      ["draft", phaseCopy.listening], ["fallback", phaseCopy.after], ["finalizing", phaseCopy.finalizing],
+    ] as const;
+    for (const [phase, copy] of cases) {
+      const view = renderWithI18n(<DictatePage {...props} snapshot={{
+        settings: { ...settings, language }, modelLoading: false,
+        dictation: { status: "recording", recordingId: "r", audioPath: "r.wav" },
+        liveTranscript: phase ? { recordingId: "r", text: "", revision: 1, status: phase, clipboardReady: false } : null,
+      }} />, { language });
+      expect(screen.getByText(copy)).toBeVisible();
+      expect(screen.queryByText(language === "pl" ? "Zacznij mówić. Tekst pojawi się tutaj." : "Start speaking. Your words appear here.")).not.toBeInTheDocument();
+      view.unmount();
+    }
+  });
+
+  test("bieżący dokument podąża za tekstem, ale zachowuje celowe przewinięcie w górę", () => {
+    const props = { adapter: adapterStub(), recordings: [], onSnapshot: vi.fn(), onHistory: vi.fn(), onToast: vi.fn() };
+    const take: AppSnapshot = { settings, modelLoading: false, dictation: { status: "recording", recordingId: "r", audioPath: "r.wav" }, liveTranscript: { recordingId: "r", revision: 1, status: "draft", text: "Pierwsze słowa", clipboardReady: true } };
+    const view = renderWithI18n(<DictatePage {...props} snapshot={take} />);
+    const canvas = screen.getByRole("region", { name: "Wersja robocza" });
+    let height = 500;
+    Object.defineProperties(canvas, { scrollHeight: { get: () => height }, clientHeight: { value: 180 }, scrollTop: { value: 0, writable: true } });
+    view.rerender(<DictatePage {...props} snapshot={{ ...take, liveTranscript: { ...take.liveTranscript!, text: "Pierwsze słowa i dalsza część", revision: 2 } }} />);
+    expect(canvas.scrollTop).toBe(320);
+    canvas.scrollTop = 40;
+    fireEvent.scroll(canvas);
+    height = 700;
+    view.rerender(<DictatePage {...props} snapshot={{ ...take, liveTranscript: { ...take.liveTranscript!, text: "Jeszcze dłuższy dokument", revision: 3 } }} />);
+    expect(canvas.scrollTop).toBe(40);
+    expect(canvas).toHaveTextContent("Jeszcze dłuższy dokument");
+  });
+  test("pokazuje i zastępuje tylko wersję roboczą bieżącego nagrania, usuwa ją przy anulowaniu", () => {
+    const props = { adapter: adapterStub(), recordings, onSnapshot: vi.fn(), onHistory: vi.fn(), onToast: vi.fn() };
+    const current: AppSnapshot = {
+      settings, modelLoading: false,
+      dictation: { status: "recording", recordingId: "current", audioPath: "current.wav" },
+      liveTranscript: { recordingId: "old", text: "Nieaktualny tekst", revision: 1, status: "draft", clipboardReady: true },
+    };
+    const view = renderWithI18n(<DictatePage {...props} snapshot={current} />);
+    const canvas = screen.getByRole("region", { name: "Wersja robocza" });
+    expect(canvas).not.toHaveTextContent("Nieaktualny tekst");
+    expect(canvas).not.toHaveTextContent("Przygotuj proszę");
+    view.rerender(<DictatePage {...props} snapshot={{ ...current, liveTranscript: { ...current.liveTranscript!, recordingId: "current", text: "Dzień dobry", clipboardReady: false } }} />);
+    expect(canvas).toHaveTextContent("Dzień dobry");
+    expect(screen.queryByText("W schowku")).not.toBeInTheDocument();
+    view.rerender(<DictatePage {...props} snapshot={{ ...current, liveTranscript: { ...current.liveTranscript!, recordingId: "current", text: "Dzień dobry Państwu.", revision: 2 } }} />);
+    expect(canvas).toHaveTextContent("Dzień dobry Państwu.");
+    expect(screen.getByText("W schowku")).toBeVisible();
+    view.rerender(<DictatePage {...props} snapshot={{ ...current, dictation: { status: "cancelling", recordingId: "current", audioPath: "current.wav" }, liveTranscript: { ...current.liveTranscript!, recordingId: "current", text: "Dzień dobry Państwu." } }} />);
+    expect(canvas).not.toHaveTextContent("Dzień dobry");
+  });
+
+  test("kopiuje dokładnie ostatni tekst i otwiera jego nagranie", async () => {
+    const user = userEvent.setup();
+    const writeText = vi.spyOn(navigator.clipboard, "writeText");
+    const onHistory = vi.fn();
+    renderWithI18n(<DictatePage adapter={adapterStub()} snapshot={{ dictation: { status: "idle" }, settings, modelLoading: false }} recordings={recordings} onSnapshot={vi.fn()} onHistory={onHistory} onToast={vi.fn()} />);
+    expect(within(screen.getByRole("region", { name: "Ostatnia transkrypcja" })).getByText(recordings[2].text!)).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Kopiuj" }));
+    expect(writeText).toHaveBeenCalledWith(recordings[2].text);
+    await user.click(screen.getByRole("button", { name: /Przygotuj proszę podsumowanie/ }));
+    expect(onHistory).toHaveBeenCalledWith("complete-1");
+  });
+
+  test("anuluje aktywne nagranie przez rzeczywistą komendę", async () => {
+    const cancelRecording = vi.fn(async () => ({ dictation: { status: "idle" as const }, settings, modelLoading: false }));
+    renderState({ status: "recording", recordingId: "r", audioPath: "r.wav" }, { cancelRecording });
+    await userEvent.click(screen.getByRole("button", { name: "Anuluj nagranie" }));
+    expect(cancelRecording).toHaveBeenCalledOnce();
+  });
+
+  test("ostatnie słowa ustępują bieżącemu nagraniu i wracają po anulowaniu", () => {
+    const recent = [recordings[2], { ...recordings[2], id: "older", text: "Poprzednia wiadomość." }];
+    const props = { adapter: adapterStub(), recordings: recent, onSnapshot: vi.fn(), onHistory: vi.fn(), onToast: vi.fn() };
+    const idle: AppSnapshot = { settings, modelLoading: false, dictation: { status: "idle" } };
+    const view = renderWithI18n(<DictatePage {...props} snapshot={idle} />);
+    expect(screen.getByText("Poprzednia wiadomość.")).toBeVisible();
+    expect(screen.getAllByRole("article")).toHaveLength(2);
+    view.rerender(<DictatePage {...props} snapshot={{ ...idle,
+      dictation: { status: "recording", recordingId: "new", audioPath: "new.wav" },
+      liveTranscript: { recordingId: "new", revision: 1, text: "Bieżące słowa.", status: "draft", clipboardReady: true },
+    }} />);
+    expect(screen.queryByText("Poprzednia wiadomość.")).not.toBeInTheDocument();
+    expect(screen.queryByText(recordings[2].text!)).not.toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Wersja robocza" })).toHaveTextContent("Bieżące słowa.");
+    view.rerender(<DictatePage {...props} snapshot={idle} />);
+    expect(screen.getByText("Poprzednia wiadomość.")).toBeVisible();
+    expect(screen.queryByText("Bieżące słowa.")).not.toBeInTheDocument();
+  });
+
+  test("oba wpisy mają własne kopiowanie i otwierają pełny tekst", async () => {
+    const user = userEvent.setup();
+    const writeText = vi.spyOn(navigator.clipboard, "writeText");
+    const onHistory = vi.fn();
+    const items = [recordings[2], { ...recordings[2], id: "older", audioPath: null, text: "Długi tekst. ".repeat(100) }];
+    renderWithI18n(<DictatePage adapter={adapterStub()} snapshot={{ settings, modelLoading: false, dictation: { status: "idle" } }} recordings={items} onSnapshot={vi.fn()} onHistory={onHistory} onToast={vi.fn()} />);
+    const older = within(screen.getAllByRole("article")[1]);
+    await user.click(older.getByRole("button", { name: "Kopiuj" }));
+    expect(writeText).toHaveBeenCalledWith(items[1].text);
+    await user.click(older.getByRole("button", { name: /Długi tekst/ }));
+    expect(onHistory).toHaveBeenCalledWith("older");
+    expect(older.queryByRole("button", { name: "Odtwórz" })).not.toBeInTheDocument();
+  });
+
+  test("Cofnij przepisuje zachowane nagranie i nie włącza mikrofonu", async () => {
+    const retryTranscription = vi.fn(async () => ({ dictation: { status: "processing" as const, recordingId: "retained", audioPath: "retained.wav" }, settings, modelLoading: false }));
+    const startRecording = vi.fn();
+    renderState({ status: "cancelling", recordingId: "retained", audioPath: "retained.wav" }, { retryTranscription, startRecording });
+    await userEvent.click(screen.getByRole("button", { name: "Przywróć nagranie i przepisz" }));
+    expect(retryTranscription).toHaveBeenCalledWith("retained");
+    expect(startRecording).not.toHaveBeenCalled();
+    expect(screen.queryByLabelText("Czas nagrania")).not.toBeInTheDocument();
+  });
+
+  test("anuluje przetwarzanie przez tę samą komendę co nagranie", async () => {
+    const cancelRecording = vi.fn(async () => ({ dictation: { status: "idle" as const }, settings, modelLoading: false }));
+    renderState({ status: "processing", recordingId: "r", audioPath: "r.wav" }, { cancelRecording });
+    await userEvent.click(screen.getByRole("button", { name: "Anuluj nagranie" }));
+    expect(cancelRecording).toHaveBeenCalledOnce();
+  });
+
+  test("odtwarza ostatnie nagranie przez adapter bez przechodzenia do historii", async () => {
+    const user = userEvent.setup();
+    const getRecordingAudio = vi.fn(async () => new Uint8Array([1, 2, 3]));
+    const createObjectURL = vi.fn(() => "blob:recent-audio");
+    const revokeObjectURL = vi.fn();
+    Object.defineProperty(URL, "createObjectURL", { value: createObjectURL, configurable: true });
+    Object.defineProperty(URL, "revokeObjectURL", { value: revokeObjectURL, configurable: true });
+    const play = vi.spyOn(HTMLMediaElement.prototype, "play").mockResolvedValue();
+    const onHistory = vi.fn();
+    const view = renderWithI18n(<DictatePage adapter={adapterStub({ getRecordingAudio })} snapshot={{ settings, modelLoading: false, dictation: { status: "idle" } }} recordings={recordings} onSnapshot={vi.fn()} onHistory={onHistory} onToast={vi.fn()} />);
+    expect(getRecordingAudio).not.toHaveBeenCalled();
+    expect(view.container.querySelector(".home-excerpt__audio--expanded")).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Odtwórz" }));
+    expect(view.container.querySelector(".home-excerpt__audio--expanded")).not.toBeNull();
+    expect(getRecordingAudio).toHaveBeenCalledWith("complete-1");
+    expect(play).toHaveBeenCalledOnce();
+    expect(onHistory).not.toHaveBeenCalled();
+    view.unmount();
+    expect(revokeObjectURL).toHaveBeenCalledWith("blob:recent-audio");
+    play.mockRestore();
+  });
+
   test("pokazuje aktualny skrót i odświeża go po zmianie ustawienia", () => {
     const props = {
       adapter: adapterStub(),
@@ -245,7 +424,7 @@ describe("ekran Dyktuj", () => {
       onToast={() => undefined}
     />);
 
-    await userEvent.click(screen.getByRole("button", { name: "Cała historia" }));
+    await userEvent.click(screen.getByRole("button", { name: "Zobacz historię" }));
     expect(onHistory).toHaveBeenCalledOnce();
     expect(onHistory.mock.calls[0]).toEqual([]);
   });

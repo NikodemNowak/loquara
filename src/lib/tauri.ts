@@ -7,6 +7,7 @@ import type {
   CloudProviderInfo,
   HistoryQuery,
   InputDeviceInfo,
+  InputDevicesChanged,
   Mode,
   ModelDescriptor,
   ModelDownloadProgress,
@@ -15,17 +16,22 @@ import type {
   SettingsUpdateResult,
   VocabularyEntry,
 } from "./types";
+import { realtimeEnabled } from "./types";
+import { microphoneChoices, microphonePreferences, resolveMicrophone } from "./microphones";
 import { normalizeError } from "./errors";
 import { translate } from "./i18n/lang";
 type Listener<T> = (payload: T) => void;
 export interface AppAdapter {
   getAppSnapshot(): Promise<AppSnapshot>;
   listInputDevices(): Promise<InputDeviceInfo[]>;
+  onInputDevicesChanged(listener: Listener<InputDevicesChanged>): Promise<UnlistenFn>;
   startRecording(): Promise<AppSnapshot>;
   stopRecording(): Promise<AppSnapshot>;
   cancelRecording(): Promise<AppSnapshot>;
   requestCancel(): Promise<AppSnapshot>;
   hideOverlay(): Promise<void>;
+  dismissOverlayNotice(key: string, generation: number): Promise<AppSnapshot>;
+  openOverlayDetails(key: string, generation: number): Promise<void>;
   saveOverlayPosition(x: number, y: number): Promise<void>;
   setShortcutSuspended(suspended: boolean): Promise<void>;
   retryTranscription(recordingId: string): Promise<AppSnapshot>;
@@ -91,11 +97,14 @@ async function invokeAfterStateReady<T>(command: string, args?: Record<string, u
 const realAdapter: AppAdapter = {
   getAppSnapshot: () => invokeAfterStateReady("get_app_snapshot"),
   listInputDevices: () => invoke("list_input_devices"),
+  onInputDevicesChanged: (listener) => listen<InputDevicesChanged>("audio://devices-changed", (event) => listener(event.payload)),
   startRecording: () => invoke("start_recording"),
   stopRecording: () => invoke("stop_recording"),
   cancelRecording: () => invoke("cancel_recording"),
   requestCancel: () => invoke("request_cancel"),
   hideOverlay: () => invoke("hide_overlay"),
+  dismissOverlayNotice: (key, generation) => invoke("dismiss_overlay_notice", { key, generation }),
+  openOverlayDetails: (key, generation) => invoke("open_overlay_details", { key, generation }),
   saveOverlayPosition: (x, y) => invoke("save_overlay_position", { x, y }),
   setShortcutSuspended: (suspended) => invoke("set_shortcut_suspended", { suspended }),
   retryTranscription: (recordingId) =>
@@ -125,7 +134,7 @@ const realAdapter: AppAdapter = {
   downloadModel: (model) => invoke("download_model", { model }),
   cancelDownload: () => invoke("cancel_download"),
   deleteModel: (model) => invoke("delete_model", { model }),
-  updateSettings: (settings) => invoke("update_settings", { settings }),
+  updateSettings: (settings) => invoke("update_settings", { settings: { ...settings, overlaySize: "mini" } }),
   updateSettingValue: (key, value) =>
     invoke("update_setting_value", { key, value }),
   listCloudProviders: () => invoke("list_cloud_providers"),
@@ -159,6 +168,7 @@ const realAdapter: AppAdapter = {
 const initialSettings: AppSettings = {
   inputDevice: null,
   shortcut: "Ctrl+Space",
+  activationMode: "toggle",
   autoPaste: true,
   retentionDays: 30,
   launchOnLogin: false,
@@ -168,6 +178,7 @@ const initialSettings: AppSettings = {
   overlaySize: "mini",
   model: "parakeet",
   streaming: false,
+  realtimeByEngine: { "local:parakeet": true },
   language: "system",
   modelKeepAliveSecs: 0,
   pasteMode: "auto",
@@ -236,38 +247,96 @@ const builtInModes = (): Mode[] =>
   }));
 export function createBrowserAdapter(): AppAdapter {
   let settings = { ...initialSettings };
-  let snapshot: AppSnapshot = { dictation: { status: "idle" }, settings, modelLoading: false };
+  const devices: InputDeviceInfo[] = [
+    { id: "default", name: "Mikrofon (domyślny)", isDefault: true, available: true },
+    { id: "studio", name: "Mikrofon USB", isDefault: false, available: true },
+  ];
+  settings.microphones = microphonePreferences(settings, devices);
+  const deviceListeners = new Set<Listener<InputDevicesChanged>>();
+  let deviceGeneration = 0;
+  const modelSummary = () => {
+    const cloud = settings.transcriptionSource === "cloud";
+    const provider = demoCloudProviders.find((item) => item.key === settings.cloudProvider);
+    const names: Record<string, string> = { parakeet: "Parakeet TDT 0.6B v3" };
+    return { key: cloud ? settings.cloudProvider : settings.model, display: cloud ? settings.cloudModel || provider?.defaultModel || settings.cloudProvider : names[settings.model] ?? settings.model,
+      provider: cloud ? provider?.display ?? settings.cloudProvider : "NVIDIA",
+      installed: cloud ? cloudKeys.has(settings.cloudProvider) : settings.model === "parakeet", totalBytes: cloud ? 0 : 670_478_772, source: settings.transcriptionSource };
+  };
+  const cloudKeys = new Set<string>();
+  let snapshot: AppSnapshot = { dictation: { status: "idle" }, settings, modelLoading: false, model: modelSummary(), liveTranscript: null };
   let history = demoHistory();
   let vocabulary: VocabularyEntry[] = [
     { id: 1, heard: "parakit", replacement: "Parakeet" },
   ];
   let modes = builtInModes();
-  const cloudKeys = new Set<string>();
   const stateListeners = new Set<Listener<AppSnapshot>>();
   const levelListeners = new Set<Listener<number>>();
   const emit = () => stateListeners.forEach((listener) => listener(snapshot));
+  let generation = 0;
+  const timers = new Set<number>();
+  const schedule = (work: () => void, ms: number) => {
+    const token = generation;
+    const timer = window.setTimeout(() => { timers.delete(timer); if (token === generation) work(); }, ms);
+    timers.add(timer);
+  };
+  const invalidate = () => { generation += 1; timers.forEach((timer) => window.clearTimeout(timer)); timers.clear(); };
   const setState = (dictation: AppSnapshot["dictation"]) => {
-    snapshot = { dictation, settings, modelLoading: false };
+    snapshot = { ...snapshot, dictation, settings, modelLoading: false, model: modelSummary(), liveTranscript: dictation.status === "idle" ? null : snapshot.liveTranscript };
     emit();
     return snapshot;
   };
+  // Bounded, explicitly synthetic layout fixtures exist only in Vite development.
+  const params = new URLSearchParams(window.location.search);
+  const demoState = import.meta.env.DEV ? params.get("demoState") : null;
+  if (demoState && ["recording", "draft", "processing", "fallback", "failed", "cancelling", "pasting", "deliveryerror"].includes(demoState)) {
+    settings = { ...settings, overlaySize: params.get("demoSize") === "large" ? "large" : "mini" };
+    const take = { recordingId: "synthetic-preview", audioPath: "synthetic-preview.wav" };
+    snapshot = { ...snapshot, settings, recordingStartedAt: Date.now() - 12_000,
+      dictation: demoState === "failed" ? { status: "failed", recovery: take, error: translate("demo.previewError") }
+        : demoState === "pasting" ? { status: "pasting", transcript: translate("demo.previewText"), ...take }
+        : { status: demoState === "processing" ? "processing" : demoState === "cancelling" ? "cancelling" : "recording", ...take },
+      liveTranscript: demoState === "draft" || demoState === "processing" || demoState === "fallback" ? { recordingId: take.recordingId,
+        text: demoState === "fallback" ? "" : translate("demo.previewText"), revision: 2,
+        status: demoState === "processing" ? "finalizing" : demoState === "fallback" ? "fallback" : "draft", clipboardReady: demoState === "draft" } : null };
+  }
+  if (demoState && ["copied", "pasteRequested", "cancelled", "deliveryerror"].includes(demoState)) {
+    snapshot = { ...snapshot, dictation: { status: "idle" }, liveTranscript: null,
+      overlayNotice: { key: "synthetic-notice", generation, recordingId: "synthetic-preview",
+        kind: demoState === "deliveryerror" ? "deliveryFailed" : demoState as "copied" | "pasteRequested" | "cancelled",
+        detail: demoState === "deliveryerror" ? translate("demo.previewError") : null } };
+  }
   return {
-    getAppSnapshot: async () => snapshot,
-    listInputDevices: async () => [
-      { id: "default", name: "Mikrofon (domyślny)", isDefault: true },
-      { id: "studio", name: "Mikrofon USB", isDefault: false },
-    ],
+    getAppSnapshot: async () => {
+      if (demoState === "initerror") throw new Error(translate("demo.previewError"));
+      return snapshot;
+    },
+    listInputDevices: async () => microphoneChoices(microphonePreferences(settings, devices), devices),
+    onInputDevicesChanged: async (listener) => { deviceListeners.add(listener); return () => deviceListeners.delete(listener); },
     startRecording: async () => {
-      const id = `demo-${Date.now()}`;
-      snapshot = { dictation: { status: "recording", recordingId: id, audioPath: `${id}.wav` }, settings, modelLoading: false, recordingStartedAt: Date.now() };
+      resolveMicrophone(microphonePreferences(settings, devices), devices);
+      invalidate();
+      const id = `demo-${Date.now()}-${generation}`;
+      const provider = demoCloudProviders.find((item) => item.key === settings.cloudProvider);
+      const preview = realtimeEnabled(settings, settings.transcriptionSource === "local" ? settings.model === "parakeet" : Boolean(provider?.streaming));
+      snapshot = { dictation: { status: "recording", recordingId: id, audioPath: `${id}.wav` }, settings, modelLoading: false, model: modelSummary(), recordingStartedAt: Date.now(),
+        liveTranscript: preview ? { recordingId: id, text: "", revision: 0, status: "listening", clipboardReady: false } : null };
       emit();
+      if (preview) [800, 1600, 2400].forEach((delay, index) => schedule(() => {
+        if (snapshot.dictation.status !== "recording" || snapshot.dictation.recordingId !== id) return;
+        const words = translate("demo.previewText").split(" ");
+        snapshot = { ...snapshot, liveTranscript: { recordingId: id, text: words.slice(0, Math.ceil(words.length * (index + 1) / 3)).join(" "), revision: index + 1, status: "draft", clipboardReady: false } };
+        // Synthetic browser drafts never claim to have written the OS clipboard.
+        levelListeners.forEach((listener) => listener(.34 + index * .12)); emit();
+      }, delay));
       return snapshot;
     },
     stopRecording: async () => {
       if (snapshot.dictation.status !== "recording") return snapshot;
       const { recordingId, audioPath } = snapshot.dictation;
+      invalidate();
+      if (snapshot.liveTranscript) snapshot = { ...snapshot, liveTranscript: { ...snapshot.liveTranscript, status: "finalizing" } };
       setState({ status: "processing", recordingId, audioPath });
-      window.setTimeout(() => {
+      schedule(() => {
         history = [{
           id: recordingId, createdAt: Date.now(), durationMs: 8_000,
           status: "completed", text: "To jest przykładowa transkrypcja z trybu demonstracyjnego.",
@@ -278,14 +347,23 @@ export function createBrowserAdapter(): AppAdapter {
       }, 900);
       return snapshot;
     },
-    cancelRecording: async () => setState({ status: "idle" }),
-    requestCancel: async () => snapshot,
+    cancelRecording: async () => { invalidate(); return setState({ status: "idle" }); },
+    requestCancel: async () => { invalidate(); return setState({ status: "idle" }); },
     hideOverlay: async () => undefined,
+    dismissOverlayNotice: async (key, owner) => {
+      if (snapshot.overlayNotice?.key === key && snapshot.overlayNotice.generation === owner && owner === generation) {
+        snapshot = { ...snapshot, overlayNotice: null }; emit();
+      }
+      return snapshot;
+    },
+    openOverlayDetails: async () => undefined,
     saveOverlayPosition: async () => undefined,
     setShortcutSuspended: async () => undefined,
     retryTranscription: async (recordingId) => {
       const item = history.find((recording) => recording.id === recordingId);
       if (!item?.audioPath) throw new Error(translate("errors.noAudio"));
+      invalidate();
+      snapshot = { ...snapshot, overlayNotice: null };
       return setState({ status: "processing", recordingId, audioPath: item.audioPath });
     },
     pasteTranscript: async () => undefined,
@@ -342,23 +420,25 @@ export function createBrowserAdapter(): AppAdapter {
     getSettings: async () => settings,
     getModelStatus: async () => ({
       state: "ready",
-      model: "nvidia/parakeet-tdt-0.6b-v3",
-      revision: "7c35754d166cca382ad1e53e68b01e7c575f3a1d",
+      model: "Parakeet TDT 0.6B v3",
+      revision: "",
       device: null,
       message: null,
     }),
     listModels: async () => ([
-      { key: "parakeet", id: "nvidia/parakeet-tdt-0.6b-v3", provider: "NVIDIA", source: "local", revision: "7c35754d166cca382ad1e53e68b01e7c575f3a1d", display: "Parakeet TDT 0.6B v3", minVramGb: 3, minRamGb: 8, languages: "auto (PL/EN)", estimatedSizeBytes: 2_500_000_000, status: "ready", installedSizeBytes: 2_500_000_000, message: null },
-      { key: "whisper-turbo", id: "openai/whisper-large-v3-turbo", provider: "OpenAI", source: "local", revision: "41f01f3fe87f28c78e2fbf8b568835947dd65ed9", display: "Whisper Large v3 Turbo", minVramGb: 4, minRamGb: 8, languages: "auto (99)", estimatedSizeBytes: 1_600_000_000, status: "not_installed", installedSizeBytes: null, message: null },
-      { key: "whisper-small", id: "openai/whisper-small", provider: "OpenAI", source: "local", revision: "973afd24965f72e36ca33b3055d56a652f456b4d", display: "Whisper Small", minVramGb: 1.5, minRamGb: 4, languages: "auto (99)", estimatedSizeBytes: 1_000_000_000, status: "not_installed", installedSizeBytes: null, message: null },
-      { key: "cohere", id: "AEmotionStudio/cohere-transcribe-03-2026-models", provider: "Cohere", source: "local", revision: "d114f701a80b2150943f5dbae71458f4d1fcb37b", display: "Cohere Transcribe 2B", minVramGb: 5, minRamGb: 8, languages: "pl/en/fr/de/...", estimatedSizeBytes: 4_132_000_000, status: "not_installed", installedSizeBytes: null, message: null },
+      { key: "parakeet", id: "csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8", provider: "NVIDIA", source: "local", revision: "", display: "Parakeet TDT 0.6B v3", minVramGb: 0, minRamGb: 2, languages: "25 języków", estimatedSizeBytes: 670_478_772, status: "ready", installedSizeBytes: 670_478_772, message: null },
     ]),
     downloadModel: async () => undefined,
     cancelDownload: async () => undefined,
     deleteModel: async () => undefined,
     updateSettings: async (next) => {
-      settings = { ...next };
-      snapshot = { ...snapshot, settings };
+      const microphones = microphonePreferences(next, devices);
+      if (microphones.selection === "manual" && microphones.selectedId !== null) microphones.hiddenIds = microphones.hiddenIds.filter((id) => id !== microphones.selectedId);
+      settings = { ...next, microphones, inputDevice: microphones.selectedId, overlaySize: "mini" };
+      const change = { generation: ++deviceGeneration, devices: microphoneChoices(microphones, devices) };
+      deviceListeners.forEach((listener) => listener(change));
+      snapshot = { ...snapshot, settings, model: modelSummary() };
+      emit();
       return { settings, warning: null };
     },
     updateSettingValue: async () => undefined,
@@ -372,10 +452,12 @@ export function createBrowserAdapter(): AppAdapter {
     setCloudApiKey: async (provider, apiKey) => {
       if (apiKey.trim()) cloudKeys.add(provider);
       else cloudKeys.delete(provider);
+      snapshot = { ...snapshot, model: modelSummary() }; emit();
       return [...cloudKeys];
     },
     clearCloudApiKey: async (provider) => {
       cloudKeys.delete(provider);
+      snapshot = { ...snapshot, model: modelSummary() }; emit();
       return [...cloudKeys];
     },
     testCloudTranscription: async () => {
@@ -391,7 +473,11 @@ export function createBrowserAdapter(): AppAdapter {
       return () => levelListeners.delete(listener);
     },
     onModelProgress: async () => () => undefined,
-    onError: async () => () => undefined,
+    onError: async (listener) => {
+      if (demoState !== "drafterror") return () => undefined;
+      const timer = window.setTimeout(() => listener(translate("demo.previewError")), 50);
+      return () => window.clearTimeout(timer);
+    },
   };
 }
 let browserAdapter: AppAdapter | undefined;

@@ -1,10 +1,13 @@
 import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 
+import { Copy, Mic, Square, X, Check, ArrowRight, RotateCcw } from "../../components/Icons";
 import { LevelMeter } from "../../components/LevelMeter";
-import { Waveform } from "../../components/Waveform";
+import { AudioPlayer } from "../../components/AudioPlayer";
 import type { ToastKind } from "../../components/Toast";
 import type { AppAdapter } from "../../lib/tauri";
 import type { AppSnapshot, DownloadStatus, Recording } from "../../lib/types";
+import { matchingLiveTranscript } from "../../lib/types";
+import { useTranscriptFollow } from "../../lib/useTranscriptFollow";
 import { normalizeError } from "../../lib/errors";
 import { dateLocale, useI18n, type TranslationKey } from "../../lib/i18n";
 import { formatBytes } from "../../lib/bytes";
@@ -152,8 +155,6 @@ interface Readout {
   hint: TranslationKey;
   /** Label for the on-screen fallback control, when one makes sense. */
   action?: TranslationKey;
-  /** What the keys row says beneath the shortcut. */
-  keys?: TranslationKey;
 }
 
 const READOUTS: Record<string, Readout> = {
@@ -161,15 +162,13 @@ const READOUTS: Record<string, Readout> = {
     state: "dictate.state.ready",
     hint: "dictate.hint.ready",
     action: "dictate.action.start",
-    keys: "dictate.keys.start",
   },
   recording: {
     state: "dictate.state.recording",
     hint: "dictate.hint.recording",
     action: "dictate.action.stop",
-    keys: "dictate.keys.stop",
   },
-  cancelling: { state: "dictate.state.recording", hint: "dictate.hint.cancelling" },
+  cancelling: { state: "dictate.state.cancelling", hint: "dictate.hint.cancelling", action: "overlay.undo" },
   processing: { state: "dictate.state.processing", hint: "dictate.hint.processing" },
   pasting: { state: "dictate.state.pasting", hint: "dictate.hint.pasting" },
   failed: {
@@ -202,9 +201,11 @@ export function DictatePage({
   const { t, lang } = useI18n();
   const [busy, setBusy] = useState(false);
   const [seconds, setSeconds] = useState(0);
+  const [expandedAudio, setExpandedAudio] = useState<string[]>([]);
   const micLevel = useRef(0);
   const state = snapshot.dictation;
   const status = state.status;
+  const holdShortcut = snapshot.settings.activationMode === "push_to_talk";
   const startedAt = snapshot.recordingStartedAt ?? null;
   // With no engine there is nothing to be ready for, and saying "Ready" would
   // send the user to press a shortcut that can only fail.
@@ -247,15 +248,45 @@ export function DictatePage({
     return () => { active = false; dispose?.(); };
   }, [adapter, status]);
 
+  const live = matchingLiveTranscript(snapshot);
+  const { transcriptRef, onTranscriptScroll } = useTranscriptFollow(live?.recordingId ?? null, live?.revision);
+  const recent = recordings.filter((item) => item.status === "completed" && item.text?.trim()).slice(0, 2);
+  const activeTake = ["recording", "cancelling", "processing", "pasting"].includes(status);
+  const transcript = live?.text || (status === "pasting" ? state.transcript : "");
+  const emptyCopy: TranslationKey = status === "processing" || live?.status === "finalizing"
+    ? "studio.finalizing"
+    : status !== "recording" ? "studio.emptyTitle"
+    : live?.status === "fallback" ? "studio.afterStop"
+    : live?.status === "connecting" ? "studio.connecting"
+    : live ? "studio.waitingLive" : "studio.afterStop";
+  const copyTranscript = async (text: string) => {
+    try {
+      if (!navigator.clipboard?.writeText) throw new Error(t("history.error.clipboard"));
+      await navigator.clipboard.writeText(text);
+      onToast(t("studio.clipboardReady"), "success");
+    } catch (error) {
+      onToast(t("common.error.action", { error: normalizeError(error) }), "error");
+    }
+  };
+  const cancel = async () => {
+    if (busy) return;
+    setBusy(true);
+    try { onSnapshot(await adapter.cancelRecording()); }
+    catch (error) { onToast(t("common.error.action", { error: normalizeError(error) }), "error"); }
+    finally { setBusy(false); }
+  };
+
   const act = async () => {
     if (busy) return;
     setBusy(true);
     try {
       const next = status === "recording"
         ? await adapter.stopRecording()
-        : status === "failed"
-          ? await adapter.retryTranscription(state.recovery.recordingId)
-          : await adapter.startRecording();
+        : status === "cancelling"
+          ? await adapter.retryTranscription(state.recordingId)
+          : status === "failed"
+            ? await adapter.retryTranscription(state.recovery.recordingId)
+            : await adapter.startRecording();
       onSnapshot(next);
     } catch (error) {
       onToast(t("common.error.action", { error: normalizeError(error) }), "error");
@@ -265,49 +296,20 @@ export function DictatePage({
   };
 
   return (
-    <section className="page dictate-page">
-      <div className="dictate">
-        <h1 className={`dictate__state dictate__state--${status === "idle" && !modelReady ? "noModel" : status}`} aria-live="polite">
-          {loadingModel ? t("dictate.state.loadingModel") : t(readout.state)}
-        </h1>
-        <p className="dictate__hint">
-          {loadingModel ? t("dictate.hint.loadingModel") : t(readout.hint)}
-        </p>
-
-        {(status === "recording" || status === "cancelling") && (
-          <div className="dictate__meter">
-            <LevelMeter
-              level={0}
-              levelRef={status === "recording" ? micLevel : undefined}
-              height={72}
-              barWidth={4}
-              gap={4}
-              colorToken="--recording"
-            />
-            <p className="dictate__timer" aria-label={t("dictate.elapsed")}>{formatClock(seconds)}</p>
-          </div>
-        )}
-
-        {status === "processing" && (
-          <div className="dictate__meter dictate__meter--thinking">
-            <LevelMeter level={0} mode="thinking" height={72} barWidth={4} gap={4} />
-          </div>
-        )}
-
-        {readout.keys && (
-          <div className="dictate__keys">
-            <ShortcutKeys shortcut={snapshot.settings.shortcut} size="large" />
-            <span>{t(readout.keys)}</span>
-          </div>
-        )}
-
-        {status === "idle" && snapshot.modelLoading && (
-          <p className="dictate__note" role="status">
-            <span className="spinner spinner--small" aria-hidden="true" />
-            {t("dictate.note.warmingUp")}
-          </p>
-        )}
-
+    <section className={`page dictate-page${activeTake || status === "failed" ? " dictate-page--active" : ""}`}>
+      <header className="home-welcome">
+        <h1 aria-live="polite">{loadingModel ? t("dictate.state.loadingModel") : t(readout.state)}</h1>
+        <p>{loadingModel ? t("dictate.hint.loadingModel") : status === "idle" && modelReady ? t(holdShortcut ? "studio.holdReadyHint" : "studio.readyHint") : status === "recording" && holdShortcut ? t("dictate.hint.holdRecording") : t(readout.hint)}</p>
+        <div className={`home-action${activeTake || status === "failed" ? " home-action--active" : ""}`}>
+          {status === "recording" && <div className="studio-level"><LevelMeter level={0} levelRef={micLevel} height={24} barWidth={2} gap={2} colorToken="--recording" quietToken="--muted" /><time aria-label={t("dictate.elapsed")}>{formatClock(seconds)}</time></div>}
+          {["processing", "pasting"].includes(status) && <span className="spinner" aria-hidden="true" />}
+          {(status === "recording" || status === "processing") && <button className="text-button studio-cancel" disabled={busy} onClick={() => void cancel()}><X size={14} />{t("studio.cancel")}</button>}
+          {readout.action && !setup && <button className={status === "idle" ? "shortcut-action" : "primary-button"} aria-label={busy ? t("dictate.action.working") : status === "cancelling" ? t("overlay.undoAria") : t(readout.action)} disabled={busy} onClick={() => cloudMissing ? onSettings?.() : void act()}>
+            <span className="shortcut-action__label">{status === "recording" ? <Square size={16} /> : status === "cancelling" || status === "failed" ? <RotateCcw size={16} /> : <Mic size={17} />}{busy ? t("dictate.action.working") : t(readout.action)}</span>
+            {status === "idle" && modelReady && <ShortcutKeys shortcut={snapshot.settings.shortcut} />}
+          </button>}
+        </div>
+        {status === "idle" && modelReady && <span className="home-welcome__note">{t("dictate.shortcut.outside")}</span>}
         {setup && model && (
           <div className="model-setup">
             <p className="model-setup__meta">
@@ -354,51 +356,42 @@ export function DictatePage({
             <p className="model-setup__note">{t("dictate.model.soon")}</p>
           </div>
         )}
-
-        {readout.action && !setup && (
-          <div className="dictate__actions">
-            {cloudMissing ? (
-              <button className="secondary-button" onClick={() => onSettings?.()}>
-                {t(readout.action)}
-              </button>
-            ) : (
-              <button className="secondary-button" disabled={busy} onClick={() => void act()}>
-                {busy ? t("dictate.action.working") : t(readout.action)}
-              </button>
-            )}
-          </div>
-        )}
-      </div>
-
-      <div className="section-heading">
-        <h2>{t("dictate.recent.title")}</h2>
-        <button className="text-button" onClick={() => onHistory()}>{t("dictate.recent.all")}</button>
-      </div>
-
-      {recordings.length ? (
-        <div className="recent">
-          {recordings.slice(0, 5).map((item) => (
-            <button key={item.id} className="recent-item" onClick={() => onHistory(item.id)}>
-              <span className={`recent-item__text ${item.text ? "" : "recent-item__text--empty"}`}>
-                {item.text ?? t("dictate.recent.noTranscript")}
-              </span>
-              <span className="recent-item__meta">
-                <time dateTime={new Date(item.createdAt).toISOString()}>{formatTime(item.createdAt, lang)}</time>
-                <span>{formatDuration(item.durationMs)}</span>
-                <Waveform peaks={item.peaks} />
-                {item.status === "failed" && <b>{t("common.error")}</b>}
-              </span>
-            </button>
-          ))}
+      </header>
+      {(activeTake || status === "failed") ? <div className={`active-dictation active-dictation--${status}`}>
+        <div className="section-heading">
+          <h2>{t("studio.draft")}</h2>
+          {live && <span className={`clipboard-state ${live.clipboardReady ? "clipboard-state--ready" : ""}`}>{live.clipboardReady && <Check size={14} />}{t(live.clipboardReady ? "studio.clipboardReady" : "studio.clipboardPending")}</span>}
         </div>
-      ) : (
-        <p className="dictate-empty">
-          {t("dictate.empty")}
-          {onSettings && (
-            <button onClick={onSettings}>{t("dictate.empty.settings")}</button>
-          )}
-        </p>
-      )}
+        <div ref={transcriptRef} onScroll={onTranscriptScroll} className="transcript-canvas" role="region" aria-label={t("studio.draft")}>
+          {transcript ? <p className="transcript-canvas__text">{transcript}</p> : <div className="transcript-canvas__empty"><p>{t(emptyCopy)}</p></div>}
+          {live?.status === "fallback" && <p className="studio-fallback" role="status">{t("studio.fallback")}</p>}
+          {status === "failed" && <p className="error-note" role="alert">{normalizeError(state.error)}</p>}
+        </div>
+      </div> : <section className="home-recent" aria-label={t("studio.last")}>
+        <div className="section-heading">
+          <h2>{t("dictate.recentHeading")}</h2>
+          <button className="text-button" onClick={() => onHistory()}>{t("dictate.viewHistory")}<ArrowRight size={14} /></button>
+        </div>
+        {recent.length ? recent.map((item) => <article className="home-excerpt" key={item.id}>
+          <div className="home-excerpt__meta">
+            <time dateTime={new Date(item.createdAt).toISOString()}>{formatTime(item.createdAt, lang)}</time>
+            <span>{new Intl.DateTimeFormat(dateLocale(lang), { day: "numeric", month: "short" }).format(item.createdAt)}</span>
+            {item.sourceApp && <span>{item.sourceApp}</span>}
+            <span>{formatDuration(item.durationMs)}</span>
+          </div>
+          <button className="home-excerpt__text" onClick={() => onHistory(item.id)} title={t("studio.review")}>{item.text}</button>
+          <button className="icon-button home-excerpt__copy" onClick={() => void copyTranscript(item.text!)} aria-label={t("history.action.copy")} title={t("history.action.copy")}><Copy size={16} /></button>
+          {item.audioPath && <div className={`home-excerpt__audio${expandedAudio.includes(item.id) ? " home-excerpt__audio--expanded" : ""}`} onClickCapture={(event) => {
+            if ((event.target as HTMLElement).closest(".player__btn")) setExpandedAudio((ids) => ids.includes(item.id) ? ids : [...ids, item.id]);
+          }}><AudioPlayer adapter={adapter} recording={item} /></div>}
+        </article>) : <div className="home-empty"><p>{t("dictate.emptyTitle")}</p><span>{t("dictate.empty")}</span></div>}
+      </section>}
+        {status === "idle" && snapshot.modelLoading && (
+          <p className="dictate__note" role="status">
+            <span className="spinner spinner--small" aria-hidden="true" />
+            {t("dictate.note.warmingUp")}
+          </p>
+        )}
     </section>
   );
 }

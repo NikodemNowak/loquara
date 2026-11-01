@@ -1,13 +1,18 @@
 pub mod models;
 pub mod engine;
 pub mod audio;
+pub mod microphones;
+#[cfg(windows)]
+mod windows_microphones;
 pub mod cloud;
 pub mod dictation;
+mod hold;
 pub mod domain;
 pub mod platform;
 pub mod secret;
 pub mod sound;
 pub mod streaming;
+pub mod buffered;
 pub mod storage;
 pub mod transcription;
 
@@ -78,39 +83,18 @@ pub fn run() {
                     let state = app.state::<AppState>().inner().clone();
                     let configured = state
                         .settings
-                        .read()
+                        .try_read()
                         .map(|settings| settings.shortcut.clone())
                         .unwrap_or_default();
                     match platform::shortcut_role_for(shortcut, &configured) {
                         Ok(platform::ShortcutRole::Cancel) => {
-                            // Off the handler thread, like the toggle below.
-                            // Handling a press means changing state, and every
-                            // state change claims or releases Escape — which
-                            // reaches back into the shortcut registry the
-                            // plugin is still holding while it calls this.
-                            // Done here, that is a deadlock: the window stops
-                            // repainting and the prompt never appears.
-                            tauri::async_runtime::spawn(async move {
-                                dictation::handle_cancel_press(
-                                    &app,
-                                    &state,
-                                    dictation::RecorderKey::Escape,
-                                );
-                            });
+                            dictation::dispatch_cancel_press(app, state, dictation::RecorderKey::Escape);
                         }
                         Ok(platform::ShortcutRole::ConfirmCancel) => {
-                            tauri::async_runtime::spawn(async move {
-                                dictation::handle_cancel_press(
-                                    &app,
-                                    &state,
-                                    dictation::RecorderKey::Enter,
-                                );
-                            });
+                            dictation::dispatch_cancel_press(app, state, dictation::RecorderKey::Enter);
                         }
                         Ok(platform::ShortcutRole::Toggle) => {
-                            tauri::async_runtime::spawn(async move {
-                                let _ = dictation::toggle_recording(app, state).await;
-                            });
+                            dictation::dispatch_activation_press(app, state);
                         }
                         Ok(platform::ShortcutRole::Ignore) | Err(_) => {}
                     }
@@ -193,6 +177,9 @@ pub fn run() {
                         let device = id.trim_start_matches("mic:").to_owned();
                         let state = app.state::<AppState>();
                         dictation::set_input_device(&state, device);
+                        let locale = state.settings.read().ok().map(|settings| resolved_language(&settings).to_owned());
+                        if let Some(locale) = locale { rebuild_tray_menu(app, &state, &locale); }
+                        if let Ok(snapshot) = dictation::get_snapshot_for_events(&state) { let _ = app.emit("dictation://state", snapshot); }
                     }
                     _ => {}
                 })
@@ -215,6 +202,12 @@ pub fn run() {
                 }
             }
             tray.build(app)?;
+            dictation::spawn_microphone_fault_worker(app.handle(), &state);
+            #[cfg(windows)]
+            match windows_microphones::spawn(app.handle().clone(), state.clone()) {
+                Ok(monitor) => { app.manage(monitor); }
+                Err(error) => { let _ = app.emit("dictation://persistence_error", format!("Microphone change notifications unavailable: {error}")); }
+            }
             // The window is configured hidden so a quiet start never flashes
             // it on screen. It is shown here, once the tray exists to bring it
             // back, unless the user asked to start in the tray.
@@ -250,6 +243,8 @@ pub fn run() {
             dictation::cancel_recording,
             dictation::request_cancel,
             dictation::hide_overlay,
+            dictation::dismiss_overlay_notice,
+            dictation::open_overlay_details,
             dictation::save_overlay_position,
             dictation::set_shortcut_suspended,
             dictation::retry_transcription,
@@ -286,8 +281,12 @@ pub fn run() {
             dictation::test_cloud_transcription,
             dictation::system_locale,
         ])
-        .run(tauri::generate_context!())
-        .expect("failed to launch the Loquara app");
+        .build(tauri::generate_context!())
+        .expect("failed to launch the Loquara app")
+        .run(|app, event| {
+            #[cfg(windows)]
+            if matches!(event, tauri::RunEvent::Exit) && let Some(monitor) = app.try_state::<windows_microphones::MicrophoneMonitor>() { monitor.shutdown(); }
+        });
 }
 
 /// Labels for the tray context menu, localized for one UI language subtag.
@@ -345,18 +344,20 @@ fn build_tray_menu<R: tauri::Runtime, M: tauri::Manager<R>>(
     locale: &str,
 ) -> tauri::Result<tauri::menu::Menu<R>> {
     let labels = tray_labels(locale);
-    let devices = state.audio.list_devices().unwrap_or_default();
+    let devices = dictation::input_device_choices(state).unwrap_or_default();
     let active_device = state
         .settings
         .read()
         .ok()
-        .and_then(|settings| settings.input_device.clone());
+        .and_then(|settings| settings.microphones.as_ref().and_then(|preferences| crate::microphones::resolve_preference(preferences, &devices).ok()).map(|device| device.id.clone()));
     let mut mic_menu =
         tauri::menu::SubmenuBuilder::with_id(app, "microphones", labels.submenu_microphones);
     if devices.is_empty() {
         mic_menu = mic_menu.text("mic:none", labels.mic_none);
     }
     for device in &devices {
+        if !device.available { continue; }
+        if state.settings.read().is_ok_and(|settings| settings.microphones.as_ref().is_some_and(|preferences| preferences.hidden_ids.contains(&device.id))) { continue; }
         let label = if active_device.as_deref() == Some(device.id.as_str()) {
             format!("{}  ✓", device.name)
         } else {
@@ -378,11 +379,8 @@ fn build_tray_menu<R: tauri::Runtime, M: tauri::Manager<R>>(
 /// Rebuilds the "loquara" tray menu in place so a language change is reflected
 /// live, without restarting the app.
 pub fn rebuild_tray_menu(app: &tauri::AppHandle, state: &AppState, locale: &str) {
-    let menu = build_tray_menu(app, state, locale).expect("failed to build tray menu");
-    let tray = app
-        .tray_by_id("loquara")
-        .expect("loquara tray icon should still exist");
-    tray.set_menu(Some(menu))
-        .expect("failed to update tray menu");
+    if let Ok(menu) = build_tray_menu(app, state, locale) && let Some(tray) = app.tray_by_id("loquara") {
+        let _ = tray.set_menu(Some(menu));
+    }
 }
 

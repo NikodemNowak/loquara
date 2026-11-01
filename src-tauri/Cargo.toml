@@ -1,6 +1,6 @@
 [package]
 name = "loquara"
-version = "0.6.4"
+version = "0.10.0"
 description = "Lokalna aplikacja do dyktowania"
 edition = "2024"
 rust-version = "1.95"
@@ -12,7 +12,7 @@ crate-type = ["lib", "cdylib", "staticlib"]
 
 [dependencies]
 arboard = "3"
-cpal = "0.16"
+cpal = "=0.18.2"
 futures-util = "0.3"
 hound = "3.5"
 regex = "1.11"
@@ -20,8 +20,7 @@ rubato = "0.16"
 rusqlite = { version = "0.37", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sherpa-rs = { version = "0.6", default-features = false, features = ["directml"] }
-tauri = { version = "2.11.5", features = ["tray-icon", "protocol-asset"] }
+tauri = { version = "2.11.5", features = ["tray-icon", "protocol-asset", "macos-private-api"] }
 tauri-plugin-autostart = "2"
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-single-instance = "2"
@@ -31,18 +30,32 @@ tokio-tungstenite = { version = "0.30", default-features = false, features = ["c
 ureq = { version = "2", features = ["tls"] }
 
 [target.'cfg(windows)'.dependencies]
+# DirectML lets any DirectX 12 card run the model, but it has to be compiled
+# into sherpa-onnx, which is why Windows builds the engine from source.
+sherpa-rs = { version = "0.6", default-features = false, features = ["directml"] }
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Media_Audio", "Win32_System_Com"] }
+windows-core = "0.62.2"
 windows-sys = { version = "0.60", features = [
     "Win32_Foundation",
     "Win32_Globalization",
+    "Win32_Graphics_Gdi",
     "Win32_Media_Audio",
     "Win32_Security_Cryptography",
     "Win32_System_DataExchange",
     "Win32_System_Memory",
     "Win32_System_Ole",
+    "Win32_System_RemoteDesktop",
+    "Win32_System_StationsAndDesktops",
     "Win32_System_Threading",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
 ] }
+
+# macOS and Linux use the publisher's prebuilt CPU engine. Downloading it is
+# both faster than compiling ONNX Runtime and the only configuration the
+# universal macOS archive offers.
+[target.'cfg(not(windows))'.dependencies]
+sherpa-rs = { version = "0.6", default-features = false, features = ["download-binaries"] }
 
 [dev-dependencies]
 tempfile = "3"
@@ -50,3 +63,10 @@ tokio = { version = "1", features = ["macros", "net", "rt", "rt-multi-thread", "
 
 [build-dependencies]
 tauri-build = "2.6.3"
+
+# Patch only the upstream diagnostics script. Windows 11 24H2 and Windows
+# Server 2025 no longer ship wmic, and sherpa-onnx's show-info.cmake treats
+# the resulting empty output as a fatal error even though it is only printing
+# the OS name. The rest of the crate is byte-for-byte the published 0.6.8.
+[patch.crates-io]
+sherpa-rs-sys = { path = "vendor/sherpa-rs-sys" }

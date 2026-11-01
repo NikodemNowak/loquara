@@ -4,22 +4,9 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Loquara</title>
-    <script>
-      (function () {
-        var stored = localStorage.getItem("mow-theme");
-        var theme;
-        if (stored === "light" || stored === "dark") {
-          theme = stored;
-        } else {
-          theme =
-            window.matchMedia &&
-            window.matchMedia("(prefers-color-scheme: dark)").matches
-              ? "dark"
-              : "light";
-        }
-        document.documentElement.dataset.theme = theme;
-      })();
-    </script>
+    <meta name="theme-color" content="#151515" />
+    <style>html,body{background:#151515;color:#f3f3f3;margin:0}html{color-scheme:dark}html.overlay-window,html.overlay-window body{background:transparent}</style>
+    <script>if(new URLSearchParams(location.search).get('window')==='overlay')document.documentElement.classList.add('overlay-window')</script>
   </head>
   <body>
     <div id="root"></div>

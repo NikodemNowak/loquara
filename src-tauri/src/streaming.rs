@@ -1,15 +1,4 @@
-//! Live transcription over a provider's WebSocket.
-//!
-//! xAI sends locked pieces of the transcript while the audio is still
-//! arriving — roughly every few seconds of speech. Loquara types those pieces
-//! into whatever window has focus as they land, so dictating reads like
-//! speaking into the application rather than recording first and waiting
-//! afterwards.
-//!
-//! The recording is still written to disk the whole time. Live transcription
-//! is best effort: if the socket never connects, drops, or the text cannot be
-//! typed, the finished WAV is still there and the ordinary request path takes
-//! over.
+//! Buffered live transcription. Drafts never inject keyboard input.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -21,7 +10,7 @@ use rubato::{
 use serde_json::Value;
 use tokio::sync::mpsc;
 
-use crate::storage::{VocabularyEntry, apply_vocabulary_text};
+use crate::buffered::DraftAssembler;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -117,12 +106,9 @@ pub fn parse_event(json: &str) -> Event {
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
         },
-        "transcript.done" => Event::Done {
-            text: value
-                .get("text")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_owned(),
+        "transcript.done" => match value.get("text").and_then(Value::as_str) {
+            Some(text) => Event::Done { text: text.to_owned() },
+            None => Event::Error { message: "provider final is missing its transcript; using complete recording".into() },
         },
         "error" => Event::Error {
             message: value
@@ -135,220 +121,16 @@ pub fn parse_event(json: &str) -> Event {
     }
 }
 
-/// Maximum characters one correction may take back.
-///
-/// A model that rewrites more than this mid-utterance has lost the plot, and
-/// a wider backspace is how a dictation session eats the user's own typing.
-const MAX_CORRECTION_CHARS: usize = 160;
-
-/// Turns the provider's live results into keystrokes.
-///
-/// The stream carries three kinds of text: interim results that may still
-/// change, locked segments, and the finished utterance. Interim text is typed
-/// as it arrives, so words appear while the user is speaking, and taken back
-/// with backspaces when the model changes its mind. Everything removed was
-/// typed by this session moments earlier; corrections never reach past the
-/// segment in flight, and speculation stops for good if a correction cannot
-/// be made — a caret that has moved is not a caret to delete around.
-pub struct LiveTypist {
-    vocabulary: Vec<VocabularyEntry>,
-    /// Everything typed for the session, as the application received it.
-    delivered: String,
-    /// Delivered text of the utterance being spoken, including the segment in
-    /// flight.
-    utterance: String,
-    /// Delivered text of the segment in flight.
-    segment: String,
-    /// False once correcting the segment stops being safe.
-    speculating: bool,
-}
-
-impl LiveTypist {
-    pub fn new(vocabulary: Vec<VocabularyEntry>) -> Self {
-        Self {
-            vocabulary,
-            delivered: String::new(),
-            utterance: String::new(),
-            segment: String::new(),
-            speculating: true,
-        }
-    }
-
-    /// What the target application has received so far.
-    pub fn delivered(&self) -> &str {
-        &self.delivered
-    }
-
-    /// A result that may still change.
-    pub fn speculate(&mut self, text: &str, sink: &dyn TranscriptSink) -> Result<(), String> {
-        if !self.speculating {
-            return Ok(());
-        }
-        let text = text.trim();
-        if text.is_empty() || text == self.segment {
-            return Ok(());
-        }
-        if self.segment.is_empty() {
-            return self.append(text, sink, false);
-        }
-        if let Some(tail) = text.strip_prefix(self.segment.as_str()) {
-            return self.append(tail, sink, true);
-        }
-        // The model changed its mind inside this segment.
-        let common = common_prefix_chars(&self.segment, text);
-        let remove = self.segment.chars().count().saturating_sub(common);
-        if remove > MAX_CORRECTION_CHARS {
-            self.speculating = false;
-            return Ok(());
-        }
-        if remove > 0 && !self.remove(remove, sink)? {
-            return Ok(());
-        }
-        let tail: String = text.chars().skip(common).collect();
-        self.append(&tail, sink, true)
-    }
-
-    /// A locked result: one segment, or the finished utterance.
-    pub fn accept(
-        &mut self,
-        text: &str,
-        speech_final: bool,
-        sink: &dyn TranscriptSink,
-    ) -> Result<(), String> {
-        let text = text.trim();
-        if text.is_empty() {
-            return Ok(());
-        }
-        if speech_final {
-            // The stitched utterance supersedes everything this utterance
-            // said, including whatever is still in flight.
-            let desired = apply_vocabulary_text(text, &self.vocabulary);
-            if desired != self.utterance {
-                if self.utterance.is_empty() {
-                    self.append(&desired, sink, false)?;
-                } else if let Some(tail) = desired.strip_prefix(self.utterance.as_str()) {
-                    self.append(tail, sink, true)?;
-                } else {
-                    // A replacement may only follow a successful retraction.
-                    // Keep a large revision in history instead of appending
-                    // a second copy to the text that is already visible.
-                    let common = common_prefix_chars(&self.utterance, &desired);
-                    let remove = self.utterance.chars().count().saturating_sub(common);
-                    if remove <= MAX_CORRECTION_CHARS && self.remove(remove, sink)? {
-                        let tail: String = desired.chars().skip(common).collect();
-                        self.append(&tail, sink, true)?;
-                    }
-                }
-            }
-            self.utterance.clear();
-            self.segment.clear();
-            self.speculating = true;
-            return Ok(());
-        }
-        // A locked segment: it replaces whatever was speculated for it.
-        let desired = apply_vocabulary_text(text, &self.vocabulary);
-        if desired != self.segment {
-            if self.segment.is_empty() {
-                self.append(&desired, sink, false)?;
-            } else {
-                let common = common_prefix_chars(&self.segment, &desired);
-                let remove = self.segment.chars().count().saturating_sub(common);
-                if remove <= MAX_CORRECTION_CHARS && self.remove(remove, sink)? {
-                    let tail: String = desired.chars().skip(common).collect();
-                    self.append(&tail, sink, true)?;
-                } else {
-                    self.speculating = false;
-                }
-            }
-        }
-        self.segment.clear();
-        Ok(())
-    }
-
-    /// Takes back the last `count` characters. Returns whether it worked.
-    fn remove(&mut self, count: usize, sink: &dyn TranscriptSink) -> Result<bool, String> {
-        if count == 0 {
-            return Ok(true);
-        }
-        if !self.speculating {
-            // Speculation was abandoned; letting the wrong text stand is
-            // better than deleting around a caret that may no longer be ours.
-            return Ok(false);
-        }
-        if let Err(error) = sink.retract(count) {
-            self.speculating = false;
-            return Err(error);
-        }
-        truncate_chars(&mut self.delivered, count);
-        truncate_chars(&mut self.utterance, count);
-        truncate_chars(&mut self.segment, count);
-        Ok(true)
-    }
-
-    /// Types one piece, spacing it away from whatever came before.
-    fn append(
-        &mut self,
-        text: &str,
-        sink: &dyn TranscriptSink,
-        continuation: bool,
-    ) -> Result<(), String> {
-        if text.is_empty() {
-            return Ok(());
-        }
-        let delivered = if continuation {
-            text.to_owned()
-        } else {
-            self.spaced(text)
-        };
-        sink.type_text(&delivered)?;
-        self.delivered.push_str(&delivered);
-        // Separators between utterances/segments belong to the document,
-        // not the provider's segment text used for later comparisons.
-        self.utterance.push_str(if self.utterance.is_empty() {
-            text
-        } else {
-            &delivered
-        });
-        self.segment.push_str(text);
-        Ok(())
-    }
-
-    /// Keeps a new piece from running into the previous one.
-    fn spaced(&self, text: &str) -> String {
-        if !self.segment.is_empty() || self.delivered.is_empty() {
-            return text.to_owned();
-        }
-        let previous = self.delivered.chars().last();
-        let next = text.chars().next();
-        let glued = matches!(
-            (previous, next),
-            (Some(previous), Some(next)) if !previous.is_whitespace() && next.is_alphanumeric()
-        );
-        if glued {
-            format!(" {text}")
-        } else {
-            text.to_owned()
-        }
-    }
-}
-
-fn common_prefix_chars(left: &str, right: &str) -> usize {
-    left.chars()
-        .zip(right.chars())
-        .take_while(|(left, right)| left == right)
-        .count()
-}
-
-fn truncate_chars(text: &mut String, count: usize) {
-    let keep = text.chars().count().saturating_sub(count);
-    *text = text.chars().take(keep).collect();
-}
-
 /// Turns captured audio into the 16 kHz mono stream the provider wants.
 pub struct AudioPump {
     channels: usize,
     resampler: Option<SincFixedIn<f32>>,
     pending: Vec<f32>,
+    interleaved: Vec<i16>,
+    input_frames: usize,
+    output_frames: usize,
+    sample_rate: u32,
+    flushed: bool,
 }
 
 /// Samples per resampler call. Small enough to keep latency under a tenth of
@@ -383,18 +165,30 @@ impl AudioPump {
             channels,
             resampler,
             pending: Vec::with_capacity(PUMP_CHUNK * 2),
+            interleaved: Vec::new(),
+            input_frames: 0,
+            output_frames: 0,
+            sample_rate: sample_rate.max(1),
+            flushed: false,
         })
     }
 
     /// Adds one captured packet and returns whatever is ready to send.
     pub fn push(&mut self, pcm: &[i16]) -> Result<Vec<i16>, String> {
-        for frame in pcm.chunks_exact(self.channels) {
+        if self.flushed {
+            return Err("audio pump already finalized".into());
+        }
+        self.interleaved.extend_from_slice(pcm);
+        let complete = self.interleaved.len() / self.channels * self.channels;
+        for frame in self.interleaved[..complete].chunks_exact(self.channels) {
+            self.input_frames += 1;
             let sum: f32 = frame
                 .iter()
                 .map(|sample| f32::from(*sample) / 32768.0)
                 .sum();
             self.pending.push(sum / self.channels as f32);
         }
+        self.interleaved.drain(..complete);
         let mut out = Vec::new();
         match self.resampler.as_mut() {
             Some(resampler) => {
@@ -410,6 +204,40 @@ impl AudioPump {
             }
             None => out.extend(self.pending.drain(..).map(f32_to_i16)),
         }
+        self.output_frames += out.len();
+        Ok(out)
+    }
+
+    /// Drain fractional input and filter tail before audio.done. Output length
+    /// tracks input frames exactly, including packets split inside a frame.
+    pub fn flush(&mut self) -> Result<Vec<i16>, String> {
+        if self.flushed {
+            return Ok(Vec::new());
+        }
+        self.flushed = true;
+        let expected = self.input_frames * TARGET_SAMPLE_RATE as usize / self.sample_rate as usize;
+        let needed = expected.saturating_sub(self.output_frames);
+        let mut out = Vec::new();
+        if let Some(resampler) = self.resampler.as_mut() {
+            let pending = std::mem::take(&mut self.pending);
+            let mut first = true;
+            while out.len() < needed {
+                let waves = if first && !pending.is_empty() {
+                    resampler.process_partial(Some(&[pending.as_slice()]), None)
+                } else {
+                    resampler.process_partial::<&[f32]>(None, None)
+                }
+                .map_err(|error| error.to_string())?;
+                first = false;
+                if let Some(wave) = waves.first() {
+                    out.extend(wave.iter().map(|sample| f32_to_i16(*sample)));
+                } else {
+                    return Err("resampler produced no tail".into());
+                }
+            }
+        }
+        out.truncate(needed);
+        self.output_frames += out.len();
         Ok(out)
     }
 }
@@ -427,33 +255,24 @@ fn pcm_bytes(samples: &[i16]) -> Vec<u8> {
     bytes
 }
 
-/// Where characters go. Implemented by the dictation layer, which types them
-/// into the focused window; tests simulate a document.
+/// Whole replaceable draft; no keyboard/focus capability is exposed.
 pub trait TranscriptSink: Send + Sync {
-    /// Types text at the caret.
-    fn type_text(&self, text: &str) -> Result<(), String>;
-    /// Removes the last `chars` characters, which this session typed there.
-    fn retract(&self, chars: usize) -> Result<(), String>;
-    /// The session stopped being useful; `message` says why.
+    fn publish(&self, text: &str) -> Result<(), String>;
     fn failed(&self, message: &str);
 }
 
-/// What a finished session produced.
 #[derive(Clone, Debug, Default)]
 pub struct Shared {
-    /// Everything successfully typed into the target window.
-    pub typed: String,
-    /// The provider's final answer for the whole session, when it arrives.
-    pub final_text: String,
-    /// The first thing that went wrong, if anything did.
+    pub final_text: Option<String>,
     pub error: Option<String>,
-    /// Input may have reached the target even though its call returned an error.
-    pub delivery_uncertain: bool,
 }
-
 impl Shared {
-    pub fn can_auto_deliver(&self) -> bool {
-        self.typed.trim().is_empty() && !self.delivery_uncertain
+    pub fn authoritative_final(&self) -> Option<&str> {
+        if self.error.is_some() {
+            None
+        } else {
+            self.final_text.as_deref()
+        }
     }
 }
 
@@ -492,22 +311,13 @@ impl SessionSink {
 }
 
 impl TranscriptSink for SessionSink {
-    fn type_text(&self, text: &str) -> Result<(), String> {
-        let active = self.active.lock().map_err(|_| "live input lock failed")?;
+    fn publish(&self, text: &str) -> Result<(), String> {
+        let active = self.active.lock().map_err(|_| "draft output lock failed")?;
         if !*active {
             return Err("live transcription stopped".into());
         }
-        self.inner.type_text(text)
+        self.inner.publish(text)
     }
-
-    fn retract(&self, chars: usize) -> Result<(), String> {
-        let active = self.active.lock().map_err(|_| "live input lock failed")?;
-        if !*active {
-            return Err("live transcription stopped".into());
-        }
-        self.inner.retract(chars)
-    }
-
     fn failed(&self, message: &str) {
         if let Ok(active) = self.active.lock()
             && *active
@@ -540,6 +350,11 @@ impl Cancellation {
 }
 
 impl Session {
+    pub fn invalidate(&self, message: String) {
+        if let Ok(mut shared) = self.shared.lock() {
+            shared.error = Some(message);
+        }
+    }
     pub fn cancellation(&self) -> Cancellation {
         Cancellation {
             sink: self.sink.clone(),
@@ -558,6 +373,9 @@ impl Session {
         if tokio::time::timeout(timeout, &mut task).await.is_err() {
             sink.stop();
             task.abort();
+            if let Ok(mut outcome) = shared.lock() {
+                outcome.error = Some("live final timed out; using recording".into());
+            }
             // No old writer may survive into batch fallback or a new take.
             let _ = task.await;
         }
@@ -613,9 +431,6 @@ pub fn spawn(
 pub struct Config {
     pub url: String,
     pub api_key: String,
-    /// Applied to locked text, so the words that land in the application use
-    /// the user's own spelling.
-    pub vocabulary: Vec<VocabularyEntry>,
 }
 
 async fn run_session(
@@ -625,11 +440,7 @@ async fn run_session(
     mut control: mpsc::Receiver<Control>,
     shared: &Mutex<Shared>,
 ) -> Result<Ending, String> {
-    let Config {
-        url,
-        api_key,
-        vocabulary,
-    } = config;
+    let Config { url, api_key } = config;
     let mut request = url
         .as_str()
         .into_client_request()
@@ -644,8 +455,7 @@ async fn run_session(
         Err(_) => return Err("the live transcription service did not answer".to_owned()),
     };
 
-    let mut typist = LiveTypist::new(vocabulary);
-    let mut typing_ok = true;
+    let mut draft = DraftAssembler::default();
 
     // The server wants a ready signal before the first frame.
     loop {
@@ -682,7 +492,7 @@ async fn run_session(
             },
             message = socket.next() => match message {
                 Some(Ok(Message::Text(text))) => {
-                    if handle_event(&parse_event(text.as_str()), &mut typist, sink.as_ref(), shared, &mut typing_ok) {
+                    if handle_event(&parse_event(text.as_str()), &mut draft, sink.as_ref(), shared) {
                         break 'stream Ending::Completed;
                     }
                 }
@@ -710,18 +520,23 @@ async fn run_session(
             }
         }
         // Push-to-talk: lock the last utterance, then ask for the summary.
-        let _ = socket.send(Message::text(FINALIZE)).await;
-        let _ = socket.send(Message::text(AUDIO_DONE)).await;
+        socket
+            .send(Message::text(FINALIZE))
+            .await
+            .map_err(|error| error.to_string())?;
+        socket
+            .send(Message::text(AUDIO_DONE))
+            .await
+            .map_err(|error| error.to_string())?;
         let deadline = tokio::time::Instant::now() + FLUSH_TIMEOUT;
         loop {
             match tokio::time::timeout_at(deadline, socket.next()).await {
                 Ok(Some(Ok(Message::Text(text)))) => {
                     if handle_event(
                         &parse_event(text.as_str()),
-                        &mut typist,
+                        &mut draft,
                         sink.as_ref(),
                         shared,
-                        &mut typing_ok,
                     ) {
                         break;
                     }
@@ -732,16 +547,21 @@ async fn run_session(
         }
     }
     let _ = socket.close(None).await;
+    if matches!(ending, Ending::Completed) {
+        return Err(
+            "provider completed before captured audio was finalized; using complete recording"
+                .into(),
+        );
+    }
     Ok(ending)
 }
 
 /// Handles one provider event; returns true when the session is complete.
 fn handle_event(
     event: &Event,
-    typist: &mut LiveTypist,
+    draft: &mut DraftAssembler,
     sink: &dyn TranscriptSink,
     shared: &Mutex<Shared>,
-    typing_ok: &mut bool,
 ) -> bool {
     match event {
         Event::Partial {
@@ -749,47 +569,20 @@ fn handle_event(
             is_final,
             speech_final,
         } => {
-            if *typing_ok {
-                let outcome = if *is_final {
-                    typist.accept(text, *speech_final, sink)
-                } else {
-                    typist.speculate(text, sink)
-                };
-                if let Err(error) = outcome {
-                    // Typing itself is broken — an elevated window, say.
-                    // Receiving continues so the provider's own transcript
-                    // can still be kept.
-                    *typing_ok = false;
-                    if let Ok(mut shared) = shared.lock() {
-                        shared.delivery_uncertain = true;
-                        if shared.error.is_none() {
-                            shared.error = Some(error.clone());
-                        }
-                    }
-                    sink.failed(&error);
-                }
-            }
-            if let Ok(mut shared) = shared.lock() {
-                shared.typed = typist.delivered().to_owned();
-            }
+            let text = draft.update(text, *is_final, *speech_final);
+            // Clipboard lock is recoverable: final recognition and delivery continue.
+            let _ = sink.publish(&text);
             false
         }
         Event::Done { text } => {
-            if let Ok(mut shared) = shared.lock()
-                && !text.trim().is_empty()
-            {
-                shared.final_text = text.clone();
+            if let Ok(mut shared) = shared.lock() {
+                shared.final_text = Some(text.clone());
             }
             true
         }
         Event::Error { message } => {
-            if let Ok(mut shared) = shared.lock()
-                && shared.error.is_none()
-            {
-                shared.error = Some(message.clone());
-            }
-            sink.failed(message);
-            false
+            fail(shared, sink, message.clone());
+            true
         }
         Event::Created | Event::Other => false,
     }
@@ -808,145 +601,25 @@ fn fail(shared: &Mutex<Shared>, sink: &dyn TranscriptSink, message: String) {
 mod tests {
     use super::*;
 
-    use std::sync::atomic::{AtomicBool, Ordering};
-
-    /// Stands in for the target application: text lands, backspaces take it
-    /// away, and the test reads the result like a document.
     #[derive(Default)]
     struct RecordingSink {
         document: Mutex<String>,
         failures: Mutex<Vec<String>>,
-        /// Set to make retraction fail, as a moved caret would.
-        retract_fails: AtomicBool,
-        partial_type_failure: AtomicBool,
     }
-
     impl RecordingSink {
         fn document(&self) -> String {
             self.document.lock().unwrap().clone()
         }
     }
-
     impl TranscriptSink for RecordingSink {
-        fn type_text(&self, text: &str) -> Result<(), String> {
-            if self.partial_type_failure.load(Ordering::SeqCst) {
-                self.document.lock().unwrap().extend(text.chars().take(3));
-                return Err("input failed after accepting part of the batch".into());
-            }
-            self.document.lock().unwrap().push_str(text);
+        fn publish(&self, text: &str) -> Result<(), String> {
+            *self.document.lock().unwrap() = text.to_owned();
             Ok(())
         }
-
-        fn retract(&self, chars: usize) -> Result<(), String> {
-            if self.retract_fails.load(Ordering::SeqCst) {
-                return Err("the caret is not where the words went".into());
-            }
-            let mut document = self.document.lock().unwrap();
-            let keep = document.chars().count().saturating_sub(chars);
-            *document = document.chars().take(keep).collect();
-            Ok(())
-        }
-
         fn failed(&self, message: &str) {
-            self.failures.lock().unwrap().push(message.to_owned());
+            self.failures.lock().unwrap().push(message.into());
         }
     }
-
-    fn typist() -> (LiveTypist, Arc<RecordingSink>) {
-        (
-            LiveTypist::new(Vec::new()),
-            Arc::new(RecordingSink::default()),
-        )
-    }
-
-    struct TaskDropSignal(Option<tokio::sync::oneshot::Sender<()>>);
-
-    impl Drop for TaskDropSignal {
-        fn drop(&mut self) {
-            if let Some(sender) = self.0.take() {
-                let _ = sender.send(());
-            }
-        }
-    }
-
-    async fn pending_test_session() -> (
-        Session,
-        tokio::sync::oneshot::Receiver<()>,
-        tokio::task::AbortHandle,
-    ) {
-        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
-        let (dropped_tx, dropped_rx) = tokio::sync::oneshot::channel();
-        let task = tauri::async_runtime::spawn(async move {
-            let _signal = TaskDropSignal(Some(dropped_tx));
-            let _ = started_tx.send(());
-            std::future::pending::<()>().await;
-        });
-        let abort = task.inner().abort_handle();
-        let (control, _receiver) = mpsc::channel(1);
-        let session = Session {
-            control,
-            shared: Arc::new(Mutex::new(Shared::default())),
-            task,
-            sink: Arc::new(SessionSink::new(Arc::new(RecordingSink::default()))),
-        };
-        started_rx.await.unwrap();
-        (session, dropped_rx, abort)
-    }
-
-    #[tokio::test]
-    async fn finish_timeout_joins_the_writer_before_allowing_fallback() {
-        let (session, mut dropped, abort) = pending_test_session().await;
-        session.finish(Duration::from_millis(10)).await;
-        let stopped = dropped.try_recv().is_ok();
-        abort.abort();
-        assert!(
-            stopped,
-            "a timed-out session must not leave its writer running"
-        );
-    }
-
-    #[tokio::test]
-    async fn cancellation_aborts_a_writer_waiting_for_the_provider() {
-        let (session, dropped, abort) = pending_test_session().await;
-        session.cancel();
-        let stopped = tokio::time::timeout(Duration::from_secs(1), dropped)
-            .await
-            .is_ok();
-        abort.abort();
-        assert!(
-            stopped,
-            "cancellation must work while handshake or flush is waiting"
-        );
-    }
-
-    #[tokio::test]
-    async fn cancellation_stays_reachable_after_a_session_moves_into_finish() {
-        let (session, dropped, _abort) = pending_test_session().await;
-        let cancellation = session.cancellation();
-        let gated = session.sink.clone();
-        let finishing = tokio::spawn(session.finish(Duration::from_secs(10)));
-        cancellation.cancel();
-        tokio::time::timeout(Duration::from_secs(1), finishing)
-            .await
-            .unwrap()
-            .unwrap();
-        dropped.await.unwrap();
-        assert!(gated.type_text("late words").is_err());
-    }
-
-    #[test]
-    fn a_stopped_session_cannot_type_retract_or_report_late_errors() {
-        let sink = Arc::new(RecordingSink::default());
-        let gated = SessionSink::new(sink.clone());
-        gated.type_text("Keep this").unwrap();
-        gated.stop();
-        assert!(gated.type_text(" twice").is_err());
-        assert!(gated.retract(4).is_err());
-        gated.failed("late failure from an old session");
-        assert_eq!(sink.document(), "Keep this");
-        assert!(sink.failures.lock().unwrap().is_empty());
-    }
-
     #[test]
     fn a_ready_signal_is_recognized() {
         assert_eq!(
@@ -954,7 +627,6 @@ mod tests {
             Event::Created
         );
     }
-
     #[test]
     fn a_final_piece_carries_both_kinds_of_finality() {
         assert_eq!(
@@ -968,7 +640,6 @@ mod tests {
             }
         );
     }
-
     #[test]
     fn a_done_event_carries_the_whole_transcript() {
         assert_eq!(
@@ -978,7 +649,6 @@ mod tests {
             }
         );
     }
-
     #[test]
     fn an_error_event_carries_its_message() {
         assert_eq!(
@@ -988,7 +658,6 @@ mod tests {
             }
         );
     }
-
     #[test]
     fn unknown_or_broken_messages_are_ignored_rather_than_fatal() {
         assert_eq!(parse_event("not json"), Event::Other);
@@ -1001,253 +670,6 @@ mod tests {
             }
         );
     }
-
-    #[test]
-    fn partials_are_typed_as_they_arrive() {
-        let (mut typist, sink) = typist();
-
-        typist.speculate("Dzień", sink.as_ref()).unwrap();
-        typist.speculate("Dzień dobry", sink.as_ref()).unwrap();
-
-        assert_eq!(sink.document(), "Dzień dobry");
-    }
-
-    #[test]
-    fn a_changed_partial_is_taken_back_and_retyped() {
-        let (mut typist, sink) = typist();
-
-        typist.speculate("Send it to Anna", sink.as_ref()).unwrap();
-        typist.speculate("Send it to Ala", sink.as_ref()).unwrap();
-
-        assert_eq!(sink.document(), "Send it to Ala");
-    }
-
-    #[test]
-    fn a_locked_segment_replaces_its_speculation() {
-        let (mut typist, sink) = typist();
-
-        typist.speculate("Send it to Anna", sink.as_ref()).unwrap();
-        typist
-            .accept("Send it to Ala", false, sink.as_ref())
-            .unwrap();
-
-        assert_eq!(sink.document(), "Send it to Ala");
-    }
-
-    #[test]
-    fn interim_segments_keep_word_boundaries() {
-        let (mut typist, sink) = typist();
-        typist.accept("Hello", false, sink.as_ref()).unwrap();
-        typist.speculate("world", sink.as_ref()).unwrap();
-        typist.speculate("world again", sink.as_ref()).unwrap();
-        assert_eq!(sink.document(), "Hello world again");
-        typist
-            .accept("Hello world again.", true, sink.as_ref())
-            .unwrap();
-        assert_eq!(sink.document(), "Hello world again.");
-        typist.speculate("Hello", sink.as_ref()).unwrap();
-        assert_eq!(sink.document(), "Hello world again. Hello");
-    }
-
-    #[test]
-    fn a_long_interim_after_a_locked_chunk_matches_the_stitched_final() {
-        let (mut typist, sink) = typist();
-        let continuation = "kolejne słowa wypowiedzi ".repeat(12).trim().to_owned();
-        typist.accept("To są", false, sink.as_ref()).unwrap();
-        typist.speculate(&continuation, sink.as_ref()).unwrap();
-        let final_text = format!("To są {continuation}.");
-        typist.accept(&final_text, true, sink.as_ref()).unwrap();
-        assert_eq!(sink.document(), final_text);
-    }
-
-    #[test]
-    fn corrected_segments_preserve_the_separator_after_previous_utterances() {
-        let (mut typist, sink) = typist();
-        typist.accept("Gotowe.", true, sink.as_ref()).unwrap();
-        typist.speculate("Żaba", sink.as_ref()).unwrap();
-        typist.accept("Żółw", false, sink.as_ref()).unwrap();
-        typist.accept("Żółw.", true, sink.as_ref()).unwrap();
-        assert_eq!(sink.document(), "Gotowe. Żółw.");
-    }
-
-    #[test]
-    fn identical_locked_chunks_remain_distinct() {
-        let (mut typist, sink) = typist();
-        typist.accept("tak", false, sink.as_ref()).unwrap();
-        typist.speculate("tak", sink.as_ref()).unwrap();
-        typist.accept("tak", false, sink.as_ref()).unwrap();
-        typist.accept("tak tak", true, sink.as_ref()).unwrap();
-        assert_eq!(sink.document(), "tak tak");
-    }
-
-    #[test]
-    fn a_long_final_revision_does_not_append_a_second_copy() {
-        let (mut typist, sink) = typist();
-        let original = format!("hello {}", "a long spoken sentence ".repeat(12))
-            .trim()
-            .to_owned();
-        typist.speculate(&original, sink.as_ref()).unwrap();
-        let revised = format!("Hello{}.", &original[5..]);
-        typist.accept(&revised, true, sink.as_ref()).unwrap();
-        assert_eq!(sink.document(), original);
-    }
-
-    #[test]
-    fn a_failed_final_correction_never_appends_its_replacement() {
-        let (mut typist, sink) = typist();
-        typist.speculate("Hello wrld", sink.as_ref()).unwrap();
-        sink.retract_fails.store(true, Ordering::SeqCst);
-        assert!(typist.accept("Hello world", true, sink.as_ref()).is_err());
-        assert_eq!(sink.document(), "Hello wrld");
-    }
-
-    #[test]
-    fn repeated_utterances_are_preserved_with_live_interims() {
-        let (mut typist, sink) = typist();
-        for _ in 0..2 {
-            typist.speculate("Tak", sink.as_ref()).unwrap();
-            typist.accept("Tak.", true, sink.as_ref()).unwrap();
-        }
-        assert_eq!(sink.document(), "Tak. Tak.");
-    }
-
-    #[test]
-    fn partial_input_failure_blocks_automatic_fallback_and_further_typing() {
-        let (mut typist, sink) = typist();
-        sink.partial_type_failure.store(true, Ordering::SeqCst);
-        let shared = Mutex::new(Shared::default());
-        let mut typing_ok = true;
-        let partial = Event::Partial {
-            text: "Hello world".into(),
-            is_final: false,
-            speech_final: false,
-        };
-        handle_event(
-            &partial,
-            &mut typist,
-            sink.as_ref(),
-            &shared,
-            &mut typing_ok,
-        );
-        assert_eq!(sink.document(), "Hel");
-        assert!(!shared.lock().unwrap().can_auto_deliver());
-        handle_event(
-            &partial,
-            &mut typist,
-            sink.as_ref(),
-            &shared,
-            &mut typing_ok,
-        );
-        assert_eq!(sink.document(), "Hel");
-        handle_event(
-            &Event::Done {
-                text: "Hello world.".into(),
-            },
-            &mut typist,
-            sink.as_ref(),
-            &shared,
-            &mut typing_ok,
-        );
-        assert_eq!(shared.lock().unwrap().final_text, "Hello world.");
-        assert!(!shared.lock().unwrap().can_auto_deliver());
-    }
-
-    #[test]
-    fn provider_failure_before_input_still_allows_batch_delivery() {
-        let (mut typist, sink) = typist();
-        let shared = Mutex::new(Shared::default());
-        let mut typing_ok = true;
-        handle_event(
-            &Event::Error {
-                message: "connection failed".into(),
-            },
-            &mut typist,
-            sink.as_ref(),
-            &shared,
-            &mut typing_ok,
-        );
-        assert!(shared.lock().unwrap().can_auto_deliver());
-    }
-
-    #[test]
-    fn the_finished_utterance_adds_only_its_tail() {
-        let (mut typist, sink) = typist();
-
-        typist.speculate("Hello", sink.as_ref()).unwrap();
-        typist.accept("Hello", false, sink.as_ref()).unwrap();
-        typist.accept("Hello world.", true, sink.as_ref()).unwrap();
-
-        assert_eq!(sink.document(), "Hello world.");
-    }
-
-    #[test]
-    fn a_new_utterance_is_spaced_after_the_previous_one() {
-        let (mut typist, sink) = typist();
-
-        typist
-            .accept("Pierwsze zdanie.", true, sink.as_ref())
-            .unwrap();
-        typist.accept("Drugie.", true, sink.as_ref()).unwrap();
-
-        assert_eq!(sink.document(), "Pierwsze zdanie. Drugie.");
-    }
-
-    #[test]
-    fn a_revised_utterance_corrects_what_it_can() {
-        let (mut typist, sink) = typist();
-
-        typist.speculate("Send it to Anna", sink.as_ref()).unwrap();
-        typist
-            .accept("Send it to Ala", true, sink.as_ref())
-            .unwrap();
-
-        assert_eq!(sink.document(), "Send it to Ala");
-    }
-
-    #[test]
-    fn vocabulary_lands_with_the_locked_text_not_the_speculation() {
-        let vocabulary = vec![VocabularyEntry {
-            id: 1,
-            heard: "parakit".into(),
-            replacement: "Parakeet".into(),
-        }];
-        let sink = Arc::new(RecordingSink::default());
-        let mut typist = LiveTypist::new(vocabulary);
-
-        typist.speculate("parakit", sink.as_ref()).unwrap();
-        assert_eq!(sink.document(), "parakit");
-        typist.accept("parakit", false, sink.as_ref()).unwrap();
-
-        assert_eq!(sink.document(), "Parakeet");
-    }
-
-    #[test]
-    fn a_caret_that_moved_stops_the_corrections_rather_than_deleting() {
-        let (mut typist, sink) = typist();
-        typist.speculate("Hello", sink.as_ref()).unwrap();
-        typist.speculate("Hello wrld", sink.as_ref()).unwrap();
-        sink.retract_fails.store(true, Ordering::SeqCst);
-
-        // The model corrects itself, but the caret is no longer ours: the
-        // wrong word stands and nothing is removed.
-        assert!(typist.speculate("Hello world", sink.as_ref()).is_err());
-        assert_eq!(sink.document(), "Hello wrld");
-
-        // And no further corrections are attempted for the rest of the take.
-        typist.accept("Hello world", false, sink.as_ref()).unwrap();
-        assert_eq!(sink.document(), "Hello wrld");
-    }
-
-    #[test]
-    fn empty_events_do_nothing() {
-        let (mut typist, sink) = typist();
-
-        typist.speculate("   ", sink.as_ref()).unwrap();
-        typist.accept("", true, sink.as_ref()).unwrap();
-
-        assert_eq!(sink.document(), "");
-    }
-
     #[test]
     fn the_stream_url_carries_the_model_language_and_keyterms() {
         let url = xai_stream_url(
@@ -1266,7 +688,6 @@ mod tests {
         assert!(url.contains("keyterm=Parakeet"), "{url}");
         assert!(url.contains("keyterm=Loquara"), "{url}");
     }
-
     #[test]
     fn a_custom_base_url_becomes_a_socket_address() {
         assert_eq!(
@@ -1274,25 +695,10 @@ mod tests {
             "ws://127.0.0.1:8080/v1/stt?model=m&sample_rate=16000&encoding=pcm&interim_results=true"
         );
     }
-
     #[test]
     fn pcm_samples_travel_little_endian() {
         assert_eq!(pcm_bytes(&[1, -2]), vec![0x01, 0x00, 0xFE, 0xFF]);
     }
-
-    #[test]
-    fn a_48k_stereo_packet_becomes_16k_mono() {
-        let mut pump = AudioPump::new(2, 48_000).unwrap();
-        // 4800 frames of stereo = 9600 samples = one tenth of a second.
-        let packet: Vec<i16> = (0..9_600).map(|index| (index % 100) as i16).collect();
-
-        let out = pump.push(&packet).unwrap();
-
-        // Four whole chunks are processed (4096 of 4800 frames); the rest
-        // waits for the next packet.
-        assert!((1_300..=1_400).contains(&out.len()), "got {}", out.len());
-    }
-
     #[test]
     fn audio_already_at_the_target_rate_is_left_alone() {
         let mut pump = AudioPump::new(1, 16_000).unwrap();
@@ -1301,7 +707,6 @@ mod tests {
 
         assert_eq!(out, vec![100, -100, 200]);
     }
-
     #[test]
     fn a_stereo_packet_is_averaged_into_one_channel() {
         let mut pump = AudioPump::new(2, 16_000).unwrap();
@@ -1310,9 +715,6 @@ mod tests {
 
         assert_eq!(out, vec![200, -200]);
     }
-
-    /// The whole conversation, against a local socket: headers, framing,
-    /// finalize/audio.done, and the text that comes out the other end.
     #[tokio::test]
     async fn a_session_types_what_the_server_streams() {
         use std::sync::atomic::{AtomicBool, Ordering};
@@ -1386,7 +788,6 @@ mod tests {
         let config = Config {
             url: format!("ws://127.0.0.1:{port}/stt?model=test"),
             api_key: "test-key".into(),
-            vocabulary: Vec::new(),
         };
 
         for _ in 0..3 {
@@ -1401,8 +802,8 @@ mod tests {
         assert!(matches!(ending, Ending::Flushed));
         assert_eq!(recorder.document(), "Dzień dobry, jak się masz?");
         assert_eq!(
-            shared.lock().unwrap().final_text,
-            "Dzień dobry, jak się masz?"
+            shared.lock().unwrap().final_text.as_deref(),
+            Some("Dzień dobry, jak się masz?")
         );
         assert!(saw_audio_done.load(Ordering::SeqCst));
         assert!(
@@ -1412,7 +813,6 @@ mod tests {
         server.await.unwrap();
     }
 }
-
 #[cfg(test)]
 mod session_lifecycle_tests {
     use super::*;
@@ -1423,18 +823,10 @@ mod session_lifecycle_tests {
     }
 
     impl TranscriptSink for Sink {
-        fn type_text(&self, text: &str) -> Result<(), String> {
-            self.document.lock().unwrap().push_str(text);
+        fn publish(&self, text: &str) -> Result<(), String> {
+            *self.document.lock().unwrap() = text.to_owned();
             Ok(())
         }
-
-        fn retract(&self, chars: usize) -> Result<(), String> {
-            let mut document = self.document.lock().unwrap();
-            let keep = document.chars().count().saturating_sub(chars);
-            *document = document.chars().take(keep).collect();
-            Ok(())
-        }
-
         fn failed(&self, _message: &str) {}
     }
 
@@ -1442,7 +834,6 @@ mod session_lifecycle_tests {
         Config {
             url: format!("ws://127.0.0.1:{port}/stt?model=test"),
             api_key: "test-key".into(),
-            vocabulary: Vec::new(),
         }
     }
 
@@ -1492,5 +883,55 @@ mod session_lifecycle_tests {
         assert_eq!(frames, 128);
         assert!(audio_done);
         server.await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod buffered_regressions {
+    use super::*;
+    #[test]
+    fn empty_final_field_is_valid_but_absent_or_nontext_field_requires_fallback() {
+        assert_eq!(parse_event(r#"{"type":"transcript.done","text":""}"#), Event::Done { text: String::new() });
+        assert!(matches!(parse_event(r#"{"type":"transcript.done"}"#), Event::Error { .. }));
+        assert!(matches!(parse_event(r#"{"type":"transcript.done","text":null}"#), Event::Error { .. }));
+    }
+    #[test]
+    fn a_received_empty_final_is_not_missing() {
+        let shared = Shared {
+            final_text: Some(String::new()),
+            ..Default::default()
+        };
+        assert_eq!(shared.authoritative_final(), Some(""));
+        assert_eq!(Shared::default().authoritative_final(), None);
+    }
+    #[test]
+    fn any_audio_gap_forces_complete_wav_fallback_even_with_final() {
+        let shared = Shared {
+            final_text: Some("prefix".into()),
+            error: Some("overflow".into()),
+        };
+        assert_eq!(shared.authoritative_final(), None);
+    }
+    #[test]
+    fn pump_flush_preserves_every_frame_for_common_rates_and_channels() {
+        for rate in [16_000, 44_100, 48_000] {
+            for channels in [1, 2, 3] {
+                for frames in [1, 200, 1024, 1999, rate as usize + 73] {
+                    let mut pump = AudioPump::new(channels, rate).unwrap();
+                    let input = vec![1000; frames * channels as usize];
+                    let mut out = Vec::new();
+                    for packet in input.chunks(137) {
+                        out.extend(pump.push(packet).unwrap());
+                    }
+                    out.extend(pump.flush().unwrap());
+                    assert_eq!(
+                        out.len(),
+                        frames * 16_000 / rate as usize,
+                        "rate {rate} channels {channels} frames {frames}"
+                    );
+                    assert!(pump.flush().unwrap().is_empty());
+                }
+            }
+        }
     }
 }

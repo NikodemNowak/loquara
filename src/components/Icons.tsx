@@ -1,6 +1,7 @@
 import {
   AddRegular,
   ArrowCounterclockwiseRegular,
+  ArrowRightRegular,
   BookOpenRegular,
   CheckmarkRegular,
   ChevronDownRegular,
@@ -21,11 +22,12 @@ import {
   SearchRegular,
   SettingsRegular,
   StopFilled,
+  SquareRegular,
   SubtractRegular,
 } from "@fluentui/react-icons";
-import type { ComponentType } from "react";
+import type { ComponentType, CSSProperties } from "react";
 
-type FluentComponent = ComponentType<{ width?: number | string; height?: number | string; className?: string }>;
+type FluentComponent = ComponentType<{ style?: CSSProperties; className?: string }>;
 
 export type IconProps = {
   size?: number | string;
@@ -36,11 +38,12 @@ export type IconProps = {
 
 function wrap(Fluent: FluentComponent) {
   return function Icon({ size = 20, className }: IconProps) {
-    return <Fluent width={size} height={size} className={className} aria-hidden="true" />;
+    return <Fluent style={{ width: size, height: size, flexShrink: 0 }} className={className} aria-hidden="true" />;
   };
 }
 
 export const Home = wrap(HomeRegular);
+export const ArrowRight = wrap(ArrowRightRegular);
 export const Clock3 = wrap(HistoryRegular);
 export const Settings = wrap(SettingsRegular);
 export const Mic = wrap(MicRegular);
@@ -55,6 +58,7 @@ export const RotateCcw = wrap(ArrowCounterclockwiseRegular);
 export const Plus = wrap(AddRegular);
 export const Check = wrap(CheckmarkRegular);
 export const Square = wrap(StopFilled);
+export const WindowMaximize = wrap(SquareRegular);
 export const BookOpen = wrap(BookOpenRegular);
 export const Cpu = wrap(DesktopRegular);
 export const Languages = wrap(LocalLanguageRegular);

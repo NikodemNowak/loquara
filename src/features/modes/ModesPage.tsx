@@ -86,8 +86,14 @@ export function ModesPage({
   };
 
   const useMode = async () => {
-    if (!draft?.enabled || draft.id === settings.activeMode) return;
+    if (!draft?.enabled || !draft.name.trim() || draft.id === settings.activeMode) return;
     await run("use", async () => {
+      // Activation must refer to this exact, persisted draft. A failed save
+      // leaves the previous active mode intact.
+      await adapter.upsertMode(draft);
+      setModes((current) => current.some(({ id }) => id === draft.id)
+        ? current.map((item) => item.id === draft.id ? draft : item)
+        : [...current, draft]);
       const next = { ...settings, activeMode: draft.id };
       const result = await adapter.updateSettings(next);
       const persisted = await adapter.getSettings().catch(() => result.settings);
@@ -99,7 +105,7 @@ export function ModesPage({
   return (
     <section className="page modes-page">
       <header className="page-header">
-        <div><p className="eyebrow">{t("modes.eyebrow")}</p><h1>{t("modes.title")}</h1><p>{t("modes.subtitle")}</p></div>
+        <div><h1>{t("modes.title")}</h1><p>{t("modes.subtitle")}</p></div>
         <button className="primary-button" disabled={loading} onClick={() => setDraft(blankMode())}><Plus size={16} />{t("modes.new")}</button>
       </header>
       {loading ? <div className="panel-loading" role="status">{t("modes.loading")}</div> :
@@ -116,8 +122,12 @@ export function ModesPage({
           <form className="mode-editor" onSubmit={(event) => { event.preventDefault(); void save(); }}>
             {draft ? <>
               <div className="editor-heading">
-                <div><span className="eyebrow">{BUILTIN_IDS.has(draft.id) ? t("modes.editor.builtin") : t("modes.editor.custom")}</span><h2>{draft.name || t("modes.editor.newTitle")}</h2></div>
+                <div><h2>{draft.name || t("modes.editor.newTitle")}</h2></div>
                 <label className="switch-label">{t("modes.editor.enabled")} <input type="checkbox" checked={draft.enabled} onChange={(event) => setDraft({ ...draft, enabled: event.target.checked })} /></label>
+              </div>
+              <div className="editor-primary-actions">
+                <button type="button" className="secondary-button" disabled={!draft.enabled || !draft.name.trim() || settings.activeMode === draft.id || Boolean(busy)} onClick={() => void useMode()}>{busy === "use" ? t("modes.editor.activating") : settings.activeMode === draft.id ? t("modes.inUse") : t("modes.editor.use")}</button>
+                <button className="primary-button" disabled={!draft.name.trim() || Boolean(busy)} type="submit">{busy === "save" ? t("modes.editor.saving") : t("modes.editor.save")}</button>
               </div>
               <label><span>{t("modes.editor.name")}</span><input value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} /></label>
               <label><span>{t("modes.editor.description")}</span><input value={draft.description} onChange={(event) => setDraft({ ...draft, description: event.target.value })} /></label>
@@ -125,10 +135,6 @@ export function ModesPage({
               <p className="field-hint">{t("modes.editor.hint.intro")} <code>case: lower|upper|sentence</code>, <code>layout: bullets|plain</code>, <code>prefix: …</code>, <code>suffix: …</code>. {t("modes.editor.hint.outro")}</p>
               <div className="editor-actions">
                 <button type="button" className="danger-button" disabled={BUILTIN_IDS.has(draft.id) || settings.activeMode === draft.id || Boolean(busy)} onClick={() => void remove()}><Trash2 size={15} />{busy === "delete" ? t("common.deleting") : t("modes.editor.delete")}</button>
-                <span className="editor-actions__right">
-                  <button type="button" disabled={!draft.enabled || settings.activeMode === draft.id || Boolean(busy)} onClick={() => void useMode()}>{busy === "use" ? t("modes.editor.activating") : settings.activeMode === draft.id ? t("modes.inUse") : t("modes.editor.use")}</button>
-                  <button className="primary-button" disabled={!draft.name.trim() || Boolean(busy)} type="submit">{busy === "save" ? t("modes.editor.saving") : t("modes.editor.save")}</button>
-                </span>
               </div>
             </> : <EmptyState title={t("modes.empty.title")} description={t("modes.empty.description")} />}
           </form>

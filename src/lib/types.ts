@@ -47,12 +47,15 @@ export interface CloudCheck {
   elapsedMs: number;
 }
 
-/** Compact pill vs Superwhisper-style recording window. Mini is the default. */
+/** Legacy persisted preference. The UI always uses the fixed compact pill. */
 export type OverlaySize = "mini" | "large";
 
 export interface AppSettings {
   inputDevice: string | null;
+  microphones?: MicrophonePreferences;
   shortcut: string;
+  /** Older profiles use toggle when this preference is absent. */
+  activationMode?: "toggle" | "push_to_talk";
   autoPaste: boolean;
   retentionDays: 1 | 7 | 30 | null;
   launchOnLogin: boolean;
@@ -62,6 +65,8 @@ export interface AppSettings {
   overlaySize: OverlaySize;
   model: string;
   streaming: boolean;
+  /** Per-engine preview preference. Absent keys retain legacy defaults. */
+  realtimeByEngine?: Record<string, boolean>;
   language: LanguageChoice;
   modelKeepAliveSecs: number;
   pasteMode: PasteMode;
@@ -130,7 +135,40 @@ export interface DownloadStatus {
   totalBytes: number;
 }
 
+export interface LiveTranscript {
+  recordingId: string;
+  text: string;
+  revision: number;
+  status: "connecting" | "listening" | "draft" | "finalizing" | "fallback";
+  clipboardReady: boolean;
+}
+
+/** Only the current take may contribute a draft to a visible surface. */
+export function matchingLiveTranscript(snapshot: AppSnapshot | undefined): LiveTranscript | null {
+  if (!snapshot || (snapshot.dictation.status !== "recording" && snapshot.dictation.status !== "processing")) return null;
+  return snapshot.liveTranscript?.recordingId === snapshot.dictation.recordingId ? snapshot.liveTranscript : null;
+}
+
+export function realtimeEngineKey(settings: AppSettings): string {
+  return settings.transcriptionSource === "cloud" ? `cloud:${settings.cloudProvider}` : `local:${settings.model}`;
+}
+
+export function realtimeEnabled(settings: AppSettings, supported: boolean): boolean {
+  if (!supported) return false;
+  return settings.realtimeByEngine?.[realtimeEngineKey(settings)] ?? (settings.transcriptionSource === "cloud" ? settings.streaming : settings.model === "parakeet");
+}
+
+export interface OverlayNotice {
+  key: string;
+  generation: number;
+  recordingId: string;
+  kind: "pasteRequested" | "copied" | "cancelled" | "deliveryFailed";
+  expiresAt?: number | null;
+  detail?: string | null;
+}
+
 export interface AppSnapshot {
+  overlayNotice?: OverlayNotice | null;
   dictation: DictationState;
   settings: AppSettings;
   download?: DownloadStatus | null;
@@ -138,6 +176,7 @@ export interface AppSnapshot {
   model?: ModelSummary;
   modelLoading: boolean;
   recordingStartedAt?: number | null;
+  liveTranscript?: LiveTranscript | null;
 }
 
 export interface SettingsUpdateResult {
@@ -149,7 +188,19 @@ export interface InputDeviceInfo {
   id: string;
   name: string;
   isDefault: boolean;
+  available: boolean;
 }
+
+export interface MicrophonePreferences {
+  selection: "manual" | "favorites";
+  selectedId: string | null;
+  favorites: Array<{ id: string; name: string }>;
+  hiddenIds: string[];
+  allowSystemDefaultFallback: boolean;
+  unresolvedLegacyName: string | null;
+}
+
+export interface InputDevicesChanged { generation: number; devices: InputDeviceInfo[] }
 
 export type RecordingStatus =
   | "recording"

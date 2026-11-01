@@ -131,7 +131,97 @@ pub enum PasteMode {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WindowTarget(pub isize);
 
+/// Snapshot of the full registered chord. The plugin's Released event only
+/// observes its main key, so it cannot own the lifetime of a hold gesture.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ShortcutKeys {
+    pub chord_down: bool,
+    pub main_down: bool,
+    pub escape_down: bool,
+}
+
+impl Shortcut {
+    pub(crate) fn key_state(&self) -> Result<ShortcutKeys, PlatformError> {
+        input_desktop_available()?;
+        Ok(self.sample_keys(key_down))
+    }
+    fn sample_keys(&self, down: impl Fn(i32) -> bool) -> ShortcutKeys {
+        let key = match self.key.as_str() {
+            "Space" => 0x20, "Escape" => 0x1b, "Enter" => 0x0d, "Tab" => 0x09,
+            key if key.starts_with('F') && key.len() > 1 => 0x70 + key[1..].parse::<i32>().unwrap_or(1) - 1,
+            key => i32::from(key.as_bytes()[0]),
+        };
+        let main_down = down(key);
+        ShortcutKeys {
+            chord_down: main_down && (!self.ctrl || down(0x11)) && (!self.alt || down(0x12))
+                && (!self.shift || down(0x10)) && (!self.meta || down(0x5b) || down(0x5c)),
+            main_down,
+            // A binding containing Escape must not cancel itself.
+            escape_down: key != 0x1b && down(0x1b),
+        }
+    }
+}
+
+fn key_down(key: i32) -> bool {
+    #[cfg(windows)]
+    { unsafe { windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(key) < 0 } }
+    #[cfg(not(windows))]
+    { let _ = key; false }
+}
+
+/// Zero from GetAsyncKeyState is ambiguous on an inaccessible desktop. Check
+/// session and desktop before interpreting zero as a released physical key.
+fn input_desktop_available() -> Result<(), PlatformError> {
+    let unavailable = || PlatformError::PasteFailed("input desktop unavailable; final text is in the clipboard".into());
+    #[cfg(windows)]
+    unsafe {
+        use windows_sys::Win32::System::RemoteDesktop::*;
+        use windows_sys::Win32::System::StationsAndDesktops::*;
+        use windows_sys::Win32::System::Threading::GetCurrentThreadId;
+        let mut buffer = std::ptr::null_mut();
+        let mut bytes = 0;
+        if WTSQuerySessionInformationW(WTS_CURRENT_SERVER_HANDLE, WTS_CURRENT_SESSION, WTSConnectState, &mut buffer, &mut bytes) == 0 { return Err(unavailable()); }
+        let active = !buffer.is_null() && bytes >= 4 && *(buffer as *const i32) == WTSActive;
+        WTSFreeMemory(buffer.cast());
+        if !active { return Err(unavailable()); }
+        let desktop = OpenInputDesktop(0, 0, DESKTOP_READOBJECTS);
+        if desktop.is_null() { return Err(unavailable()); }
+        let mut input_name = [0u16; 256];
+        let mut thread_name = [0u16; 256];
+        let mut needed = 0;
+        let input_ok = GetUserObjectInformationW(desktop, UOI_NAME, input_name.as_mut_ptr().cast(), 512, &mut needed) != 0;
+        let thread_desktop = GetThreadDesktop(GetCurrentThreadId());
+        let thread_ok = !thread_desktop.is_null() && GetUserObjectInformationW(thread_desktop, UOI_NAME, thread_name.as_mut_ptr().cast(), 512, &mut needed) != 0;
+        CloseDesktop(desktop);
+        if !input_ok || !thread_ok || input_name != thread_name
+            || windows_sys::Win32::UI::WindowsAndMessaging::GetForegroundWindow().is_null() { return Err(unavailable()); }
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = unavailable;
+        // The other desktops do not expose a locked input desktop the way
+        // Windows does, so there is nothing to refuse here.
+        Ok(())
+    }
+}
+
+pub fn wait_for_modifiers(windows: &mut impl WindowsApi, shortcut: Option<&Shortcut>, cancelled: impl Fn() -> bool, trigger_released: impl Fn() -> bool, timeout: std::time::Duration) -> Result<(), PlatformError> {
+    let started = std::time::Instant::now();
+    loop {
+        if cancelled() { return Err(PlatformError::PasteFailed("delivery cancelled".into())); }
+        if windows.paste_keys_released(shortcut)? && trigger_released() { return Ok(()); }
+        if started.elapsed() >= timeout {
+            return Err(PlatformError::PasteFailed("modifier keys are still held; final text is in the clipboard".into()));
+        }
+        windows.pause_for_modifiers();
+    }
+}
+
 pub trait WindowsApi {
+    fn modifiers_released(&mut self) -> Result<bool, PlatformError> { Ok(true) }
+    fn paste_keys_released(&mut self, _shortcut: Option<&Shortcut>) -> Result<bool, PlatformError> { self.modifiers_released() }
+    fn pause_for_modifiers(&mut self) { std::thread::sleep(std::time::Duration::from_millis(10)); }
     fn foreground_window(&mut self) -> Option<WindowTarget>;
     fn restore_foreground(&mut self, target: WindowTarget) -> Result<(), PlatformError>;
     fn write_clipboard(&mut self, text: &str) -> Result<(), PlatformError>;
@@ -153,16 +243,46 @@ pub trait WindowsApi {
     }
 }
 
+fn require_released_modifiers(windows: &mut impl WindowsApi, shortcut: Option<&Shortcut>) -> Result<(), PlatformError> {
+    if windows.paste_keys_released(shortcut)? { Ok(()) }
+    else { Err(PlatformError::PasteFailed("modifier keys are still held; final text is in the clipboard".into())) }
+}
+
 pub fn copy_and_paste(
     windows: &mut impl WindowsApi,
     target: Option<WindowTarget>,
     text: &str,
     mode: PasteMode,
 ) -> Result<(), PlatformError> {
+    copy_and_paste_cancellable(windows, target, text, mode, None, || false)
+}
+
+pub fn copy_and_paste_cancellable(
+    windows: &mut impl WindowsApi, target: Option<WindowTarget>, text: &str, mode: PasteMode,
+    shortcut: Option<&Shortcut>, cancelled: impl Fn() -> bool,
+) -> Result<(), PlatformError> {
+    let check_cancel = || if cancelled() { Err(PlatformError::PasteFailed("delivery cancelled; final text is in the clipboard".into())) } else { Ok(()) };
+    check_cancel()?;
     windows.write_clipboard(text)?;
-    if let Some(target) = target {
-        windows.restore_foreground(target)?;
-    }
+    if text.trim().is_empty() { return Ok(()); }
+    let target = target.filter(|target| target.0 != 0);
+    // Windows remembers the window that was in front before the overlay
+    // appeared and insists on getting it back. macOS and the X11 desktops
+    // keep the target focused by using an overlay that never takes focus, so
+    // there is nothing to restore and no id to require.
+    #[cfg(windows)]
+    let target = target.ok_or_else(|| PlatformError::FocusFailed("target unavailable; final text is in the clipboard".into()))?;
+    require_released_modifiers(windows, shortcut)?;
+    check_cancel()?;
+    #[cfg(windows)]
+    windows.restore_foreground(target)?;
+    // Focus restoration can wait. Both physical keys and cancellation may
+    // have changed while it was in progress; never inject using stale state.
+    require_released_modifiers(windows, shortcut)?;
+    check_cancel()?;
+    #[cfg(windows)]
+    return windows.send_paste(Some(target), mode);
+    #[cfg(not(windows))]
     windows.send_paste(target, mode)
 }
 
@@ -588,9 +708,10 @@ pub fn show_overlay_without_focus<R: Runtime>(
         let size = window
             .outer_size()
             .map_err(|error| PlatformError::Other(error.to_string()))?;
+        let work = windows_monitor_work_area(position)?;
         let (x, y) = overlay_origin(
-            windows_work_area()?,
-            windows_virtual_screen()?,
+            work,
+            work,
             PhysicalWindowSize {
                 width: size.width,
                 height: size.height,
@@ -640,27 +761,23 @@ fn windows_work_area() -> Result<PhysicalRect, PlatformError> {
     })
 }
 
-/// Union of every attached display. `SPI_GETWORKAREA` is the primary monitor
-/// only; clamping a remembered pill to that would yank it off a second screen.
+/// Select the actual monitor nearest the remembered origin (or the target
+/// foreground window), excluding its taskbar. A virtual-desktop union includes
+/// invisible gaps between displays and is not a safe placement boundary.
 #[cfg(windows)]
-fn windows_virtual_screen() -> Result<PhysicalRect, PlatformError> {
-    use windows_sys::Win32::UI::WindowsAndMessaging::{
-        GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
-        SM_YVIRTUALSCREEN,
+fn windows_monitor_work_area(position: Option<(i32, i32)>) -> Result<PhysicalRect, PlatformError> {
+    use windows_sys::Win32::Foundation::POINT;
+    use windows_sys::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromPoint, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST};
+    use windows_sys::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+    let monitor = unsafe {
+        match position {
+            Some((x, y)) => MonitorFromPoint(POINT { x, y }, MONITOR_DEFAULTTONEAREST),
+            None => MonitorFromWindow(GetForegroundWindow(), MONITOR_DEFAULTTONEAREST),
+        }
     };
-    let left = unsafe { GetSystemMetrics(SM_XVIRTUALSCREEN) };
-    let top = unsafe { GetSystemMetrics(SM_YVIRTUALSCREEN) };
-    let width = unsafe { GetSystemMetrics(SM_CXVIRTUALSCREEN) };
-    let height = unsafe { GetSystemMetrics(SM_CYVIRTUALSCREEN) };
-    if width <= 0 || height <= 0 {
-        return windows_work_area();
-    }
-    Ok(PhysicalRect {
-        left,
-        top,
-        right: left.saturating_add(width),
-        bottom: top.saturating_add(height),
-    })
+    let mut info = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+    if unsafe { GetMonitorInfoW(monitor, &mut info) } == 0 { return windows_work_area(); }
+    Ok(PhysicalRect { left: info.rcWork.left, top: info.rcWork.top, right: info.rcWork.right, bottom: info.rcWork.bottom })
 }
 
 pub fn show_overlay_with_focus<R: Runtime>(
@@ -675,9 +792,10 @@ pub fn show_overlay_with_focus<R: Runtime>(
         let size = window
             .outer_size()
             .map_err(|error| PlatformError::Other(error.to_string()))?;
+        let work = windows_monitor_work_area(position)?;
         let (x, y) = overlay_origin(
-            windows_work_area()?,
-            windows_virtual_screen()?,
+            work,
+            work,
             PhysicalWindowSize {
                 width: size.width,
                 height: size.height,
@@ -934,6 +1052,85 @@ pub fn detect_terminal_paste_type(hwnd: windows_sys::Win32::Foundation::HWND) ->
     TerminalPasteType::None
 }
 
+#[cfg(all(unix, not(target_os = "macos")))]
+fn xdotool_key(chord: &str) -> Result<(), PlatformError> {
+    let output = std::process::Command::new("xdotool")
+        .args(["key", "--clearmodifiers", chord])
+        .output()
+        .map_err(|error| match error.kind() {
+            std::io::ErrorKind::NotFound => PlatformError::PasteFailed(
+                "automatic paste on Linux needs xdotool: install it with your package manager. \
+                 The transcript is already in the clipboard."
+                    .into(),
+            ),
+            _ => PlatformError::PasteFailed(error.to_string()),
+        })?;
+    if !output.status.success() {
+        return Err(PlatformError::PasteFailed(
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        ));
+    }
+    Ok(())
+}
+
+/// Whether the focused X11 window looks like a terminal.
+///
+/// Terminals put paste on Ctrl+Shift+V (or Shift+Insert), while every other
+/// application uses Ctrl+V. Asking xdotool for the window class is the only
+/// portable way to tell them apart without maintaining a list of processes
+/// that drifts as soon as somebody installs a new emulator.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn xdotool_terminal_active() -> bool {
+    let Ok(output) = std::process::Command::new("xdotool")
+        .args(["getactivewindow", "getwindowclassname"])
+        .output()
+    else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    let class = String::from_utf8_lossy(&output.stdout).to_ascii_lowercase();
+    const TERMINALS: &[&str] = &[
+        "gnome-terminal",
+        "kgx",
+        "konsole",
+        "xterm",
+        "kitty",
+        "alacritty",
+        "wezterm",
+        "terminator",
+        "tilix",
+        "xfce4-terminal",
+        "mate-terminal",
+        "lxterminal",
+        "qterminal",
+        "terminology",
+        "urxvt",
+        "st-",
+        "tabby",
+        "warp",
+    ];
+    TERMINALS.iter().any(|terminal| class.contains(terminal))
+}
+
+#[cfg(target_os = "macos")]
+fn macos_keystroke(script: &str) -> Result<(), PlatformError> {
+    let output = std::process::Command::new("osascript")
+        .args(["-e", script])
+        .output()
+        .map_err(|error| PlatformError::PasteFailed(error.to_string()))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let detail = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+    Err(PlatformError::PasteFailed(format!(
+        "macOS refused the keystroke{}. Allow Loquara in System Settings → Privacy & Security → \
+         Accessibility, then try again. The transcript is already in the clipboard.",
+        if detail.is_empty() { String::new() } else { format!(": {detail}") }
+    )))
+}
+
 #[cfg(windows)]
 fn send_inputs_with_hold(
     down: &[windows_sys::Win32::UI::Input::KeyboardAndMouse::INPUT],
@@ -999,14 +1196,50 @@ fn key_input(key: u16, flags: u32) -> windows_sys::Win32::UI::Input::KeyboardAnd
 pub struct SystemWindows;
 
 impl WindowsApi for SystemWindows {
+    fn paste_keys_released(&mut self, shortcut: Option<&Shortcut>) -> Result<bool, PlatformError> {
+        if !self.modifiers_released()? { return Ok(false); }
+        match shortcut { Some(shortcut) => Ok(!shortcut.key_state()?.main_down), None => Ok(true) }
+    }
+
+    fn modifiers_released(&mut self) -> Result<bool, PlatformError> {
+        #[cfg(windows)]
+        {
+            input_desktop_available()?;
+            Ok(![0x11, 0x12, 0x10, 0x5b, 0x5c].into_iter().any(key_down))
+        }
+        #[cfg(not(windows))]
+        {
+            // There is no portable way to ask whether a modifier is held, and
+            // the platforms below do not need one: the shortcut is a chord,
+            // so by the time transcription finishes it has been released.
+            Ok(true)
+        }
+    }
+
     fn foreground_window(&mut self) -> Option<WindowTarget> {
         #[cfg(windows)]
         {
             let hwnd = unsafe { windows_sys::Win32::UI::WindowsAndMessaging::GetForegroundWindow() };
             return (!hwnd.is_null()).then_some(WindowTarget(hwnd as isize));
         }
-        #[cfg(not(windows))]
+        #[cfg(all(unix, not(target_os = "macos")))]
         {
+            // X11 only; on Wayland xdotool cannot see the compositor's
+            // windows, and paste falls back to plain Ctrl+V.
+            let output = std::process::Command::new("xdotool")
+                .arg("getactivewindow")
+                .output()
+                .ok()?;
+            if !output.status.success() {
+                return None;
+            }
+            let id = String::from_utf8_lossy(&output.stdout).trim().parse().ok()?;
+            return Some(WindowTarget(id));
+        }
+        #[cfg(target_os = "macos")]
+        {
+            // The overlay is shown without focus, so whatever the user was
+            // writing into is still the frontmost application.
             None
         }
     }
@@ -1067,6 +1300,22 @@ impl WindowsApi for SystemWindows {
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
             std::thread::sleep(std::time::Duration::from_millis(40));
+            if unsafe { GetForegroundWindow() } != hwnd {
+                return Err(PlatformError::FocusFailed("target did not become foreground; text is in the clipboard".into()));
+            }
+        }
+        #[cfg(all(unix, not(target_os = "macos")))]
+        {
+            let id = target.0.to_string();
+            let output = std::process::Command::new("xdotool")
+                .args(["windowactivate", "--sync", id.as_str()])
+                .output()
+                .map_err(|error| PlatformError::FocusFailed(error.to_string()))?;
+            if !output.status.success() {
+                return Err(PlatformError::FocusFailed(
+                    String::from_utf8_lossy(&output.stderr).into_owned(),
+                ));
+            }
         }
         Ok(())
     }
@@ -1092,32 +1341,11 @@ impl WindowsApi for SystemWindows {
         }
         #[cfg(target_os = "macos")]
         {
-            let output = std::process::Command::new("osascript")
-                .args([
-                    "-e",
-                    r#"tell application "System Events" to keystroke "v" using command down"#,
-                ])
-                .output()
-                .map_err(|error| PlatformError::PasteFailed(error.to_string()))?;
-            if !output.status.success() {
-                return Err(PlatformError::PasteFailed(
-                    String::from_utf8_lossy(&output.stderr).into_owned(),
-                ));
-            }
-            Ok(())
+            macos_keystroke(r#"tell application "System Events" to keystroke "v" using command down"#)
         }
         #[cfg(all(unix, not(target_os = "macos")))]
         {
-            let output = std::process::Command::new("xdotool")
-                .args(["key", "--clearmodifiers", "ctrl+v"])
-                .output()
-                .map_err(|error| PlatformError::PasteFailed(error.to_string()))?;
-            if !output.status.success() {
-                return Err(PlatformError::PasteFailed(
-                    String::from_utf8_lossy(&output.stderr).into_owned(),
-                ));
-            }
-            Ok(())
+            xdotool_key("ctrl+v")
         }
         #[cfg(not(any(windows, target_os = "macos", all(unix, not(target_os = "macos")))))]
         {
@@ -1147,32 +1375,13 @@ impl WindowsApi for SystemWindows {
         }
         #[cfg(target_os = "macos")]
         {
-            let output = std::process::Command::new("osascript")
-                .args([
-                    "-e",
-                    r#"tell application "System Events" to keystroke "v" using {command down, shift down}"#,
-                ])
-                .output()
-                .map_err(|error| PlatformError::PasteFailed(error.to_string()))?;
-            if !output.status.success() {
-                return Err(PlatformError::PasteFailed(
-                    String::from_utf8_lossy(&output.stderr).into_owned(),
-                ));
-            }
-            Ok(())
+            macos_keystroke(
+                r#"tell application "System Events" to keystroke "v" using {command down, shift down}"#,
+            )
         }
         #[cfg(all(unix, not(target_os = "macos")))]
         {
-            let output = std::process::Command::new("xdotool")
-                .args(["key", "--clearmodifiers", "ctrl+shift+v"])
-                .output()
-                .map_err(|error| PlatformError::PasteFailed(error.to_string()))?;
-            if !output.status.success() {
-                return Err(PlatformError::PasteFailed(
-                    String::from_utf8_lossy(&output.stderr).into_owned(),
-                ));
-            }
-            Ok(())
+            xdotool_key("ctrl+shift+v")
         }
         #[cfg(not(any(windows, target_os = "macos", all(unix, not(target_os = "macos")))))]
         {
@@ -1201,16 +1410,7 @@ impl WindowsApi for SystemWindows {
         }
         #[cfg(all(unix, not(target_os = "macos")))]
         {
-            let output = std::process::Command::new("xdotool")
-                .args(["key", "--clearmodifiers", "Shift+Insert"])
-                .output()
-                .map_err(|error| PlatformError::PasteFailed(error.to_string()))?;
-            if !output.status.success() {
-                return Err(PlatformError::PasteFailed(
-                    String::from_utf8_lossy(&output.stderr).into_owned(),
-                ));
-            }
-            Ok(())
+            xdotool_key("Shift+Insert")
         }
         #[cfg(not(any(windows, target_os = "macos", all(unix, not(target_os = "macos")))))]
         {
@@ -1240,10 +1440,19 @@ impl WindowsApi for SystemWindows {
                 }
                 #[cfg(all(unix, not(target_os = "macos")))]
                 {
-                    self.send_ctrl_shift_v().or_else(|_| self.send_ctrl_v())
+                    // Terminals use Ctrl+Shift+V, everything else Ctrl+V.
+                    // Without xdotool we cannot tell, and Ctrl+V is the choice
+                    // that does the right thing in the majority of windows.
+                    if xdotool_terminal_active() {
+                        self.send_ctrl_shift_v().or_else(|_| self.send_ctrl_v())
+                    } else {
+                        self.send_ctrl_v()
+                    }
                 }
                 #[cfg(target_os = "macos")]
                 {
+                    // macOS terminals use the same Command+V as everything
+                    // else, so there is nothing to detect.
                     self.send_ctrl_v()
                 }
                 #[cfg(not(any(windows, target_os = "macos", all(unix, not(target_os = "macos")))))]
@@ -1571,5 +1780,201 @@ mod tests {
             let _ = copy_and_paste(&mut explicit_ctrl_shift_v, Some(WindowTarget(13)), "echo hi", PasteMode::CtrlShiftV);
             assert_eq!(explicit_ctrl_shift_v.ctrl_shift_v_attempts, 1);
         }
+    }
+}
+
+
+/// Explicit interactive Windows smoke: only two windows created by this test
+/// receive focus/input. Not part of the unattended test suite.
+#[cfg(all(test, windows))]
+mod native_scratch_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+    use windows_sys::Win32::Foundation::HWND;
+    use windows_sys::Win32::System::DataExchange::GetClipboardSequenceNumber;
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::SetFocus;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        CreateWindowExW, DestroyWindow, DispatchMessageW, ES_AUTOVSCROLL, ES_MULTILINE,
+        GetForegroundWindow, GetWindowTextLengthW, GetWindowTextW, MSG, PM_REMOVE,
+        PeekMessageW, TranslateMessage, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+    };
+
+    struct ScratchWindow(HWND);
+    impl ScratchWindow {
+        fn new(x: i32, y: i32) -> Self {
+            let class: Vec<u16> = "EDIT\0".encode_utf16().collect();
+            let empty = [0u16];
+            let hwnd = unsafe {
+                CreateWindowExW(
+                    0, class.as_ptr(), empty.as_ptr(),
+                    WS_OVERLAPPEDWINDOW | WS_VISIBLE | ES_MULTILINE as u32 | ES_AUTOVSCROLL as u32,
+                    x, y, 640, 180, std::ptr::null_mut(), std::ptr::null_mut(),
+                    std::ptr::null_mut(), std::ptr::null(),
+                )
+            };
+            assert!(!hwnd.is_null(), "could not create the owned scratch edit window");
+            Self(hwnd)
+        }
+        fn text(&self) -> String {
+            let length = unsafe { GetWindowTextLengthW(self.0) };
+            let mut text = vec![0u16; length.max(0) as usize + 1];
+            let copied = unsafe { GetWindowTextW(self.0, text.as_mut_ptr(), text.len() as i32) };
+            String::from_utf16(&text[..copied.max(0) as usize]).unwrap()
+        }
+        fn target(&self) -> WindowTarget { WindowTarget(self.0 as isize) }
+        fn focus(&self, windows: &mut SystemWindows) {
+            windows.restore_foreground(self.target()).expect("scratch window must become foreground");
+            unsafe { SetFocus(self.0); }
+            pump(Duration::from_millis(40));
+            assert_eq!(unsafe { GetForegroundWindow() }, self.0);
+        }
+    }
+    impl Drop for ScratchWindow {
+        fn drop(&mut self) { unsafe { DestroyWindow(self.0); } }
+    }
+
+    /// Restore text only if the test's last write still owns the clipboard.
+    /// An external copy wins, including one containing the same text.
+    struct ClipboardRestore {
+        original: String,
+        owner: HWND,
+        owned_sequence: Option<u32>,
+        owned_text: String,
+    }
+    impl ClipboardRestore {
+        fn new(original: String, owner: HWND) -> Self {
+            Self { original, owner, owned_sequence: None, owned_text: String::new() }
+        }
+        fn record_write(&mut self, text: &str) {
+            let sequence = unsafe { GetClipboardSequenceNumber() };
+            if arboard::Clipboard::new().ok().and_then(|mut clipboard| clipboard.get_text().ok()).as_deref() == Some(text) {
+                self.owned_sequence = Some(sequence);
+                self.owned_text = text.to_owned();
+            }
+        }
+    }
+    impl Drop for ClipboardRestore {
+        fn drop(&mut self) {
+            use windows_sys::Win32::Foundation::GlobalFree;
+            use windows_sys::Win32::System::DataExchange::{OpenClipboard, CloseClipboard, EmptyClipboard, SetClipboardData};
+            use windows_sys::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
+            use windows_sys::Win32::System::Ole::CF_UNICODETEXT;
+            // Hold the native clipboard lock across the ownership check and
+            // restore. An external copy cannot race between check and write.
+            unsafe {
+                if OpenClipboard(self.owner) == 0 { return; }
+                if self.owned_sequence == Some(GetClipboardSequenceNumber()) {
+                    let utf16: Vec<u16> = self.original.encode_utf16().chain(Some(0)).collect();
+                    let allocation = GlobalAlloc(GMEM_MOVEABLE, utf16.len() * 2);
+                    if !allocation.is_null() {
+                        let destination = GlobalLock(allocation) as *mut u16;
+                        if !destination.is_null() {
+                            std::ptr::copy_nonoverlapping(utf16.as_ptr(), destination, utf16.len());
+                            GlobalUnlock(allocation);
+                            if EmptyClipboard() == 0 || SetClipboardData(CF_UNICODETEXT as u32, allocation).is_null() {
+                                GlobalFree(allocation);
+                            }
+                        } else { GlobalFree(allocation); }
+                    }
+                }
+                CloseClipboard();
+            }
+        }
+    }
+
+    fn pump(duration: Duration) {
+        let deadline = Instant::now() + duration;
+        loop {
+            let mut message = MSG::default();
+            while unsafe { PeekMessageW(&mut message, std::ptr::null_mut(), 0, 0, PM_REMOVE) } != 0 {
+                unsafe { TranslateMessage(&message); DispatchMessageW(&message); }
+            }
+            if Instant::now() >= deadline { break; }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    #[ignore = "interactive Windows scratch-window clipboard/focus/paste smoke; run explicitly on an idle desktop"]
+    fn native_draft_is_clipboard_only_and_final_pastes_once_into_owned_scratch() {
+        // Capture before creating any window or changing clipboard contents.
+        let original = arboard::Clipboard::new().unwrap().get_text()
+            .expect("native smoke requires a text clipboard so it can restore it exactly");
+        let target = ScratchWindow::new(60, 60);
+        let decoy = ScratchWindow::new(100, 280);
+        // Declared after the windows so restoration also precedes their
+        // destruction when an assertion unwinds.
+        let mut restore = ClipboardRestore::new(original, target.0);
+        let mut windows = SystemWindows;
+        target.focus(&mut windows);
+
+        for draft in ["Pierwszy szkic", "Ca\u{0142}kowicie poprawiony szkic \u{1f99c}"] {
+            windows.write_clipboard(draft).unwrap();
+            restore.record_write(draft);
+            pump(Duration::from_millis(120));
+            assert_eq!(target.text(), "", "draft must never type into the target");
+            assert_eq!(decoy.text(), "", "draft must never type elsewhere");
+            assert_eq!(arboard::Clipboard::new().unwrap().get_text().unwrap(), draft);
+        }
+
+        // A different owned window is focused, proving that delivery restores
+        // the captured target instead of sending to whichever window is active.
+        decoy.focus(&mut windows);
+        let final_text = "Za\u{017c}\u{00f3}\u{0142}\u{0107} g\u{0119}\u{015b}l\u{0105} ja\u{017a}\u{0144}. Podsumowanie spotkania jutro rano. \u{1f99c}";
+        let delivery = copy_and_paste(&mut windows, Some(target.target()), final_text, PasteMode::Auto);
+        restore.record_write(final_text);
+        delivery.expect("native final paste into the owned scratch window must succeed");
+        assert_eq!(unsafe { GetForegroundWindow() }, target.0, "final must restore the captured target");
+        pump(Duration::from_millis(700));
+        assert_eq!(target.text(), final_text, "final must appear exactly once, with all Unicode intact");
+        assert_eq!(decoy.text(), "", "focus changes must not redirect the final to another window");
+        assert_eq!(arboard::Clipboard::new().unwrap().get_text().unwrap(), final_text);
+        pump(Duration::from_millis(300));
+        assert_eq!(target.text(), final_text, "no delayed second paste may arrive");
+    }
+}
+
+#[cfg(test)]
+mod ptt_modifier_tests {
+    use super::*;
+    struct Held { polls: usize, sleeps: usize, unavailable: bool }
+    impl WindowsApi for Held {
+        fn foreground_window(&mut self) -> Option<WindowTarget> { None }
+        fn restore_foreground(&mut self, _: WindowTarget) -> Result<(), PlatformError> { panic!("no focus during wait") }
+        fn write_clipboard(&mut self, _: &str) -> Result<(), PlatformError> { panic!("no clipboard during wait") }
+        fn send_ctrl_v(&mut self) -> Result<(), PlatformError> { panic!("no input during wait") }
+        fn modifiers_released(&mut self) -> Result<bool, PlatformError> {
+            if self.unavailable { return Err(PlatformError::PasteFailed("desktop unavailable".into())); }
+            self.polls += 1; Ok(self.polls >= 3)
+        }
+        fn pause_for_modifiers(&mut self) { self.sleeps += 1; }
+    }
+    #[test]
+    fn ptt_native_chord_mapping_observes_each_modifier_and_supported_main_key() {
+        let chord = Shortcut::parse("Ctrl+Alt+Shift+Win+F12").unwrap();
+        let required = [0x11, 0x12, 0x10, 0x5b, 0x7b];
+        assert!(chord.sample_keys(|key| required.contains(&key)).chord_down);
+        for released in required {
+            let keys = chord.sample_keys(|key| key != released && required.contains(&key));
+            assert!(!keys.chord_down);
+            assert_eq!(keys.main_down, released != 0x7b);
+        }
+        assert!(Shortcut::parse("Ctrl+Win").is_err());
+        assert!(Shortcut::parse("CapsLock").is_err());
+        for (binding, main) in [("Ctrl+Space", 0x20), ("Alt+Enter", 0x0d), ("Ctrl+A", 0x41), ("Ctrl+5", 0x35), ("Ctrl+F24", 0x87)] {
+            assert!(Shortcut::parse(binding).unwrap().sample_keys(|key| [0x11, 0x12, main].contains(&key)).chord_down);
+        }
+    }
+
+    #[test]
+    fn ptt_modifier_wait_requires_release_and_is_bounded_and_cancellable() {
+        let mut target = Held { polls: 0, sleeps: 0, unavailable: false };
+        assert!(wait_for_modifiers(&mut target, None, || false, || true, std::time::Duration::from_secs(1)).is_ok());
+        assert_eq!(target.polls, 3); assert_eq!(target.sleeps, 2);
+        target.polls = 0;
+        assert!(wait_for_modifiers(&mut target, None, || false, || true, std::time::Duration::ZERO).is_err());
+        assert!(wait_for_modifiers(&mut target, None, || true, || true, std::time::Duration::from_secs(1)).is_err());
+        target.unavailable = true;
+        assert!(wait_for_modifiers(&mut target, None, || false, || true, std::time::Duration::from_secs(1)).is_err());
     }
 }

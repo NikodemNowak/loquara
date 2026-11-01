@@ -32,7 +32,7 @@ ALLOWED_NSIS_KEYS = frozenset(
 
 
 class PackagingConfigTests(unittest.TestCase):
-    def test_main_window_is_visible_on_launch_and_installs_for_current_user(self):
+    def test_main_window_starts_hidden_until_ready_and_installs_for_current_user(self):
         repository = Path(__file__).resolve().parent.parent
         config = json.loads(
             (repository / "src-tauri" / "tauri.conf.json").read_text(
@@ -45,7 +45,9 @@ class PackagingConfigTests(unittest.TestCase):
             if window["label"] == "main"
         )
 
-        self.assertNotIn("visible", main)
+        # Native setup reveals the window after state and tray initialization,
+        # unless startMinimized is enabled. Config must not flash it earlier.
+        self.assertIs(main["visible"], False)
         self.assertEqual(
             config["bundle"]["windows"]["nsis"]["installMode"],
             "currentUser",
@@ -63,6 +65,57 @@ class PackagingConfigTests(unittest.TestCase):
         self.assertLessEqual(set(nsis), ALLOWED_NSIS_KEYS)
         self.assertNotIn("createDesktopShortcut", nsis)
         self.assertNotIn("createStartMenuShortcut", nsis)
+
+    def test_windows_resources_are_confined_to_the_windows_config(self):
+        repository = Path(__file__).resolve().parent.parent
+        base = json.loads(
+            (repository / "src-tauri" / "tauri.conf.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        windows = json.loads(
+            (repository / "src-tauri" / "tauri.windows.conf.json").read_text(
+                encoding="utf-8"
+            )
+        )
+
+        self.assertNotIn("resources", base["bundle"])
+        self.assertEqual(windows["bundle"]["resources"], {"lib/*.dll": "./"})
+        self.assertEqual(set(windows["bundle"]["targets"]), {"nsis", "msi"})
+
+    def test_linux_bundle_ships_shared_libraries_and_xdotool(self):
+        repository = Path(__file__).resolve().parent.parent
+        linux = json.loads(
+            (repository / "src-tauri" / "tauri.linux.conf.json").read_text(
+                encoding="utf-8"
+            )
+        )
+
+        self.assertEqual(linux["bundle"]["resources"], {"lib/*.so*": ""})
+        self.assertEqual(set(linux["bundle"]["targets"]), {"deb", "appimage"})
+        self.assertIn("xdotool", linux["bundle"]["linux"]["deb"]["depends"])
+
+    def test_macos_bundle_carries_microphone_permission_and_engine_frameworks(self):
+        repository = Path(__file__).resolve().parent.parent
+        macos = json.loads(
+            (repository / "src-tauri" / "tauri.macos.conf.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        info = (repository / "src-tauri" / "Info.plist").read_text(encoding="utf-8")
+        entitlements = (repository / "src-tauri" / "entitlements.plist").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertEqual(
+            macos["bundle"]["macOS"]["files"], {"lib/*.dylib": "Frameworks/"}
+        )
+        self.assertEqual(
+            macos["bundle"]["macOS"]["entitlements"], "entitlements.plist"
+        )
+        self.assertIn("NSMicrophoneUsageDescription", info)
+        self.assertIn("com.apple.security.device.audio-input", entitlements)
+        self.assertIn("com.apple.security.automation.apple-events", entitlements)
 
 
 if __name__ == "__main__":

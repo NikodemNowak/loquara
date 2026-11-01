@@ -1,0 +1,162 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      draft:
+        description: Create the GitHub release as a draft
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    runs-on: ubuntu-22.04
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Check versions agree
+        run: node scripts/check-version.mjs
+
+      - name: Resolve tag
+        id: version
+        shell: bash
+        run: echo "tag=v$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: build (${{ matrix.name }})
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-x64
+            os: windows-latest
+            target: ""
+            bundles: nsis,msi
+          - name: macos-universal
+            os: macos-14
+            target: universal-apple-darwin
+            bundles: app,dmg
+          - name: linux-x64
+            os: ubuntu-22.04
+            target: ""
+            bundles: deb,appimage
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libasound2-dev \
+            libxdo-dev \
+            libx11-dev \
+            libdbus-1-dev \
+            libssl-dev \
+            cmake
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.15.1
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Add macOS targets
+        if: runner.os == 'macOS'
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+          key: ${{ matrix.name }}
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Frontend tests
+        run: pnpm test
+
+      - name: Build bundles
+        shell: bash
+        run: |
+          if [ -n "${{ matrix.target }}" ]; then
+            pnpm tauri build --target "${{ matrix.target }}" --bundles "${{ matrix.bundles }}"
+          else
+            pnpm tauri build --bundles "${{ matrix.bundles }}"
+          fi
+
+      - name: Check that bundles were produced
+        shell: bash
+        run: |
+          find src-tauri/target -path '*bundle*' -type f | sort | tee bundles.txt
+          test -s bundles.txt
+
+      - name: Upload bundles
+        uses: actions/upload-artifact@v4
+        with:
+          name: loquara-${{ matrix.name }}
+          path: |
+            src-tauri/target/release/bundle/nsis/*.exe
+            src-tauri/target/release/bundle/msi/*.msi
+            src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
+            src-tauri/target/release/bundle/deb/*.deb
+            src-tauri/target/release/bundle/appimage/*.AppImage
+          if-no-files-found: error
+
+  publish:
+    name: publish release
+    needs: [prepare, build]
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release
+          merge-multiple: true
+
+      - name: List release files
+        run: find release -type f | sort
+
+      - name: Publish
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.prepare.outputs.tag }}
+          name: Loquara ${{ needs.prepare.outputs.tag }}
+          draft: ${{ github.event_name == 'workflow_dispatch' && inputs.draft || false }}
+          generate_release_notes: true
+          append_body: true
+          body: |
+            ## Install
+
+            - **Windows** — run the NSIS installer (`.exe`) or the `.msi`. The installer is per-user and does not require administrator rights.
+            - **macOS** — open the `.dmg`, drag Loquara to Applications. The build is ad-hoc signed, not notarized by Apple, so the first launch needs **right-click → Open** (or `xattr -dr com.apple.quarantine /Applications/Loquara.app`). Allow the microphone when asked, and add Loquara under **System Settings → Privacy & Security → Accessibility** so it can paste into other apps.
+            - **Linux** — install the `.deb`, or make the `.AppImage` executable and run it. Global shortcuts and automatic paste use X11; on Wayland run the app through XWayland. Install `xdotool` for automatic paste in other windows.
+
+            The first start offers a one-click download of the 670 MB speech model. No account, no API key, and no audio leaves the machine unless you configure a cloud engine yourself.
+          files: release/**/*

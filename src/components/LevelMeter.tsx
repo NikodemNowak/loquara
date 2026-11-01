@@ -106,8 +106,8 @@ export function LevelMeter({
     const historyLen = variant === "expanded" ? 64 : 28;
     const history = new Array<number>(historyLen).fill(IDLE_LEVEL);
     const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    const loud = cssColor(colorToken, "#4c8dff");
-    const quiet = cssColor(quietToken, "#8d96a1");
+    const loud = cssColor(colorToken, "#e5e5e5");
+    const quiet = cssColor(quietToken, "#969696");
     let energy = 0;
     let floor = 0;
     let voice = 0;

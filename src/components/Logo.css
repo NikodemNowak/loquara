@@ -1,0 +1,34 @@
+.loquara-mark { display: block; flex: 0 0 auto; overflow: visible; color: inherit; }
+.loquara-mark__fold { fill: currentColor; }
+.loquara-mark__fold--1 { opacity: .82; }
+.loquara-mark--intro .loquara-mark__body { opacity: .16; }
+.loquara-mark__reveal { fill: none; stroke: white; stroke-width: 12; stroke-dasharray: 70; stroke-dashoffset: 0; }
+.loquara-mark--intro .loquara-mark__reveal { animation: fold-reveal 680ms cubic-bezier(.16,1,.3,1) both; }
+.loquara-mark--intro .loquara-mark__reveal--1 { animation-delay: 130ms; }
+.loquara-mark__highlight { fill: none; stroke: #ffffff; stroke-width: 8; stroke-dasharray: 8 70; opacity: 0; animation: fold-travel 1600ms cubic-bezier(.45,0,.25,1) infinite; }
+.loquara-mark__highlight--1 { animation-delay: -800ms; }
+.loquara-mark--working .loquara-mark__fold { transform-origin: 16px 16px; animation: fold-open-a 1400ms cubic-bezier(.4,0,.15,1) infinite; }
+.loquara-mark--working .loquara-mark__fold--1 { animation-name: fold-open-b; }
+.loquara-mark[data-paused] * { animation-play-state: paused; }
+@keyframes fold-open-a {
+  0%,85%,100% { transform: translate(0,0) rotate(0); opacity: 1; }
+  35% { transform: translate(-2px,-2px) rotate(-9deg); opacity: .38; }
+  60% { transform: none; opacity: .75; }
+}
+@keyframes fold-open-b {
+  0%,85%,100% { transform: translate(0,0) rotate(0); opacity: .82; }
+  35% { transform: translate(2px,2px) rotate(9deg); opacity: .9; }
+  60% { transform: none; opacity: .4; }
+}
+@keyframes fold-reveal { from { stroke-dashoffset: 70; } to { stroke-dashoffset: 0; } }
+@keyframes fold-travel {
+  0% { stroke-dashoffset: 72; opacity: 0; }
+  10%,60% { opacity: 1; }
+  85%,100% { opacity: 0; }
+  100% { stroke-dashoffset: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .loquara-mark * { animation: none !important; }
+  .loquara-mark--intro .loquara-mark__body { opacity: 1; }
+  .loquara-mark__entrance, .loquara-mark__travel { display: none; }
+}

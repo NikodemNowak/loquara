@@ -103,8 +103,7 @@ export function HistoryPage({
   return (
     <section className="page history-page">
       <header className="page-header">
-        <h1>{t("history.title")}</h1>
-        <p>{t("history.subtitle")}</p>
+        <div><h1>{t("history.title")}</h1><p>{t("history.subtitle")}</p></div>
       </header>
 
       <div className="history-toolbar">

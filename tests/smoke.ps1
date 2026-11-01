@@ -25,20 +25,31 @@ try {
         -WindowStyle Hidden `
         -PassThru
     $deadline = [DateTime]::UtcNow.AddSeconds($StartupTimeoutSeconds)
-    $database = Join-Path $env:APPDATA "io.loquara.desktop\loquara.sqlite3"
+    $healthPath = Join-Path $env:APPDATA "io.loquara.desktop\health.json"
     do {
         Start-Sleep -Milliseconds 250
         $process.Refresh()
         if ($process.HasExited) {
             throw "Loquara exited during startup (exit $($process.ExitCode))."
         }
-        $healthy = Test-Path -LiteralPath $database -PathType Leaf
+        $healthy = $false
+        if (Test-Path -LiteralPath $healthPath -PathType Leaf) {
+            try {
+                $health = Get-Content -LiteralPath $healthPath -Raw | ConvertFrom-Json
+                $healthy = $health.pid -eq $process.Id -and
+                    $health.trayInitialized -eq $true -and
+                    $health.identifier -eq "io.loquara.desktop"
+            }
+            catch {
+                # The marker is atomic, but antivirus can briefly lock it.
+            }
+        }
     } while (-not $healthy -and [DateTime]::UtcNow -lt $deadline)
 
     if (-not $healthy) {
-        throw "Loquara did not initialize its database within $StartupTimeoutSeconds seconds."
+        throw "Loquara did not report startup readiness for PID $($process.Id) within $StartupTimeoutSeconds seconds."
     }
-    Write-Host "Smoke OK: PID $($process.Id), native engine ready, DB $database"
+    Write-Host "Smoke OK: PID $($process.Id), version $($health.version), app state and tray initialized. Model inference is checked separately."
 }
 finally {
     if (

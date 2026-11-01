@@ -53,7 +53,7 @@ export function Waveform({ peaks }: { peaks: Peaks | null }) {
     if (!canvas || !peaks?.length) return;
     const prepared = prepareCanvas(canvas, HEIGHT);
     if (!prepared) return;
-    const color = cssColor("--faint", "#7d8792");
+    const color = cssColor("--faint", "#969696");
     drawPeaks(prepared.context, peaks, prepared.width, prepared.height, {
       played: color,
       pending: color,

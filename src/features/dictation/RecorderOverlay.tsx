@@ -1,9 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 
+import { ErrorCircleRegular } from "@fluentui/react-icons";
 import { Check, RotateCcw, Square, X } from "../../components/Icons";
 import type { AppAdapter } from "../../lib/tauri";
 import type { AppSnapshot, OverlaySize } from "../../lib/types";
+import "./RecorderOverlay.css";
 import { normalizeError } from "../../lib/errors";
+import { Logo } from "../../components/Logo";
 import { LevelMeter } from "../../components/LevelMeter";
 import { useI18n } from "../../lib/i18n";
 
@@ -12,54 +15,29 @@ const isTauri = "__TAURI_INTERNALS__" in window;
 /* Pill geometry. Mirrored in tauri.conf.json, which sets the initial size.
  * The window is not resizable by the user; only this code changes its size,
  * which needs core:window:allow-set-size in the capability file. */
-const MINI_WIDTH = 68;
+const MINI_WIDTH = 136;
 const MINI_HEIGHT = 36;
-/** Width for the states that carry words rather than a meter. */
-const WORD_WIDTH = 168;
-const LARGE_WIDTH = 288;
-const LARGE_HEIGHT = 88;
-/** How long the undo chip waits before the cancelled take stays discarded. */
-const UNDO_TIMEOUT_MS = 5_000;
-/** How long a delivery failure stays visible on the pill. */
-const DELIVERY_NOTICE_MS = 6_000;
-const WAVE_HEIGHT_MINI = 26;
-const WAVE_HEIGHT_LARGE = 36;
-const DRAG_IGNORE = "button, input, a, select, textarea, [role='button'], [role='menuitem']";
+const DRAG_IGNORE = "button, input, a, select, textarea, [role='button']";
 
-/**
- * The window size each state needs.
- *
- * Metering is what the pill does almost all of the time, so mini stays as
- * small as it can be. The large recording window is a different object and
- * keeps that size across transient states so it does not jump.
- */
+/** Legacy expanded preferences never change the single compact surface. */
 export function overlayWindowSize(
-  status: string | undefined,
-  overlaySize: OverlaySize,
-  initError: boolean,
+  _status: string | undefined,
+  _overlaySize: OverlaySize,
+  _initError: boolean,
 ) {
-  if (overlaySize === "large") {
-    return { width: LARGE_WIDTH, height: LARGE_HEIGHT };
-  }
-  if (initError) return { width: WORD_WIDTH, height: MINI_HEIGHT };
-  switch (status) {
-    case "cancelling":
-    case "pasting":
-    case "failed":
-      return { width: WORD_WIDTH, height: MINI_HEIGHT };
-    default:
-      return { width: MINI_WIDTH, height: MINI_HEIGHT };
-  }
+  return { width: MINI_WIDTH, height: MINI_HEIGHT };
 }
 
-function formatElapsed(seconds: number) {
-  const safe = Math.max(0, Math.floor(seconds));
-  const minutes = Math.floor(safe / 60);
-  return `${minutes}:${String(safe % 60).padStart(2, "0")}`;
-}
-
-function modeLabel(modeId: string, translate: (key: "overlay.mode.clean") => string) {
-  return modeId === "clean" ? translate("overlay.mode.clean") : modeId;
+/** Coordinates and dimensions here are physical pixels, including work-area bounds. */
+export function clampOverlayPosition(
+  position: { x: number; y: number },
+  size: { width: number; height: number },
+  area: { position: { x: number; y: number }; size: { width: number; height: number } },
+) {
+  return {
+    x: Math.max(area.position.x, Math.min(position.x, area.position.x + area.size.width - size.width)),
+    y: Math.max(area.position.y, Math.min(position.y, area.position.y + area.size.height - size.height)),
+  };
 }
 
 export function RecorderOverlay({ adapter }: { adapter: AppAdapter }) {
@@ -68,17 +46,12 @@ export function RecorderOverlay({ adapter }: { adapter: AppAdapter }) {
   const [level, setLevel] = useState(0);
   const [pending, setPending] = useState(false);
   const [actionError, setActionError] = useState("");
-  /** A transcript that could not reach the focused window, most often
-   *  because that window runs elevated. The main window's toast is no help
-   *  while it is hidden, so the pill says so itself. */
-  const [deliveryError, setDeliveryError] = useState("");
   const [initError, setInitError] = useState("");
   const [initAttempt, setInitAttempt] = useState(0);
-  const [elapsed, setElapsed] = useState(0);
-  const [menuOpen, setMenuOpen] = useState(false);
   /** Set while the app moves its own window, so the move is not persisted. */
   const selfMoving = useRef(false);
   const statusRef = useRef<string | undefined>(undefined);
+  const observedStateVersion = useRef(0);
 
   useEffect(() => {
     let active = true;
@@ -114,6 +87,7 @@ export function RecorderOverlay({ adapter }: { adapter: AppAdapter }) {
       .catch(fail);
     void adapter.onState((next) => {
       stateEventSeen = true;
+      observedStateVersion.current += 1;
       latestSnapshot = next;
       if (snapshotReady && registrations === expectRegistrations && active && !failed) setSnapshot(next);
     }).then((unlisten) => {
@@ -139,7 +113,8 @@ export function RecorderOverlay({ adapter }: { adapter: AppAdapter }) {
       .catch(fail);
     void adapter.onError((message) => {
       if (!active || failed) return;
-      setDeliveryError(message);
+      // Draft clipboard errors are nonfatal; never replace the live meter.
+      setActionError(message);
     })
       .then((unlisten) => {
         if (!active || failed) unlisten();
@@ -156,86 +131,45 @@ export function RecorderOverlay({ adapter }: { adapter: AppAdapter }) {
     };
   }, [adapter, initAttempt]);
 
-  useEffect(() => {
-    if (!deliveryError) return;
-    const timer = window.setTimeout(() => setDeliveryError(""), DELIVERY_NOTICE_MS);
-    return () => window.clearTimeout(timer);
-  }, [deliveryError]);
-
   const status = snapshot?.dictation.status;
   statusRef.current = status;
-  const overlaySize: OverlaySize = snapshot?.settings.overlaySize === "large" ? "large" : "mini";
-  const large = overlaySize === "large";
-  const cancelling = status === "cancelling";
+  const recordingId = snapshot?.dictation.status === "recording" ? snapshot.dictation.recordingId : null;
+  useEffect(() => { setLevel(0); setActionError(""); }, [recordingId]);
 
-  useEffect(() => {
-    if (!cancelling) return;
-    const timer = window.setTimeout(() => {
-      void action(() => adapter.requestCancel());
-    }, UNDO_TIMEOUT_MS);
-    return () => window.clearTimeout(timer);
-  }, [adapter, cancelling]);
-
-  const wanted = menuOpen && overlaySize === "mini"
-    ? { width: WORD_WIDTH, height: 80 }
-    : overlayWindowSize(status, overlaySize, Boolean(initError));
+  const wanted = overlayWindowSize(status, "mini", Boolean(initError || actionError));
   const applied = useRef({ width: 0, height: 0 });
+  const resizeQueue = useRef<Promise<void>>(Promise.resolve());
   useEffect(() => {
     if (!isTauri) return;
     if (applied.current.width === wanted.width && applied.current.height === wanted.height) return;
-    applied.current = wanted;
     let active = true;
-    void import("@tauri-apps/api/window").then(async ({ getCurrentWindow, LogicalSize, currentMonitor }) => {
+    resizeQueue.current = resizeQueue.current.catch(() => {}).then(async () => {
+      const { getCurrentWindow, LogicalSize, currentMonitor } = await import("@tauri-apps/api/window");
       if (!active) return;
       const overlay = getCurrentWindow();
       const position = await overlay.outerPosition();
-      const before = await overlay.innerSize();
       const monitor = await currentMonitor().catch(() => null);
-      const scale = monitor?.scaleFactor ?? 1;
-      const growth = (wanted.height - MINI_HEIGHT) * scale;
-      let openBelow = false;
-      if (growth > 0) {
-        const roomAbove = position.y - (monitor?.position.y ?? 0);
-        openBelow = Boolean(monitor) && roomAbove < growth + 8;
-      }
       selfMoving.current = true;
       try {
         await overlay.setSize(new LogicalSize(wanted.width, wanted.height));
+        applied.current = wanted;
         const after = await overlay.innerSize();
-        const taller = after.height - before.height;
-        const wider = after.width - before.width;
-        if (taller !== 0 || wider !== 0) {
-          if (!openBelow) {
-            position.y -= taller;
+        if (monitor) {
+          const safe = clampOverlayPosition(position, after, monitor.workArea);
+          if (safe.x !== position.x || safe.y !== position.y) {
+            position.x = safe.x;
+            position.y = safe.y;
+            await overlay.setPosition(position);
           }
-          position.x -= Math.round(wider / 2);
-          await overlay.setPosition(position);
         }
       } catch {
-        // The pill keeps its previous size; the prompt still reads correctly,
-        // so there is nothing here the user needs to be told about.
+        // Native geometry is retried on the next mount; state actions stay available.
       } finally {
         window.setTimeout(() => { selfMoving.current = false; }, 400);
       }
     });
     return () => { active = false; };
   }, [wanted.width, wanted.height]);
-
-  useEffect(() => {
-    if (status === "idle") void adapter.hideOverlay();
-  }, [adapter, status]);
-
-  useEffect(() => {
-    if (status !== "recording" && status !== "processing") {
-      setElapsed(0);
-      return;
-    }
-    const started = snapshot?.recordingStartedAt ?? Date.now();
-    const tick = () => setElapsed(Math.max(0, Math.floor((Date.now() - started) / 1000)));
-    tick();
-    const timer = window.setInterval(tick, 250);
-    return () => window.clearInterval(timer);
-  }, [status, snapshot?.recordingStartedAt]);
 
   useEffect(() => {
     if (!isTauri) return;
@@ -271,8 +205,11 @@ export function RecorderOverlay({ adapter }: { adapter: AppAdapter }) {
   const action = async (command: () => Promise<AppSnapshot>) => {
     setPending(true);
     setActionError("");
+    const version = observedStateVersion.current;
     try {
-      await command();
+      const next = await command();
+      // A state event observed while the command ran is newer than its reply.
+      if (observedStateVersion.current === version) setSnapshot(next);
     } catch (error) {
       setActionError(normalizeError(error));
     } finally {
@@ -289,230 +226,70 @@ export function RecorderOverlay({ adapter }: { adapter: AppAdapter }) {
     });
   };
 
-  const switchSize = (next: OverlaySize) => {
-    setMenuOpen(false);
-    if (!snapshot || snapshot.settings.overlaySize === next) return;
-    void action(async () => {
-      const result = await adapter.updateSettings({ ...snapshot.settings, overlaySize: next });
-      return { ...snapshot, settings: result.settings };
-    });
-  };
-
   const state = snapshot?.dictation;
-  const meterVariant = large ? "expanded" : "compact";
-  const waveHeight = large ? WAVE_HEIGHT_LARGE : WAVE_HEIGHT_MINI;
-  const waveGap = large ? 2.5 : 2;
-  const waveBar = large ? 3 : 3;
-
-  const actions = (opts: { stop?: boolean; cancel?: boolean }) => (
-    <div className="overlay-actions">
-      {opts.stop && state && (state.status === "recording" || state.status === "cancelling") ? (
-        <button
-          type="button"
-          className="overlay-icon-button overlay-icon-button--stop"
-          disabled={pending}
-          aria-label={t("overlay.stop")}
-          onClick={() => void action(() => adapter.stopRecording())}
-        >
-          <Square size={11} />
-        </button>
-      ) : null}
-      {opts.cancel ? (
-        <button
-          type="button"
-          className="overlay-icon-button overlay-icon-button--cancel"
-          disabled={pending}
-          aria-label={t("overlay.cancel")}
-          onClick={() => {
-            if (state?.status === "cancelling") {
-              void action(() => adapter.requestCancel());
-              return;
-            }
-            void action(() => adapter.cancelRecording());
-          }}
-        >
-          <X size={12} />
-        </button>
-      ) : null}
-    </div>
-  );
-
-  const undoChip = state?.status === "cancelling" ? (
-    <div className="overlay-undo">
-      <span>{t("overlay.cancelling.title")}</span>
-      <button
-        type="button"
-        className="overlay-undo__button"
-        disabled={pending}
-        aria-label={t("overlay.undoAria")}
-        onClick={() => void action(() => adapter.retryTranscription(state.recordingId))}
-      >
-        {t("overlay.undo")}
-      </button>
-    </div>
-  ) : null;
-
+  const notice = snapshot?.overlayNotice;
+  // Keep the native window stable so the capsule can fold around its centre
+  // without moving the saved desktop position or resizing WebView mid-animation.
+  const solo = !initError && (!state || state.status === "processing" || state.status === "pasting"
+    || (state.status === "idle" && (notice?.kind === "copied" || notice?.kind === "pasteRequested")));
+  const cancel = () => state?.status === "cancelling" ? adapter.requestCancel() : adapter.cancelRecording();
+  const cancelButton = <button type="button" className="overlay-icon-button overlay-icon-button--cancel" disabled={pending}
+    aria-label={t("overlay.cancel")} title={t("overlay.cancel")} onClick={() => void action(cancel)}><X size={14} /></button>;
   const body = (() => {
-    if (initError) {
-      return (
-        <div className="overlay-main" title={initError}>
-          <div className="overlay-copy overlay-copy--alert" role="alert">
-            <strong>{t("overlay.initError.title")}</strong>
-          </div>
-          <button
-            disabled={pending}
-            className="text-button"
-            aria-label={t("overlay.initError.retryAria")}
-            onClick={() => setInitAttempt((attempt) => attempt + 1)}
-          >
-            <RotateCcw size={13} />
-          </button>
-        </div>
-      );
+    if (initError) return <div className="overlay-main">
+      <span className="overlay-label overlay-label--error" role="alert" title={initError}
+        aria-label={`${t("overlay.initError.title")}: ${initError}`}>{t("overlay.initError.compact")}</span>
+      <button type="button" className="overlay-icon-button" aria-label={t("overlay.initError.retryAria")}
+        title={t("overlay.initError.retryAria")} onClick={() => setInitAttempt((attempt) => attempt + 1)}><RotateCcw size={15} /></button>
+    </div>;
+    if (!state) return <div className="overlay-main" role="status" aria-label={t("overlay.boot")}><Logo size={20} motion="working" /><span className="overlay-sr-only">{t("overlay.boot")}</span></div>;
+    if (state.status === "cancelling") return <div className="overlay-main">
+      <X size={14} /><span className="overlay-label">{t("overlay.cancelled")}</span>
+      <button type="button" className="overlay-undo" disabled={pending} aria-label={t("overlay.undoAria")}
+        title={t("overlay.undoAria")} onClick={() => void action(() => adapter.retryTranscription(state.recordingId))}>{t("overlay.undo")}</button></div>;
+    if (state.status === "failed") return <div className="overlay-main">
+      <ErrorCircleRegular className="overlay-failure-icon" aria-hidden="true" />
+      <button type="button" className="overlay-text-button" disabled={pending} title={state.error}
+        aria-label={t("overlay.failed.retryAria")}
+        onClick={() => void action(() => adapter.retryTranscription(state.recovery.recordingId))}>{t("overlay.failed.compact")}</button>
+      <span className="overlay-sr-only" role="alert">{state.error}</span></div>;
+    if (state.status === "idle" && notice) {
+      if (notice.kind === "deliveryFailed") return <div className="overlay-main overlay-main--interactive" role="alert">
+        <div className="overlay-reading"><ErrorCircleRegular className="overlay-failure-icon" aria-hidden="true" /><span className="overlay-label overlay-label--error" title={notice.detail ?? undefined}>{t("overlay.deliveryFailed")}</span></div>
+        <div className="overlay-actions">
+          <button className="overlay-text-button" type="button" aria-label={t("overlay.openDetails")} title={notice.detail ?? t("overlay.openDetails")}
+            onClick={() => void adapter.openOverlayDetails(notice.key, notice.generation).catch((error) => setActionError(normalizeError(error)))}>{t("overlay.deliveryFailed")}</button>
+          <button className="overlay-icon-button" type="button" aria-label={t("overlay.dismiss")} title={t("overlay.dismiss")}
+            onClick={() => void action(() => adapter.dismissOverlayNotice(notice.key, notice.generation))}><X size={14} /></button>
+        </div></div>;
+      const label = t(notice.kind === "copied" ? "overlay.copied" : notice.kind === "cancelled" ? "overlay.cancelled" : "overlay.ready");
+      const detail = notice.kind === "pasteRequested" ? t("overlay.pasteRequestedDetail") : label;
+      return <div className="overlay-main" role="status" aria-label={detail} title={detail}>
+        {notice.kind === "cancelled" ? <X size={15} /> : <Check size={18} className="overlay-success" />}<span className={notice.kind === "cancelled" ? "overlay-label" : "overlay-sr-only"}>{label}</span></div>;
     }
-    if (!state) {
-      return (
-        <div className="overlay-main overlay-main--center" role="status" aria-label={t("overlay.boot")}>
-          <span className="spinner" aria-hidden="true" />
-        </div>
-      );
-    }
-    switch (state.status) {
-      case "idle":
-        return null;
-      case "cancelling":
-        return (
-          <div className={`overlay-main ${large ? "overlay-main--large" : ""}`}>
-            {undoChip}
-          </div>
-        );
-      case "recording":
-        return (
-          <div className={`overlay-main ${large ? "overlay-main--large" : ""}`}>
-            <LevelMeter
-              level={level}
-              variant={meterVariant}
-              height={waveHeight}
-              barWidth={waveBar}
-              gap={waveGap}
-              className="overlay-wave"
-              label={t("overlay.micLevel")}
-              colorToken="--pill-accent"
-            />
-            {large ? (
-              <div className="overlay-chrome">
-                <div className="overlay-meta">
-                  <strong>{t("overlay.recording")}</strong>
-                  <span aria-label={t("overlay.elapsed")}>{formatElapsed(elapsed)}</span>
-                  <span>{modeLabel(snapshot?.settings.activeMode ?? "clean", t)}</span>
-                </div>
-                {actions({ stop: true, cancel: true })}
-              </div>
-            ) : (
-              actions({ stop: true, cancel: true })
-            )}
-          </div>
-        );
-      case "processing":
-        return (
-          <div className={`overlay-main ${large ? "overlay-main--large" : ""}`}>
-            <LevelMeter
-              level={0}
-              mode="thinking"
-              variant={meterVariant}
-              height={waveHeight}
-              barWidth={waveBar}
-              gap={waveGap}
-              className="overlay-wave"
-              label={t("common.processing")}
-              colorToken="--pill-accent"
-            />
-            {large ? (
-              <div className="overlay-chrome">
-                <div className="overlay-meta">
-                  <strong>{t("common.processing")}</strong>
-                  <span aria-label={t("overlay.elapsed")}>{formatElapsed(elapsed)}</span>
-                </div>
-                {actions({ cancel: true })}
-              </div>
-            ) : (
-              actions({ cancel: true })
-            )}
-          </div>
-        );
-      case "pasting":
-        return (
-          <div className="overlay-main">
-            <span className="overlay-mark overlay-mark--success"><Check size={13} /></span>
-            <div className="overlay-copy"><strong>{t("common.pasting")}</strong></div>
-          </div>
-        );
-      case "failed":
-        return (
-          <div className="overlay-main">
-            <div className="overlay-copy overlay-copy--alert">
-              <strong>{t("overlay.failed.title")}</strong>
-            </div>
-            <button
-              disabled={pending}
-              className="text-button"
-              aria-label={t("overlay.failed.retryAria")}
-              onClick={() => void action(() => adapter.retryTranscription(state.recovery.recordingId))}
-            >
-              <RotateCcw size={13} />
-            </button>
-          </div>
-        );
-      default: {
-        const _exhaustive: never = state;
-        return _exhaustive;
-      }
-    }
+    if (state.status === "idle") return null;
+    const recording = state.status === "recording";
+    // Pasting remains busy until the native delivery result arrives. It is not
+    // an acknowledgement that another application accepted the transcript.
+    return <div className={`overlay-main overlay-main--interactive ${recording ? "overlay-main--recording" : "overlay-main--processing"}`}>
+      <div className="overlay-reading">
+        <Logo size={20} motion={recording ? undefined : "working"} />
+        {recording ? <LevelMeter level={level} variant="compact" height={18} barWidth={2} gap={2}
+          className="overlay-wave" label={t("overlay.micLevel")} colorToken="--pill-accent" />
+          : <span className="overlay-sr-only" role="status" aria-label={t("overlay.transcribing")}>{t("overlay.transcribing")}</span>}
+      </div>
+      {state.status !== "pasting" ? <div className="overlay-actions">
+        {recording ? <button type="button" className="overlay-icon-button overlay-icon-button--stop" disabled={pending}
+          aria-label={t("overlay.stop")} title={t("overlay.stop")} onClick={() => void action(() => adapter.stopRecording())}><Square size={11} /></button> : null}
+        {cancelButton}
+      </div> : null}
+    </div>;
   })();
 
-  return (
-    <main
-      className={`recorder-overlay recorder-overlay--${initError ? "init-error" : state?.status ?? "initializing"} recorder-overlay--${overlaySize}${deliveryError ? " recorder-overlay--delivery-error" : ""}`}
-      aria-live="polite"
-      data-tauri-drag-region
-      onMouseDown={startDrag}
-      onContextMenu={(event) => {
-        event.preventDefault();
-        setMenuOpen(true);
-      }}
-    >
-      {menuOpen && (
-        <div className="overlay-menu" role="menu" aria-label={t("overlay.menu.size")}>
-          <button
-            type="button"
-            role="menuitem"
-            aria-checked={overlaySize === "mini"}
-            className={overlaySize === "mini" ? "is-active" : ""}
-            onClick={() => switchSize("mini")}
-          >
-            {t("overlay.menu.mini")}
-          </button>
-          <button
-            type="button"
-            role="menuitem"
-            aria-checked={overlaySize === "large"}
-            className={overlaySize === "large" ? "is-active" : ""}
-            onClick={() => switchSize("large")}
-          >
-            {t("overlay.menu.large")}
-          </button>
-        </div>
-      )}
-      <div className="overlay-pill">
-        {body}
-        {actionError ? (
-          <span className="overlay-note overlay-note--error" role="alert">{actionError}</span>
-        ) : deliveryError ? (
-          <span className="overlay-note overlay-note--error" role="alert" title={deliveryError}>
-            {t("overlay.notice.delivery")}
-          </span>
-        ) : null}
-      </div>
-    </main>
-  );
+  return <main className={`recorder-overlay recorder-overlay--${initError ? "init-error" : state?.status ?? "initializing"}`}
+    style={!isTauri ? { width: wanted.width, height: wanted.height } : undefined}
+    aria-live="polite" title={actionError || undefined} data-tauri-drag-region onMouseDown={startDrag} onContextMenu={(event) => event.preventDefault()}>
+    <div className={`overlay-pill${solo ? " overlay-pill--solo" : state?.status === "recording" && !initError ? " overlay-pill--recording" : ""}`}>{body}</div>
+    {actionError ? <span className="overlay-sr-only" role="alert">{actionError}</span> : null}
+  </main>;
 }
