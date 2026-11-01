@@ -36,7 +36,6 @@
   --line: #dededc;
   --button: #101010;
   --button-fg: #f7f7f5;
-  --accent: #c86f78;
   --shadow: 0 50px 100px -50px rgba(0, 0, 0, 0.45);
   --font: "Schibsted Grotesk", "Segoe UI", system-ui, sans-serif;
   --mono: ui-monospace, "SFMono-Regular", "Cascadia Mono", "Roboto Mono",
@@ -54,7 +53,6 @@
     --line: #262626;
     --button: #f2f2f0;
     --button-fg: #0a0a0a;
-    --accent: #e29b9e;
     --shadow: 0 0 0 1px rgba(255, 255, 255, 0.04),
       0 50px 100px -60px rgba(0, 0, 0, 0.9);
   }
@@ -125,10 +123,6 @@ img {
   outline: 2px solid var(--fg);
   outline-offset: 3px;
   border-radius: 3px;
-}
-
-.button:focus-visible {
-  outline-color: var(--accent);
 }
 
 .sr-only {
@@ -282,16 +276,6 @@ h1 {
   color: var(--fg);
 }
 
-.accent-dot {
-  display: inline-block;
-  width: 0.12em;
-  height: 0.12em;
-  margin-left: 0.05em;
-  border-radius: 50%;
-  background: var(--accent);
-  vertical-align: 0.04em;
-}
-
 .hero__sub {
   max-width: 38ch;
   margin: clamp(22px, 3.5vh, 36px) 0 0;
@@ -349,7 +333,7 @@ h1 {
   width: 5px;
   height: 5px;
   border-radius: 50%;
-  background: var(--accent);
+  background: currentColor;
 }
 
 .dl.is-current .dl__dot {
@@ -429,7 +413,6 @@ h1 {
 
 .showcase {
   padding: clamp(40px, 6vh, 64px) 0 clamp(80px, 10vh, 120px);
-  border-top: 1px solid var(--line);
 }
 
 .app-figure {
