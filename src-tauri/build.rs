@@ -284,7 +284,6 @@ fn main() {
             "@executable_path/../Frameworks",
         ] {
             println!("cargo:rustc-link-arg=-Wl,-rpath,{path}");
-            println!("cargo:rustc-link-arg-tests=-Wl,-rpath,{path}");
         }
     }
     #[cfg(all(unix, not(target_os = "macos")))]
@@ -296,10 +295,8 @@ fn main() {
             "$ORIGIN/../lib/Loquara",
         ] {
             println!("cargo:rustc-link-arg=-Wl,-rpath,{path}");
-            println!("cargo:rustc-link-arg-tests=-Wl,-rpath,{path}");
         }
         println!("cargo:rustc-link-arg=-Wl,--disable-new-dtags");
-        println!("cargo:rustc-link-arg-tests=-Wl,--disable-new-dtags");
     }
 
     tauri_build::build();

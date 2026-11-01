@@ -46,7 +46,7 @@ jobs:
             target: ""
             bundles: nsis,msi
           - name: macos-universal
-            os: macos-14
+            os: macos-15
             target: universal-apple-darwin
             bundles: app,dmg
           - name: linux-x64
