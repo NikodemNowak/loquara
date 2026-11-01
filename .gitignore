@@ -10,7 +10,6 @@ __pycache__/
 *.pyc
 *.pyo
 *.wav
-!site/public/demo.wav
 models/
 recordings/
 *.log

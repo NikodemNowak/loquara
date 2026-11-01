@@ -1,73 +1,32 @@
 export type Os = "windows" | "macos" | "linux";
 
-export type FileDownload = {
-  label: string;
-  file: string;
-  size: string;
-  primary?: boolean;
-};
-
 export const RELEASE = "0.10.0";
 
 const BASE = `https://github.com/NikodemNowak/loquara/releases/download/v${RELEASE}/`;
 
-export const DOWNLOADS: Record<Os, { name: string; files: FileDownload[] }> = {
+export const PRIMARY: Record<
+  Os,
+  { label: string; href: string; file: string; size: string }
+> = {
   windows: {
-    name: "Windows",
-    files: [
-      {
-        label: "Installer",
-        file: `Loquara_${RELEASE}_x64-setup.exe`,
-        size: "17.6 MB",
-        primary: true,
-      },
-      {
-        label: "MSI package",
-        file: `Loquara_${RELEASE}_x64_en-US.msi`,
-        size: "22.3 MB",
-      },
-    ],
+    label: "Download for Windows",
+    href: `${BASE}Loquara_${RELEASE}_x64-setup.exe`,
+    file: `Loquara_${RELEASE}_x64-setup.exe`,
+    size: "17.6 MB",
   },
   macos: {
-    name: "macOS",
-    files: [
-      {
-        label: "Disk image",
-        file: `Loquara_${RELEASE}_universal.dmg`,
-        size: "44.0 MB",
-        primary: true,
-      },
-    ],
+    label: "Download for macOS",
+    href: `${BASE}Loquara_${RELEASE}_universal.dmg`,
+    file: `Loquara_${RELEASE}_universal.dmg`,
+    size: "44.0 MB",
   },
   linux: {
-    name: "Linux",
-    files: [
-      {
-        label: "Debian package",
-        file: `Loquara_${RELEASE}_amd64.deb`,
-        size: "22.1 MB",
-        primary: true,
-      },
-      {
-        label: "AppImage",
-        file: `Loquara_${RELEASE}_amd64.AppImage`,
-        size: "93.0 MB",
-      },
-    ],
+    label: "Download for Linux",
+    href: `${BASE}Loquara_${RELEASE}_amd64.deb`,
+    file: `Loquara_${RELEASE}_amd64.deb`,
+    size: "22.1 MB",
   },
 };
-
-export function downloadUrl(file: string): string {
-  return `${BASE}${file}`;
-}
-
-export function primaryFile(os: Os): FileDownload {
-  return DOWNLOADS[os].files.find((item) => item.primary) ?? DOWNLOADS[os].files[0];
-}
-
-export function primaryUrl(os: Os): string {
-  return downloadUrl(primaryFile(os).file);
-}
 
 export function detectedOs(): Os | null {
   if (typeof navigator === "undefined") {
