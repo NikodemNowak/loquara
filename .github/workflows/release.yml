@@ -146,6 +146,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.prepare.outputs.tag }}
+          target_commitish: ${{ github.sha }}
           name: Loquara ${{ needs.prepare.outputs.tag }}
           draft: ${{ github.event_name == 'workflow_dispatch' && inputs.draft || false }}
           generate_release_notes: true
