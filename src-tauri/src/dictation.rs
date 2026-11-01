@@ -5312,7 +5312,7 @@ mod buffered_delivery_tests {
                     self.pastes += 1; Ok(())
                 }
                 fn paste_keys_released(&mut self, shortcut: Option<&platform::Shortcut>) -> Result<bool, PlatformError> {
-                    assert_eq!(shortcut.map(ToString::to_string).as_deref(), Some("Ctrl+Space"));
+                    assert_eq!(shortcut.map(ToString::to_string).as_deref(), Some(default_shortcut()));
                     Ok(!self.held)
                 }
                 fn pause_for_modifiers(&mut self) { self.waits += 1; self.held = false; }
@@ -5509,7 +5509,11 @@ mod buffered_delivery_tests {
         let (_dir, state, take) = fixture(); let mut target = Target::default();
         assert!(complete_take(&state, &take, Path::new("take.wav"), &final_result("Dzień dobry"), &mut target).unwrap().is_some());
         assert_eq!(state.storage.get_recording("take").unwrap().unwrap().status, RecordingStatus::Completed);
-        assert_eq!(target.pastes, 1); assert_eq!(target.focused, Some(WindowTarget(42)));
+        assert_eq!(target.pastes, 1);
+        #[cfg(windows)]
+        assert_eq!(target.focused, Some(WindowTarget(42)));
+        #[cfg(not(windows))]
+        assert_eq!(target.focused, None, "the non-Windows overlay never steals focus");
         assert!(target.clipboard.contains("Dzień dobry"));
         assert!(complete_take(&state, &take, Path::new("take.wav"), &final_result("wrong"), &mut target).unwrap().is_none());
         assert_eq!(target.pastes, 1); assert!(!target.clipboard.contains("wrong"));
@@ -5604,8 +5608,21 @@ mod buffered_delivery_tests {
     fn missing_target_keeps_final_in_clipboard_and_does_not_paste_elsewhere() {
         let (_dir, state, mut take) = fixture(); take.target = None;
         let mut target = Target::default();
-        assert!(complete_take(&state, &take, Path::new("take.wav"), &final_result("retained"), &mut target).unwrap().unwrap().is_err());
-        assert!(target.clipboard.contains("retained")); assert_eq!(target.pastes, 0);
+        let delivery = complete_take(&state, &take, Path::new("take.wav"), &final_result("retained"), &mut target).unwrap().unwrap();
+        assert!(target.clipboard.contains("retained"));
+        // Windows needs a remembered window before it can send Ctrl+V. On
+        // macOS and X11 the overlay never takes focus, so the current window
+        // is the right destination and the paste still goes through.
+        #[cfg(windows)]
+        {
+            assert!(delivery.is_err());
+            assert_eq!(target.pastes, 0);
+        }
+        #[cfg(not(windows))]
+        {
+            assert!(delivery.is_ok());
+            assert_eq!(target.pastes, 1);
+        }
     }
     #[test]
     fn frozen_vocabulary_and_mode_apply_once_despite_mid_take_edits() {

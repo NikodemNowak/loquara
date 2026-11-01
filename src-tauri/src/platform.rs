@@ -1603,11 +1603,15 @@ mod tests {
         let result = copy_and_paste(&mut windows, Some(WindowTarget(9)), "Zażółć", PasteMode::Auto);
 
         assert_eq!(windows.clipboard, vec!["Zażółć"]);
+        #[cfg(windows)]
         assert_eq!(windows.restored, vec![WindowTarget(9)]);
+        #[cfg(not(windows))]
+        assert!(windows.restored.is_empty(), "the non-Windows overlay keeps focus");
         assert_eq!(windows.paste_attempts, 1);
         assert!(matches!(result, Err(PlatformError::PasteFailed(_))));
     }
 
+    #[cfg(windows)]
     #[test]
     fn failed_focus_restore_never_injects_paste() {
         let mut windows = FakeWindows {

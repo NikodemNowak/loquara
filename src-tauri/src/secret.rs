@@ -131,10 +131,16 @@ mod platform {
 #[cfg(not(windows))]
 mod platform {
     pub fn wrap(data: &[u8]) -> Result<Vec<u8>, String> {
+        if data.is_empty() {
+            return Err("there is no key to protect".to_owned());
+        }
         Ok(data.to_vec())
     }
 
     pub fn unwrap(data: &[u8]) -> Result<Vec<u8>, String> {
+        if data.is_empty() {
+            return Err("the stored key is empty".to_owned());
+        }
         Ok(data.to_vec())
     }
 }
