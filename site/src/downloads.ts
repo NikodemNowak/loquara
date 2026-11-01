@@ -6,22 +6,25 @@ const BASE = `https://github.com/NikodemNowak/loquara/releases/download/v${RELEA
 
 export const PRIMARY: Record<
   Os,
-  { label: string; href: string; file: string; size: string }
+  { labelEn: string; labelPl: string; href: string; file: string; size: string }
 > = {
   windows: {
-    label: "Download for Windows",
+    labelEn: "Download for Windows",
+    labelPl: "Pobierz dla Windows",
     href: `${BASE}Loquara_${RELEASE}_x64-setup.exe`,
     file: `Loquara_${RELEASE}_x64-setup.exe`,
     size: "17.6 MB",
   },
   macos: {
-    label: "Download for macOS",
+    labelEn: "Download for macOS",
+    labelPl: "Pobierz dla macOS",
     href: `${BASE}Loquara_${RELEASE}_universal.dmg`,
     file: `Loquara_${RELEASE}_universal.dmg`,
     size: "44.0 MB",
   },
   linux: {
-    label: "Download for Linux",
+    labelEn: "Download for Linux",
+    labelPl: "Pobierz dla Linuksa",
     href: `${BASE}Loquara_${RELEASE}_amd64.deb`,
     file: `Loquara_${RELEASE}_amd64.deb`,
     size: "22.1 MB",

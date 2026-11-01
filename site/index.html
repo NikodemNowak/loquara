@@ -6,7 +6,7 @@
     <title>Loquara — private dictation for Windows, macOS and Linux</title>
     <meta
       name="description"
-      content="Press a shortcut, speak, and the words land at your caret. Loquara transcribes locally on Windows, macOS and Linux."
+      content="Press the shortcut, speak, and the words land at your caret. Loquara transcribes locally on Windows, macOS and Linux."
     />
     <meta name="theme-color" content="#f3f3f1" media="(prefers-color-scheme: light)" />
     <meta name="theme-color" content="#0a0a0a" media="(prefers-color-scheme: dark)" />
@@ -24,11 +24,35 @@
       type="font/woff2"
       crossorigin
     />
+    <script>
+      (function () {
+        var query = new URLSearchParams(location.search).get("lang");
+        var browser = String(
+          (navigator.languages && navigator.languages[0]) || navigator.language || "en",
+        ).toLowerCase();
+        var lang = query === "pl" || query === "en" ? query : browser.indexOf("pl") === 0 ? "pl" : "en";
+        document.documentElement.lang = lang;
+        document.title =
+          lang === "pl"
+            ? "Loquara — prywatne dyktowanie na Windows, macOS i Linux"
+            : "Loquara — private dictation for Windows, macOS and Linux";
+        var description = document.querySelector('meta[name="description"]');
+        if (description) {
+          description.setAttribute(
+            "content",
+            lang === "pl"
+              ? "Naciśnij skrót, mów, a słowa pojawią się przy kursorze. Loquara przepisuje mowę lokalnie na Windows, macOS i Linux."
+              : "Press the shortcut, speak, and the words land at your caret. Loquara transcribes locally on Windows, macOS and Linux.",
+          );
+        }
+      })();
+    </script>
     <link rel="stylesheet" href="/src/style.css" />
     <noscript>
       <style>
-        .app__wave,
-        .app-pill__wave {
+        .app-overlay,
+        .app-level__canvas,
+        .app-overlay__wave {
           display: none;
         }
       </style>
@@ -36,7 +60,10 @@
     <script type="module" src="/src/main.ts"></script>
   </head>
   <body>
-    <a class="skip" href="#main">Skip to content</a>
+    <a class="skip" href="#main">
+      <span class="bi bi-en" lang="en">Skip to content</span>
+      <span class="bi bi-pl" lang="pl">Przejdź do treści</span>
+    </a>
 
     <header class="topbar">
       <div class="shell topbar__inner">
@@ -65,7 +92,8 @@
             <svg viewBox="0 0 16 16" aria-hidden="true">
               <path d="M8 2v7.2m0 0 2.8-2.8M8 9.2 5.2 6.4M3 11.5v1.5h10v-1.5" />
             </svg>
-            <span data-download-label>Download for Windows</span>
+            <span class="bi bi-en" data-cta-en>Download for Windows</span>
+            <span class="bi bi-pl" data-cta-pl>Pobierz dla Windows</span>
           </a>
         </div>
       </div>
@@ -74,14 +102,264 @@
     <main id="main">
       <section class="hero" id="top">
         <div class="shell hero__inner">
-          <h1>Speak.<br />It’s written<span class="accent-dot" aria-hidden="true"></span></h1>
+          <h1>
+            <span class="bi bi-en" lang="en">Speak.<br />It’s written<span class="accent-dot" aria-hidden="true"></span></span>
+            <span class="bi bi-pl" lang="pl">Mów.<br />Zapisane<span class="accent-dot" aria-hidden="true"></span></span>
+          </h1>
           <p class="hero__sub">
-            Private dictation for Windows, macOS and Linux. On your machine, at
-            your caret.
+            <span class="bi bi-en" lang="en">Private dictation for Windows, macOS and Linux. On your machine, at your caret.</span>
+            <span class="bi bi-pl" lang="pl">Prywatne dyktowanie na Windows, macOS i Linux. Na Twoim komputerze, przy kursorze.</span>
           </p>
         </div>
 
-        <nav class="shell downloads" aria-label="Download Loquara">
+      </section>
+
+      <section class="showcase" id="app">
+        <div class="shell">
+          <h2 class="sr-only">
+            <span class="bi bi-en" lang="en">Loquara interface preview</span>
+            <span class="bi bi-pl" lang="pl">Podgląd interfejsu Loquary</span>
+          </h2>
+
+          <figure class="app-figure">
+            <div class="app-stage" data-app-stage data-phase="idle">
+              <div class="app-window" data-app-demo data-phase="idle" data-clipboard="pending" aria-hidden="true">
+                <div class="app-titlebar">
+                  <span class="app-brand">
+                    <svg class="app-mark" viewBox="0 0 32 32">
+                      <path d="M5 17.5C5 9.8 9.5 5 17 5H27V11H17C13.4 11 11 13.3 11 17.5V21H5Z" />
+                      <path opacity=".72" d="M27 14.5C27 22.2 22.5 27 15 27H5V21H15C18.6 21 21 18.7 21 14.5V11H27Z" />
+                    </svg>
+                    <span>Loquara</span>
+                  </span>
+                  <span class="app-drag"></span>
+                  <span class="app-controls">
+                    <span class="app-control">
+                      <svg viewBox="0 0 16 16"><path d="M3.5 8h9" /></svg>
+                    </span>
+                    <span class="app-control">
+                      <svg viewBox="0 0 16 16"><rect x="4" y="4" width="8" height="8" rx="1" /></svg>
+                    </span>
+                    <span class="app-control app-control--close">
+                      <svg viewBox="0 0 16 16"><path d="m4 4 8 8M12 4l-8 8" /></svg>
+                    </span>
+                  </span>
+                </div>
+
+                <nav class="app-topnav">
+                  <span class="app-tab app-tab--active">
+                    <span class="bi bi-en" lang="en">Home</span>
+                    <span class="bi bi-pl" lang="pl">Start</span>
+                  </span>
+                  <span class="app-tab">
+                    <span class="bi bi-en" lang="en">History</span>
+                    <span class="bi bi-pl" lang="pl">Historia</span>
+                  </span>
+                  <span class="app-tab">
+                    <span class="bi bi-en" lang="en">Modes</span>
+                    <span class="bi bi-pl" lang="pl">Tryby</span>
+                  </span>
+                  <span class="app-tab">
+                    <span class="bi bi-en" lang="en">Vocabulary</span>
+                    <span class="bi bi-pl" lang="pl">Słownik</span>
+                  </span>
+                  <span class="app-tab app-tab--settings">
+                    <svg class="app-gear" viewBox="0 0 20 20">
+                      <path d="M8.6 2.7h2.8l.4 2 1.4.8 1.9-.7 1.4 2.4-1.5 1.4v1.6l1.5 1.4-1.4 2.4-1.9-.7-1.4.8-.4 2H8.6l-.4-2-1.4-.8-1.9.7-1.4-2.4L5 10.2V8.6L3.5 7.2l1.4-2.4 1.9.7 1.4-.8.4-2Z" />
+                      <circle cx="10" cy="9.4" r="2.2" />
+                    </svg>
+                    <span class="bi bi-en" lang="en">Settings</span>
+                    <span class="bi bi-pl" lang="pl">Ustawienia</span>
+                  </span>
+                </nav>
+
+                <div class="app-content">
+                  <div class="app-page">
+                    <header class="app-welcome">
+                      <h3 class="app-heading">
+                        <span class="bi bi-en" lang="en">
+                          <span class="app-state app-state--idle">Ready to dictate</span>
+                          <span class="app-state app-state--recording">Recording</span>
+                          <span class="app-state app-state--pasting">Pasting</span>
+                        </span>
+                        <span class="bi bi-pl" lang="pl">
+                          <span class="app-state app-state--idle">Gotowe do dyktowania</span>
+                          <span class="app-state app-state--recording">Nagrywam</span>
+                          <span class="app-state app-state--pasting">Wklejam</span>
+                        </span>
+                      </h3>
+
+                      <p class="app-hint">
+                        <span class="bi bi-en" lang="en">
+                          <span class="app-hint__idle">Press the shortcut in any app — the text lands wherever your cursor is.</span>
+                          <span class="app-hint__recording">Keep talking. Press the shortcut again to finish.</span>
+                          <span class="app-hint__pasting">The text is going to the active window.</span>
+                        </span>
+                        <span class="bi bi-pl" lang="pl">
+                          <span class="app-hint__idle">Naciśnij skrót w dowolnej aplikacji — tekst wklei się tam, gdzie stoi kursor.</span>
+                          <span class="app-hint__recording">Mów dalej. Naciśnij skrót ponownie, aby zakończyć.</span>
+                          <span class="app-hint__pasting">Tekst trafia do aktywnego okna.</span>
+                        </span>
+                      </p>
+
+                      <div class="app-action app-action--idle">
+                        <span class="app-start">
+                          <svg class="app-mic" viewBox="0 0 24 24">
+                            <rect x="9" y="3" width="6" height="11" rx="3" />
+                            <path d="M6 11a6 6 0 0 0 12 0M12 17v4M9 21h6" />
+                          </svg>
+                          <span class="app-start__label">
+                            <span class="bi bi-en" lang="en">Start recording</span>
+                            <span class="bi bi-pl" lang="pl">Zacznij nagrywać</span>
+                          </span>
+                          <span class="app-keys">
+                            <kbd>Ctrl</kbd><b>+</b><kbd>Space</kbd>
+                          </span>
+                        </span>
+                      </div>
+
+                      <div class="app-action app-action--recording">
+                        <span class="app-level">
+                          <canvas class="app-level__canvas" data-demo-wave="app"></canvas>
+                          <time data-demo-time>00:00</time>
+                        </span>
+                        <span class="app-cancel">
+                          <svg viewBox="0 0 16 16"><path d="m4 4 8 8M12 4l-8 8" /></svg>
+                          <span class="bi bi-en" lang="en">Cancel recording</span>
+                          <span class="bi bi-pl" lang="pl">Anuluj nagranie</span>
+                        </span>
+                        <span class="app-stop">
+                          <svg viewBox="0 0 16 16"><rect x="4" y="4" width="8" height="8" rx="1" /></svg>
+                          <span class="bi bi-en" lang="en">Stop</span>
+                          <span class="bi bi-pl" lang="pl">Zatrzymaj</span>
+                        </span>
+                      </div>
+
+                      <div class="app-action app-action--pasting">
+                        <span class="app-spinner"></span>
+                      </div>
+
+                      <span class="app-note">
+                        <span class="bi bi-en" lang="en">The shortcut works outside Loquara, too.</span>
+                        <span class="bi bi-pl" lang="pl">Skrót działa również poza Loquarą.</span>
+                      </span>
+                    </header>
+
+                    <section class="app-idle">
+                      <div class="app-section-head">
+                        <h4>
+                          <span class="bi bi-en" lang="en">Recent dictation</span>
+                          <span class="bi bi-pl" lang="pl">Ostatnie dyktowanie</span>
+                        </h4>
+                        <span class="app-view">
+                          <span class="bi bi-en" lang="en">View history</span>
+                          <span class="bi bi-pl" lang="pl">Zobacz historię</span>
+                          <svg viewBox="0 0 16 16"><path d="M3 8h10M9 4l4 4-4 4" /></svg>
+                        </span>
+                      </div>
+
+                      <article class="app-excerpt">
+                        <div class="app-meta">
+                          <time>09:41</time>
+                          <span class="app-date">
+                            <span class="bi bi-en" lang="en">12 Nov</span>
+                            <span class="bi bi-pl" lang="pl">12 lis</span>
+                          </span>
+                          <span>Slack</span>
+                          <span>00:06</span>
+                        </div>
+                        <p>
+                          <span class="bi bi-en" lang="en">Send the team the release notes before Friday.</span>
+                          <span class="bi bi-pl" lang="pl">Wyślij zespołowi notatki do wydania przed piątkiem.</span>
+                        </p>
+                        <span class="app-copy">
+                          <svg viewBox="0 0 20 20">
+                            <rect x="7" y="7" width="9" height="10" rx="2" />
+                            <path d="M13 7V5a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h1" />
+                          </svg>
+                        </span>
+                      </article>
+
+                      <article class="app-excerpt">
+                        <div class="app-meta">
+                          <time>09:18</time>
+                          <span class="app-date">
+                            <span class="bi bi-en" lang="en">12 Nov</span>
+                            <span class="bi bi-pl" lang="pl">12 lis</span>
+                          </span>
+                          <span>Mail</span>
+                          <span>00:08</span>
+                        </div>
+                        <p>
+                          <span class="bi bi-en" lang="en">Move the standup to ten and confirm the room.</span>
+                          <span class="bi bi-pl" lang="pl">Przenieś standup na dziesiątą i potwierdź salę.</span>
+                        </p>
+                        <span class="app-copy">
+                          <svg viewBox="0 0 20 20">
+                            <rect x="7" y="7" width="9" height="10" rx="2" />
+                            <path d="M13 7V5a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h1" />
+                          </svg>
+                        </span>
+                      </article>
+                    </section>
+
+                    <section class="app-active">
+                      <div class="app-section-head">
+                        <h4>
+                          <span class="bi bi-en" lang="en">Live draft</span>
+                          <span class="bi bi-pl" lang="pl">Wersja robocza</span>
+                        </h4>
+                        <span class="app-clipboard">
+                          <span class="app-clipboard__pending">
+                            <span class="bi bi-en" lang="en">Waiting for clipboard text</span>
+                            <span class="bi bi-pl" lang="pl">Schowek oczekuje na tekst</span>
+                          </span>
+                          <span class="app-clipboard__ready">
+                            <svg viewBox="0 0 16 16"><path d="m3.5 8.5 3 3 6-7" /></svg>
+                            <span class="bi bi-en" lang="en">In clipboard</span>
+                            <span class="bi bi-pl" lang="pl">W schowku</span>
+                          </span>
+                        </span>
+                      </div>
+                      <div class="app-transcript">
+                        <p data-demo-transcript></p>
+                      </div>
+                    </section>
+                  </div>
+                </div>
+
+                <div class="app-statusbar">
+                  <span class="app-engine">
+                    <i></i>
+                    <span>Parakeet TDT 0.6B v3</span>
+                  </span>
+                  <span class="app-mode">
+                    <span class="bi bi-en" lang="en">Clean</span>
+                    <span class="bi bi-pl" lang="pl">Czysty</span>
+                    <svg viewBox="0 0 16 16"><path d="M3 8h10M9 4l4 4-4 4" /></svg>
+                  </span>
+                </div>
+              </div>
+
+              <div class="app-overlay" aria-hidden="true">
+                <span class="app-overlay__pill">
+                  <svg class="app-mark app-mark--overlay" viewBox="0 0 32 32">
+                    <path d="M5 17.5C5 9.8 9.5 5 17 5H27V11H17C13.4 11 11 13.3 11 17.5V21H5Z" />
+                    <path opacity=".72" d="M27 14.5C27 22.2 22.5 27 15 27H5V21H15C18.6 21 21 18.7 21 14.5V11H27Z" />
+                  </svg>
+                  <canvas class="app-overlay__wave" data-demo-wave="overlay"></canvas>
+                </span>
+              </div>
+            </div>
+
+            <figcaption>
+              <span class="bi bi-en" lang="en">Animated interface preview. Sample transcript.</span>
+              <span class="bi bi-pl" lang="pl">Animowana symulacja interfejsu. Przykładowa transkrypcja.</span>
+            </figcaption>
+          </figure>
+        </div>
+      </section>
+        <nav class="shell downloads downloads--after" aria-label="Downloads">
           <div class="dl" data-os="windows">
             <span class="dl__os"><i class="dl__dot" aria-hidden="true"></i>Windows</span>
             <a
@@ -90,7 +368,10 @@
               download
             >
               <span class="dl__text">
-                <span class="dl__file">Installer</span>
+                <span class="dl__file">
+                  <span class="bi bi-en" lang="en">Installer</span>
+                  <span class="bi bi-pl" lang="pl">Instalator</span>
+                </span>
                 <span class="dl__meta">.exe, 17.6 MB</span>
               </span>
               <svg viewBox="0 0 16 16" aria-hidden="true">
@@ -101,7 +382,10 @@
               class="dl__secondary"
               href="https://github.com/NikodemNowak/loquara/releases/download/v0.10.0/Loquara_0.10.0_x64_en-US.msi"
               download
-            >MSI package</a>
+            >
+              <span class="bi bi-en" lang="en">MSI package</span>
+              <span class="bi bi-pl" lang="pl">Pakiet MSI</span>
+            </a>
           </div>
 
           <div class="dl" data-os="macos">
@@ -112,14 +396,20 @@
               download
             >
               <span class="dl__text">
-                <span class="dl__file">Disk image</span>
+                <span class="dl__file">
+                  <span class="bi bi-en" lang="en">Disk image</span>
+                  <span class="bi bi-pl" lang="pl">Obraz dysku</span>
+                </span>
                 <span class="dl__meta">.dmg, 44.0 MB</span>
               </span>
               <svg viewBox="0 0 16 16" aria-hidden="true">
                 <path d="M8 2v7.2m0 0 2.8-2.8M8 9.2 5.2 6.4M3 11.5v1.5h10v-1.5" />
               </svg>
             </a>
-            <span class="dl__note">Apple silicon and Intel</span>
+            <span class="dl__note">
+              <span class="bi bi-en" lang="en">Apple silicon and Intel</span>
+              <span class="bi bi-pl" lang="pl">Apple silicon i Intel</span>
+            </span>
           </div>
 
           <div class="dl" data-os="linux">
@@ -130,7 +420,10 @@
               download
             >
               <span class="dl__text">
-                <span class="dl__file">Debian package</span>
+                <span class="dl__file">
+                  <span class="bi bi-en" lang="en">Debian package</span>
+                  <span class="bi bi-pl" lang="pl">Pakiet Debiana</span>
+                </span>
                 <span class="dl__meta">.deb, 22.1 MB</span>
               </span>
               <svg viewBox="0 0 16 16" aria-hidden="true">
@@ -144,81 +437,7 @@
             >AppImage</a>
           </div>
         </nav>
-      </section>
 
-      <section class="product" id="product">
-        <div class="shell">
-          <div class="product__head">
-            <h2>It lives<span class="product__break"></span> where you write.</h2>
-            <p>
-              Press a shortcut, speak, and the words land at the caret. The
-              recorder gets out of the way.
-            </p>
-          </div>
-
-          <div class="product__stage">
-            <div class="app" aria-hidden="true">
-              <div class="app__body">
-                <aside class="app__sidebar">
-                  <div class="app__brand">
-                    <svg class="mark" viewBox="0 0 32 32">
-                      <path d="M5 17.5C5 9.8 9.5 5 17 5H27V11H17C13.4 11 11 13.3 11 17.5V21H5Z" />
-                      <path opacity=".72" d="M27 14.5C27 22.2 22.5 27 15 27H5V21H15C18.6 21 21 18.7 21 14.5V11H27Z" />
-                    </svg>
-                    <span>Loquara</span>
-                  </div>
-
-                  <div class="app__nav">
-                    <span class="app__nav-item is-active">Dictate</span>
-                    <span class="app__nav-item">History</span>
-                    <span class="app__nav-item">Vocabulary</span>
-                    <span class="app__nav-item">Modes</span>
-                  </div>
-
-                  <div class="app__side-foot">
-                    <span>Settings</span>
-                    <span>v0.10</span>
-                  </div>
-                </aside>
-
-                <div class="app__main">
-                  <div class="app__head">
-                    <h3>Dictate</h3>
-                    <span class="app__ready"><i></i>Ready</span>
-                  </div>
-
-                  <div class="app__transcript">
-                    <p>
-                      Let’s ship it on Friday. I’ll take the macOS build, you
-                      take Linux.<span class="app__caret"></span>
-                    </p>
-                  </div>
-
-                  <div class="app__bottom">
-                    <div class="app__wave" data-wave="48"></div>
-                    <div class="app__meta">
-                      <span>Parakeet TDT</span>
-                      <span>On device</span>
-                      <span>25 languages</span>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <div class="app-pill" aria-hidden="true">
-              <span class="app-pill__dot"></span>
-              <span class="app-pill__wave" data-wave="9"></span>
-              <span class="app-pill__time">0:04</span>
-            </div>
-
-            <p class="sr-only">
-              Loquara’s main window, showing a live transcript and the floating
-              recorder.
-            </p>
-          </div>
-        </div>
-      </section>
     </main>
 
     <footer class="footer">
@@ -229,13 +448,22 @@
             <path opacity=".72" d="M27 14.5C27 22.2 22.5 27 15 27H5V21H15C18.6 21 21 18.7 21 14.5V11H27Z" />
           </svg>
           <span>Loquara</span>
-          <small>On-device dictation.</small>
+          <small>
+            <span class="bi bi-en" lang="en">On-device dictation.</span>
+            <span class="bi bi-pl" lang="pl">Dyktowanie lokalne.</span>
+          </small>
         </div>
 
         <nav class="footer__links" aria-label="Footer">
           <a href="https://github.com/NikodemNowak/loquara" target="_blank" rel="noreferrer">GitHub</a>
-          <a href="https://github.com/NikodemNowak/loquara/releases" target="_blank" rel="noreferrer">Releases</a>
-          <a href="mailto:hello@nikodemnowak.pl">Email</a>
+          <a href="https://github.com/NikodemNowak/loquara/releases" target="_blank" rel="noreferrer">
+            <span class="bi bi-en" lang="en">Releases</span>
+            <span class="bi bi-pl" lang="pl">Wydania</span>
+          </a>
+          <a href="mailto:hello@nikodemnowak.pl">
+            <span class="bi bi-en" lang="en">Email</span>
+            <span class="bi bi-pl" lang="pl">E-mail</span>
+          </a>
         </nav>
 
         <p class="footer__legal">MIT, 2026 Nikodem Nowak. <span>v0.10.0</span></p>
