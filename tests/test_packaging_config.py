@@ -107,6 +107,9 @@ class PackagingConfigTests(unittest.TestCase):
             encoding="utf-8"
         )
 
+        self.assertIn(
+            "sign-macos-dylibs", macos["build"]["beforeBundleCommand"]
+        )
         files = macos["bundle"]["macOS"]["files"]
         self.assertTrue(files)
         self.assertTrue(all(target.startswith("Frameworks/") for target in files))
