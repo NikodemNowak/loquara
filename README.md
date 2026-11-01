@@ -1,137 +1,203 @@
 # Loquara
 
-Loquara is a fast, private speech-to-text dictation application for **Windows, macOS and Linux**. Press a global shortcut anywhere, speak, and have your speech transcribed locally on your GPU or CPU using the **NVIDIA Parakeet TDT 0.6B v3** model — and pasted directly into your active window, code editor, browser, or terminal.
+**Private, on-device dictation for Windows, macOS and Linux.**
 
-**Offline by default:** audio and transcripts never leave your computer unless you switch to a cloud engine. No Python, PyTorch, or cloud accounts required.
+Press a shortcut anywhere, speak naturally, and the words land at your caret.
 
-**Optional cloud engines:** bring your own API key and dictate through **xAI Grok Voice Transcribe**, OpenAI, Groq, Mistral, ElevenLabs, Deepgram, or any OpenAI-compatible endpoint. Keys are encrypted with Windows DPAPI on Windows; on macOS and Linux they live in the app's SQLite file, protected by your user account's file permissions. The connection can be verified from Settings before you dictate.
+[Website](https://loquara.nikodemnowak.pl) · [Releases](https://github.com/NikodemNowak/loquara/releases) · [Issues](https://github.com/NikodemNowak/loquara/issues) · [License](LICENSE)
 
----
+[![CI](https://github.com/NikodemNowak/loquara/actions/workflows/build.yml/badge.svg)](https://github.com/NikodemNowak/loquara/actions/workflows/build.yml)
+[![Release](https://img.shields.io/github/v/release/NikodemNowak/loquara?style=flat-square&label=release)](https://github.com/NikodemNowak/loquara/releases)
+[![License: MIT](https://img.shields.io/badge/license-MIT-black?style=flat-square)](LICENSE)
+[![Platforms](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-black?style=flat-square)](#system-requirements)
 
-## ✨ Features
+![Loquara interface](docs/screenshots/loquara-interface.png)
 
-- **Global shortcut:** `Ctrl+Space` starts and stops dictation anywhere (`Ctrl+Shift+Space` on macOS, where `Ctrl+Space` switches input sources). Configurable in Settings.
-- **Optional push-to-talk:** choose **Hold to talk** in Settings → Dictation to record while holding the shortcut and transcribe when you release it. Toggle mode remains the default.
-- **Minimal floating overlay:** a compact pill with a noise-adaptive meter during recording. Sound cues signal start, stop, and transcript readiness.
-- **Universal paste:**
-  - Standard apps: `Ctrl + V` (`Command + V` on macOS)
-  - Windows terminals / SSH: automatic `Ctrl + Shift + V` for Termius, Windows Terminal, WSL, Git Bash, Alacritty, WezTerm, Ghostty, PuTTY, etc.
-  - Linux terminals: automatic `Ctrl + Shift + V` when `xdotool` can identify the focused window.
-  - Custom paste mode selection available in Settings.
-- **Any hardware:** DirectML hardware acceleration on Windows covers NVIDIA, AMD, Intel, and CPU fallback with no driver toolkits to install. macOS and Linux use the publisher's prebuilt CPU engine.
-- **Built-in model manager:** downloads the 670 MB Parakeet model in-app with 4 concurrent streams and live progress.
-- **Live preview:** local Parakeet and xAI can build a draft in the app and clipboard while you speak. The destination stays untouched until you stop; then the complete result is pasted once.
-- **Custom vocabulary & modes:** teach Loquara specialized jargon, brand names, and phonetic replacements. Transform output with custom mode rules.
-- **Audio history & retention:** review past recordings and transcripts. Set automatic audio cleanup (1 day, 7 days, 30 days, or forever).
-- **System tray integration:** start dictation, paste the last transcription, or launch minimized to the tray at login.
-- **Bilingual interface:** Polish and English UI matching the system language, with a manual override.
+*Loquara 0.10.0: one shortcut, a live draft, and a floating recorder. Interface preview; the transcript is sample content.*
 
----
+## Overview
 
-## 🚀 Getting Started
+Loquara is a native desktop dictation app built for people who write all day. It records from the system microphone, transcribes locally with **NVIDIA Parakeet TDT 0.6B v3**, and pastes the result into the focused application.
+
+The default path is entirely local: no account, no cloud API, and no audio leaving the machine. The speech model is downloaded once inside the app, and the same shortcut works in editors, browsers, terminals, chat apps, and anything else that accepts text.
+
+Cloud transcription is optional. If you bring an API key, Loquara can use xAI Grok Voice Transcribe, OpenAI, Groq, Mistral, ElevenLabs, Deepgram, or an OpenAI-compatible endpoint.
+
+## Download
+
+The current release is **v0.10.0** (1 November 2026). See [all releases](https://github.com/NikodemNowak/loquara/releases) for older versions and release notes.
+
+| Platform | File | Size | Notes |
+| --- | --- | ---: | --- |
+| Windows 10/11, x64 | [Installer `.exe`](https://github.com/NikodemNowak/loquara/releases/download/v0.10.0/Loquara_0.10.0_x64-setup.exe) | 17.6 MB | Per-user install; no administrator rights |
+| Windows 10/11, x64 | [MSI package](https://github.com/NikodemNowak/loquara/releases/download/v0.10.0/Loquara_0.10.0_x64_en-US.msi) | 22.3 MB | Alternative MSI installer |
+| macOS 11+, Universal | [Disk image `.dmg`](https://github.com/NikodemNowak/loquara/releases/download/v0.10.0/Loquara_0.10.0_universal.dmg) | 44.0 MB | Apple silicon and Intel |
+| Linux, X11/XWayland | [Debian package `.deb`](https://github.com/NikodemNowak/loquara/releases/download/v0.10.0/Loquara_0.10.0_amd64.deb) | 22.1 MB | Debian/Ubuntu |
+| Linux, X11/XWayland | [AppImage](https://github.com/NikodemNowak/loquara/releases/download/v0.10.0/Loquara_0.10.0_amd64.AppImage) | 93.0 MB | Portable alternative |
+
+The 670 MB Parakeet model is downloaded by the app on first launch.
+
+## Install
 
 ### Windows
-1. Download `Loquara_x.x.x_x64-setup.exe` or the `.msi` from [Releases](https://github.com/NikodemNowak/loquara/releases).
-2. Run the installer (per-user, no administrator rights needed) and launch Loquara.
-3. On first start, click **Download** to fetch the offline speech engine model.
-4. Press `Ctrl+Space` anywhere to start dictating.
+
+1. Download and run `Loquara_0.10.0_x64-setup.exe` (or the MSI).
+2. Launch Loquara and download the local speech model when prompted.
+3. Press `Ctrl+Space` anywhere to start or stop dictation.
+
+The installer is per-user and does not require administrator rights.
 
 ### macOS
-1. Download the `.dmg` from [Releases](https://github.com/NikodemNowak/loquara/releases) and drag Loquara to **Applications**.
-2. The build is ad-hoc signed, not notarized by Apple. On first launch, **right-click → Open**, or run:
+
+1. Download `Loquara_0.10.0_universal.dmg`, open it, and drag Loquara to **Applications**.
+2. The build is ad-hoc signed, not notarized by Apple. On first launch, **right-click → Open**, or clear the quarantine flag:
+
    ```bash
    xattr -dr com.apple.quarantine /Applications/Loquara.app
    ```
+
 3. Allow **Microphone** access when prompted.
-4. Open **System Settings → Privacy & Security → Accessibility** and enable Loquara. It needs this to paste the transcript into the focused app. If the keystroke is refused, the transcript is still in the clipboard.
-5. Press `Ctrl+Shift+Space` (or the shortcut you choose) to dictate.
+4. Enable Loquara in **System Settings → Privacy & Security → Accessibility** so it can paste into the focused app. If the keystroke is refused, the transcript remains in the clipboard.
+5. Press `Ctrl+Shift+Space` (macOS reserves `Ctrl+Space` for input switching) or your configured shortcut.
 
 ### Linux
-1. Install the `.deb`, or make the `.AppImage` executable and run it:
+
+1. Install the `.deb`, or make the AppImage executable:
+
    ```bash
-   chmod +x Loquara_x.x.x_amd64.AppImage
-   ./Loquara_x.x.x_amd64.AppImage
+   chmod +x Loquara_0.10.0_amd64.AppImage
+   ./Loquara_0.10.0_amd64.AppImage
    ```
-2. Install `xdotool` for automatic paste into other windows:
+
+2. Install `xdotool` for automatic paste:
+
    ```bash
    sudo apt install xdotool        # Debian / Ubuntu
    sudo dnf install xdotool        # Fedora
    sudo pacman -S xdotool          # Arch
    ```
+
 3. Global shortcuts and automatic paste use **X11**. On Wayland, run Loquara through **XWayland**; a pure Wayland session does not expose global shortcut registration or `xdotool` window access.
-4. The first start offers the same one-click model download.
+4. Download the local model on first launch and press the shortcut to dictate.
 
----
+## Features
 
-## 🛠️ Architecture & Tech Stack
+- **System-wide shortcut.** `Ctrl+Space` on Windows and Linux; `Ctrl+Shift+Space` on macOS. Fully configurable, with toggle or push-to-talk mode.
+- **Local by default.** NVIDIA Parakeet TDT 0.6B v3 runs through sherpa-onnx. Windows uses DirectML acceleration for NVIDIA, AMD, and Intel GPUs with CPU fallback; macOS and Linux use the publisher's prebuilt CPU engine.
+- **Live draft.** Local Parakeet and xAI can build a transcript in the app and clipboard while you speak. The destination stays untouched until you stop, then the complete result is pasted once.
+- **Terminal-aware paste.** Uses `Ctrl+V` in standard apps and `Ctrl+Shift+V` in Windows Terminal, WSL, Git Bash, Termius, Alacritty, WezTerm, Ghostty, PuTTY, and Linux terminals when the focused window can be identified.
+- **Floating recorder.** A compact, noise-adaptive overlay with clear start, stop, and transcript-ready states.
+- **25 languages.** The interface itself is available in Polish and English and follows the system language, with a manual override.
+- **Vocabulary and modes.** Teach Loquara names, jargon, and phonetic replacements; transform output with custom rules.
+- **History and retention.** Review past recordings and transcripts, and delete audio automatically after 1, 7, or 30 days.
+- **Tray integration.** Start dictation, paste the last transcript, or launch minimized to the tray.
+- **Optional cloud engines.** xAI, OpenAI, Groq, Mistral, ElevenLabs, Deepgram, and OpenAI-compatible endpoints. Keys are encrypted with Windows DPAPI on Windows; on macOS and Linux they live in the app's SQLite database protected by your user account's file permissions.
 
-Loquara is a lightweight native desktop application:
+## Privacy
+
+Loquara's default configuration does not send audio or transcripts anywhere. The local engine, history, vocabulary, and settings stay on the machine.
+
+Local data lives in:
+
+- **Windows:** `%APPDATA%\io.loquara.desktop\`
+- **macOS:** `~/Library/Application Support/io.loquara.desktop/`
+- **Linux:** `~/.local/share/io.loquara.desktop/`
+
+Models are stored in the `models/` subdirectory. Cloud transcription is opt-in and requires your own API key; no key is sent anywhere except the selected provider.
+
+## System requirements
+
+| | Minimum |
+| --- | --- |
+| Windows | Windows 10 or 11, x64; DirectML-capable GPU or CPU |
+| macOS | macOS 11 or newer; Apple silicon or Intel (universal build) |
+| Linux | X11 or XWayland; Debian/Ubuntu package or AppImage; `xdotool` for automatic paste |
+| Memory | 2 GB RAM |
+| Disk | 700 MB for the local model |
+| Network | Required once to download the model; optional for cloud engines |
+
+## Architecture
+
+Loquara is a Tauri 2 desktop application:
 
 - **Frontend:** React 19, TypeScript, Vite, Fluent UI icons, Radix UI.
-- **Backend / Platform:** Tauri 2 (Rust), `cpal` (audio capture), `rusqlite` (SQLite storage). Windows adds Win32 window management and `SendInput`; macOS uses System Events for paste; Linux uses `xdotool` on X11.
-- **Speech Engine:** native `sherpa-onnx` ONNX Runtime bindings. Windows builds sherpa-onnx with **DirectML**; macOS and Linux use the upstream prebuilt CPU libraries, bundled with the app. The model is `nvidia/parakeet-tdt-0.6b-v3`.
-- **Cloud:** optional HTTPS/WebSocket transcription; no key is sent anywhere else.
+- **Desktop shell:** Rust, `cpal` for audio capture, `rusqlite` for local storage. Windows uses Win32 window management and `SendInput`; macOS uses System Events for paste; Linux uses `xdotool` on X11.
+- **Speech engine:** native `sherpa-onnx` ONNX Runtime bindings. Windows builds with DirectML; macOS and Linux bundle the upstream prebuilt CPU libraries.
+- **Cloud:** optional HTTPS/WebSocket transcription; audio is sent only when a cloud engine is explicitly selected.
 
----
-
-## 💻 Development & Building
+## Development
 
 ### Prerequisites
-- [Node.js 22+](https://nodejs.org/) and [pnpm](https://pnpm.io/)
-- [Rust](https://rustup.rs/) (edition 2024 / stable toolchain)
-- **Windows:** Visual Studio C++ build tools and CMake (sherpa-onnx is compiled with DirectML)
-- **macOS:** Xcode command line tools
-- **Linux:** `libwebkit2gtk-4.1-dev`, `libappindicator3-dev`, `libayatana-appindicator3-dev`, `librsvg2-dev`, `patchelf`, `libasound2-dev`, `libxdo-dev`, `libx11-dev`, `libdbus-1-dev`, `libssl-dev`, and `cmake`
 
-### Running locally
+- **Node.js 22+** and **pnpm**
+- **Rust** stable with edition 2024
+- **Windows:** Visual Studio C++ build tools and CMake
+- **macOS:** Xcode command line tools
+- **Linux:** `libwebkit2gtk-4.1-dev`, `libayatana-appindicator3-dev`, `librsvg2-dev`, `patchelf`, `libasound2-dev`, `libxdo-dev`, `libx11-dev`, `libdbus-1-dev`, `libssl-dev`, and `cmake`
+
+### Run the app
+
 ```bash
 pnpm install
 pnpm tauri dev
 ```
 
-### Running tests
+### Test
+
 ```bash
 # Frontend
 pnpm test
 
-# Rust unit & platform tests
+# Rust unit and platform tests
 cargo test --manifest-path src-tauri/Cargo.toml --lib
 ```
 
-Build the speech engine first when running Rust tests on a clean checkout; the app's build script stages its shared libraries, and Cargo does not order that after `sherpa-rs-sys`:
+On a clean checkout, build the speech engine before the Rust tests so its shared libraries are staged:
 
 ```bash
 cargo build --manifest-path src-tauri/Cargo.toml -p sherpa-rs-sys
 cargo test --manifest-path src-tauri/Cargo.toml --lib
 ```
 
-### Building installers
+### Build installers
+
 ```bash
 pnpm tauri build
 ```
 
-The bundles land in `src-tauri/target/release/bundle/` (or `src-tauri/target/universal-apple-darwin/release/bundle/` for a universal macOS build). The GitHub **release** workflow builds Windows, macOS (Apple silicon + Intel) and Linux on matching runners and uploads the artifacts.
+Bundles land in `src-tauri/target/release/bundle/`. The GitHub **release** workflow builds Windows, macOS (universal), and Linux on matching runners and uploads the artifacts.
 
-### Landing page
-The marketing site lives in `site/`. It is **not deployed by this repository**.
+## Release
+
+The release workflow builds and tests the app on Windows, macOS, and Linux, then publishes a draft GitHub release. Publishing a tag such as `v0.10.0` produces the five assets listed under [Download](#download).
+
+Before publishing:
 
 ```bash
-pnpm site:dev      # http://localhost:1421
-pnpm site:build    # static output in site/dist
+pnpm test
+cargo test --manifest-path src-tauri/Cargo.toml --lib
+pnpm build
 ```
 
----
+The current CI and release workflows live in [`.github/workflows`](.github/workflows).
 
-## 📁 Local Data Paths
+## Website
 
-- **Windows:** `%APPDATA%\io.loquara.desktop\`
-- **macOS:** `~/Library/Application Support/io.loquara.desktop/`
-- **Linux:** `~/.local/share/io.loquara.desktop/`
+The landing page is a static site in [`site/`](site/), with:
 
-Engine models live in the `models/` subdirectory of that location.
+- Polish and English copy selected from the browser language
+- Light and dark themes selected from the system
+- A live interface preview matching the current app shell
+- Direct downloads for every platform and installer format
 
----
+```bash
+pnpm site:dev       # http://localhost:1421
+pnpm site:build     # static output in site/dist
+pnpm site:preview   # production build at http://127.0.0.1:4173
+```
 
-## 📄 License
+The production URL is [loquara.nikodemnowak.pl](https://loquara.nikodemnowak.pl). Deployment and pre-release checks are documented in [`site/README.md`](site/README.md). The app CI does not publish the site.
+
+## License
 
 MIT — see [LICENSE](LICENSE).

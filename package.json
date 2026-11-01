@@ -9,7 +9,8 @@
     "test": "vitest run",
     "tauri": "tauri",
     "site:dev": "vite --config site/vite.config.ts",
-    "site:build": "vite build --config site/vite.config.ts"
+    "site:build": "vite build --config site/vite.config.ts",
+    "site:preview": "vite preview --config site/vite.config.ts --host 127.0.0.1 --port 4173"
   },
   "dependencies": {
     "@fluentui/react-icons": "^2.0.334",

@@ -16,7 +16,27 @@
       content="Private dictation for Windows, macOS and Linux. On your machine, at your caret."
     />
     <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://loquara.nikodemnowak.pl/" />
+    <meta property="og:site_name" content="Loquara" />
+    <meta property="og:image" content="https://loquara.nikodemnowak.pl/og.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="Loquara — private dictation for Windows, macOS and Linux" />
+    <meta property="og:locale" content="en_US" />
+    <meta property="og:locale:alternate" content="pl_PL" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Loquara — private dictation" />
+    <meta
+      name="twitter:description"
+      content="Private dictation for Windows, macOS and Linux. On your machine, at your caret."
+    />
+    <meta name="twitter:image" content="https://loquara.nikodemnowak.pl/og.png" />
+    <meta name="application-name" content="Loquara" />
+    <meta name="apple-mobile-web-app-title" content="Loquara" />
+    <meta name="robots" content="index, follow" />
+    <link rel="canonical" href="https://loquara.nikodemnowak.pl/" />
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
     <link
       rel="preload"
       href="/fonts/SchibstedGrotesk-Variable.woff2"
@@ -24,6 +44,31 @@
       type="font/woff2"
       crossorigin
     />
+    <link
+      rel="preload"
+      href="/fonts/InterVariable.woff2"
+      as="font"
+      type="font/woff2"
+      crossorigin
+    />
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "SoftwareApplication",
+        "name": "Loquara",
+        "applicationCategory": "ProductivityApplication",
+        "operatingSystem": "Windows, macOS, Linux",
+        "softwareVersion": "0.10.0",
+        "description": "Private, on-device dictation for Windows, macOS and Linux. Press a shortcut, speak, and the words land at the caret.",
+        "url": "https://loquara.nikodemnowak.pl/",
+        "downloadUrl": "https://github.com/NikodemNowak/loquara/releases/tag/v0.10.0",
+        "image": "https://loquara.nikodemnowak.pl/og.png",
+        "license": "https://opensource.org/license/mit",
+        "author": { "@type": "Person", "name": "Nikodem Nowak" },
+        "sameAs": ["https://github.com/NikodemNowak/loquara"],
+        "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" }
+      }
+    </script>
     <script>
       (function () {
         var query = new URLSearchParams(location.search).get("lang");
@@ -75,13 +120,25 @@
           <span>Loquara</span>
         </a>
 
+        <nav class="topbar__nav" aria-label="Primary navigation">
+          <a href="#app">
+            <span class="bi bi-en" lang="en">Product</span>
+            <span class="bi bi-pl" lang="pl">Aplikacja</span>
+          </a>
+          <a href="#download">
+            <span class="bi bi-en" lang="en">Download</span>
+            <span class="bi bi-pl" lang="pl">Pobierz</span>
+          </a>
+          <a href="https://github.com/NikodemNowak/loquara" target="_blank" rel="noreferrer">GitHub</a>
+        </nav>
+
         <div class="topbar__actions">
           <a
-            class="topbar__github"
-            href="https://github.com/NikodemNowak/loquara"
+            class="topbar__version"
+            href="https://github.com/NikodemNowak/loquara/releases/tag/v0.10.0"
             target="_blank"
             rel="noreferrer"
-          >GitHub</a>
+          >v0.10.0</a>
 
           <a
             class="button button--primary"
@@ -109,6 +166,33 @@
           <p class="hero__sub">
             <span class="bi bi-en" lang="en">Private dictation for Windows, macOS and Linux. On your machine, at your caret.</span>
             <span class="bi bi-pl" lang="pl">Prywatne dyktowanie na Windows, macOS i Linux. Na Twoim komputerze, przy kursorze.</span>
+          </p>
+
+          <div class="hero__actions">
+            <a
+              class="button button--primary button--hero"
+              data-download-primary
+              href="https://github.com/NikodemNowak/loquara/releases/download/v0.10.0/Loquara_0.10.0_x64-setup.exe"
+              download
+            >
+              <svg viewBox="0 0 16 16" aria-hidden="true">
+                <path d="M8 2v7.2m0 0 2.8-2.8M8 9.2 5.2 6.4M3 11.5v1.5h10v-1.5" />
+              </svg>
+              <span class="bi bi-en" data-cta-en>Download for Windows</span>
+              <span class="bi bi-pl" data-cta-pl>Pobierz dla Windows</span>
+            </a>
+            <a class="hero__all" href="#download">
+              <span class="bi bi-en" lang="en">All downloads</span>
+              <span class="bi bi-pl" lang="pl">Wszystkie pliki</span>
+              <svg viewBox="0 0 16 16" aria-hidden="true">
+                <path d="M3 8h10M9 4l4 4-4 4" />
+              </svg>
+            </a>
+          </div>
+
+          <p class="hero__meta">
+            <span class="bi bi-en" lang="en">Free and open source under MIT. 25 languages. No account.</span>
+            <span class="bi bi-pl" lang="pl">Darmowe i open source na MIT. 25 języków. Bez konta.</span>
           </p>
         </div>
 
@@ -352,91 +436,160 @@
               </div>
             </div>
 
-            <figcaption>
-              <span class="bi bi-en" lang="en">Animated interface preview. Sample transcript.</span>
-              <span class="bi bi-pl" lang="pl">Animowana symulacja interfejsu. Przykładowa transkrypcja.</span>
+            <figcaption class="preview-caption">
+              <span class="preview-caption__label">
+                <i aria-hidden="true"></i>
+                <span class="bi bi-en" lang="en">Interface preview</span>
+                <span class="bi bi-pl" lang="pl">Podgląd interfejsu</span>
+              </span>
+              <span class="preview-caption__version">v0.10.0</span>
+              <span class="bi bi-en" lang="en">Sample transcript</span>
+              <span class="bi bi-pl" lang="pl">Przykładowa transkrypcja</span>
             </figcaption>
           </figure>
         </div>
       </section>
-        <nav class="shell downloads downloads--after" aria-label="Downloads">
-          <div class="dl" data-os="windows">
-            <span class="dl__os"><i class="dl__dot" aria-hidden="true"></i>Windows</span>
+      <section class="download-section" id="download">
+        <div class="shell">
+          <div class="download-head">
+            <div class="download-head__text">
+              <h2>
+                <span class="bi bi-en" lang="en">Download Loquara</span>
+                <span class="bi bi-pl" lang="pl">Pobierz Loquarę</span>
+              </h2>
+              <p>
+                <span class="bi bi-en" lang="en">Version 0.10.0, released 1 November 2026. Free and open source under MIT.</span>
+                <span class="bi bi-pl" lang="pl">Wersja 0.10.0, wydana 1 listopada 2026. Darmowa i open source na licencji MIT.</span>
+              </p>
+            </div>
             <a
-              class="dl__primary"
-              href="https://github.com/NikodemNowak/loquara/releases/download/v0.10.0/Loquara_0.10.0_x64-setup.exe"
-              download
+              class="download-head__all"
+              href="https://github.com/NikodemNowak/loquara/releases"
+              target="_blank"
+              rel="noreferrer"
             >
-              <span class="dl__text">
-                <span class="dl__file">
-                  <span class="bi bi-en" lang="en">Installer</span>
-                  <span class="bi bi-pl" lang="pl">Instalator</span>
-                </span>
-                <span class="dl__meta">.exe, 17.6 MB</span>
-              </span>
+              <span class="bi bi-en" lang="en">All releases</span>
+              <span class="bi bi-pl" lang="pl">Wszystkie wydania</span>
               <svg viewBox="0 0 16 16" aria-hidden="true">
-                <path d="M8 2v7.2m0 0 2.8-2.8M8 9.2 5.2 6.4M3 11.5v1.5h10v-1.5" />
+                <path d="M3 8h10M9 4l4 4-4 4" />
               </svg>
-            </a>
-            <a
-              class="dl__secondary"
-              href="https://github.com/NikodemNowak/loquara/releases/download/v0.10.0/Loquara_0.10.0_x64_en-US.msi"
-              download
-            >
-              <span class="bi bi-en" lang="en">MSI package</span>
-              <span class="bi bi-pl" lang="pl">Pakiet MSI</span>
             </a>
           </div>
 
-          <div class="dl" data-os="macos">
-            <span class="dl__os"><i class="dl__dot" aria-hidden="true"></i>macOS</span>
-            <a
-              class="dl__primary"
-              href="https://github.com/NikodemNowak/loquara/releases/download/v0.10.0/Loquara_0.10.0_universal.dmg"
-              download
-            >
-              <span class="dl__text">
-                <span class="dl__file">
-                  <span class="bi bi-en" lang="en">Disk image</span>
-                  <span class="bi bi-pl" lang="pl">Obraz dysku</span>
+          <div class="platforms">
+            <div class="platform" data-os="windows">
+              <div class="platform__head">
+                <h3>Windows</h3>
+                <span class="platform__current">
+                  <span class="bi bi-en" lang="en">This device</span>
+                  <span class="bi bi-pl" lang="pl">To urządzenie</span>
                 </span>
-                <span class="dl__meta">.dmg, 44.0 MB</span>
-              </span>
-              <svg viewBox="0 0 16 16" aria-hidden="true">
-                <path d="M8 2v7.2m0 0 2.8-2.8M8 9.2 5.2 6.4M3 11.5v1.5h10v-1.5" />
-              </svg>
-            </a>
-            <span class="dl__note">
-              <span class="bi bi-en" lang="en">Apple silicon and Intel</span>
-              <span class="bi bi-pl" lang="pl">Apple silicon i Intel</span>
-            </span>
+              </div>
+              <p class="platform__req">Windows 10/11, x64</p>
+              <a
+                class="platform__primary"
+                href="https://github.com/NikodemNowak/loquara/releases/download/v0.10.0/Loquara_0.10.0_x64-setup.exe"
+                download
+              >
+                <span class="platform__text">
+                  <span class="platform__file">
+                    <span class="bi bi-en" lang="en">Installer</span>
+                    <span class="bi bi-pl" lang="pl">Instalator</span>
+                  </span>
+                  <span class="platform__meta">.exe, 17.6 MB</span>
+                </span>
+                <svg viewBox="0 0 16 16" aria-hidden="true">
+                  <path d="M8 2v7.2m0 0 2.8-2.8M8 9.2 5.2 6.4M3 11.5v1.5h10v-1.5" />
+                </svg>
+              </a>
+              <a
+                class="platform__secondary"
+                href="https://github.com/NikodemNowak/loquara/releases/download/v0.10.0/Loquara_0.10.0_x64_en-US.msi"
+                download
+              >
+                <span class="bi bi-en" lang="en">MSI package</span>
+                <span class="bi bi-pl" lang="pl">Pakiet MSI</span>
+              </a>
+              <p class="platform__note">
+                <span class="bi bi-en" lang="en">No administrator rights.</span>
+                <span class="bi bi-pl" lang="pl">Bez uprawnień administratora.</span>
+              </p>
+            </div>
+
+            <div class="platform" data-os="macos">
+              <div class="platform__head">
+                <h3>macOS</h3>
+                <span class="platform__current">
+                  <span class="bi bi-en" lang="en">This device</span>
+                  <span class="bi bi-pl" lang="pl">To urządzenie</span>
+                </span>
+              </div>
+              <p class="platform__req">macOS 11+, Universal</p>
+              <a
+                class="platform__primary"
+                href="https://github.com/NikodemNowak/loquara/releases/download/v0.10.0/Loquara_0.10.0_universal.dmg"
+                download
+              >
+                <span class="platform__text">
+                  <span class="platform__file">
+                    <span class="bi bi-en" lang="en">Disk image</span>
+                    <span class="bi bi-pl" lang="pl">Obraz dysku</span>
+                  </span>
+                  <span class="platform__meta">.dmg, 44.0 MB</span>
+                </span>
+                <svg viewBox="0 0 16 16" aria-hidden="true">
+                  <path d="M8 2v7.2m0 0 2.8-2.8M8 9.2 5.2 6.4M3 11.5v1.5h10v-1.5" />
+                </svg>
+              </a>
+              <p class="platform__note">
+                <span class="bi bi-en" lang="en">Ad-hoc signed. On first launch, right-click → Open. Grant Accessibility for auto-paste.</span>
+                <span class="bi bi-pl" lang="pl">Podpis ad-hoc. Przy pierwszym uruchomieniu kliknij prawym przyciskiem → Otwórz. Zezwól na ułatwienia dostępu do auto-wklejania.</span>
+              </p>
+            </div>
+
+            <div class="platform" data-os="linux">
+              <div class="platform__head">
+                <h3>Linux</h3>
+                <span class="platform__current">
+                  <span class="bi bi-en" lang="en">This device</span>
+                  <span class="bi bi-pl" lang="pl">To urządzenie</span>
+                </span>
+              </div>
+              <p class="platform__req">X11 or XWayland</p>
+              <a
+                class="platform__primary"
+                href="https://github.com/NikodemNowak/loquara/releases/download/v0.10.0/Loquara_0.10.0_amd64.deb"
+                download
+              >
+                <span class="platform__text">
+                  <span class="platform__file">
+                    <span class="bi bi-en" lang="en">Debian package</span>
+                    <span class="bi bi-pl" lang="pl">Pakiet Debiana</span>
+                  </span>
+                  <span class="platform__meta">.deb, 22.1 MB</span>
+                </span>
+                <svg viewBox="0 0 16 16" aria-hidden="true">
+                  <path d="M8 2v7.2m0 0 2.8-2.8M8 9.2 5.2 6.4M3 11.5v1.5h10v-1.5" />
+                </svg>
+              </a>
+              <a
+                class="platform__secondary"
+                href="https://github.com/NikodemNowak/loquara/releases/download/v0.10.0/Loquara_0.10.0_amd64.AppImage"
+                download
+              >AppImage</a>
+              <p class="platform__note">
+                <span class="bi bi-en" lang="en">xdotool is required for automatic paste.</span>
+                <span class="bi bi-pl" lang="pl">Do automatycznego wklejania wymagany jest xdotool.</span>
+              </p>
+            </div>
           </div>
 
-          <div class="dl" data-os="linux">
-            <span class="dl__os"><i class="dl__dot" aria-hidden="true"></i>Linux</span>
-            <a
-              class="dl__primary"
-              href="https://github.com/NikodemNowak/loquara/releases/download/v0.10.0/Loquara_0.10.0_amd64.deb"
-              download
-            >
-              <span class="dl__text">
-                <span class="dl__file">
-                  <span class="bi bi-en" lang="en">Debian package</span>
-                  <span class="bi bi-pl" lang="pl">Pakiet Debiana</span>
-                </span>
-                <span class="dl__meta">.deb, 22.1 MB</span>
-              </span>
-              <svg viewBox="0 0 16 16" aria-hidden="true">
-                <path d="M8 2v7.2m0 0 2.8-2.8M8 9.2 5.2 6.4M3 11.5v1.5h10v-1.5" />
-              </svg>
-            </a>
-            <a
-              class="dl__secondary"
-              href="https://github.com/NikodemNowak/loquara/releases/download/v0.10.0/Loquara_0.10.0_amd64.AppImage"
-              download
-            >AppImage</a>
-          </div>
-        </nav>
+          <p class="download-note">
+            <span class="bi bi-en" lang="en">The 670 MB speech model downloads once, on first launch.</span>
+            <span class="bi bi-pl" lang="pl">Model 670 MB pobiera się raz, przy pierwszym uruchomieniu.</span>
+          </p>
+        </div>
+      </section>
 
     </main>
 
@@ -459,6 +612,14 @@
           <a href="https://github.com/NikodemNowak/loquara/releases" target="_blank" rel="noreferrer">
             <span class="bi bi-en" lang="en">Releases</span>
             <span class="bi bi-pl" lang="pl">Wydania</span>
+          </a>
+          <a href="https://github.com/NikodemNowak/loquara/issues" target="_blank" rel="noreferrer">
+            <span class="bi bi-en" lang="en">Issues</span>
+            <span class="bi bi-pl" lang="pl">Zgłoszenia</span>
+          </a>
+          <a href="https://github.com/NikodemNowak/loquara/blob/main/LICENSE" target="_blank" rel="noreferrer">
+            <span class="bi bi-en" lang="en">License</span>
+            <span class="bi bi-pl" lang="pl">Licencja</span>
           </a>
           <a href="mailto:hello@nikodemnowak.pl">
             <span class="bi bi-en" lang="en">Email</span>
