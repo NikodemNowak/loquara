@@ -12,10 +12,18 @@ on:
 
 permissions:
   contents: write
+  actions: write
+
+# Tag and dispatch refs are not main, so a repeated run of the same ref
+# replaces the one still going. Distinct tags do not cancel each other.
+concurrency:
+  group: release-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   prepare:
     runs-on: ubuntu-22.04
+    timeout-minutes: 10
     outputs:
       tag: ${{ steps.version.outputs.tag }}
     steps:
@@ -37,6 +45,7 @@ jobs:
   build:
     name: build (${{ matrix.name }})
     needs: prepare
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -96,6 +105,15 @@ jobs:
           workspaces: src-tauri -> target
           key: ${{ matrix.name }}
 
+      # Same DirectML snapshot as the ci workflow, so a release can reuse the
+      # libraries compiled there instead of building sherpa-onnx again.
+      - name: Cache Windows speech engine
+        if: runner.os == 'Windows'
+        uses: actions/cache@v4
+        with:
+          path: src-tauri/.sherpa-directml
+          key: sherpa-directml-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('src-tauri/vendor/sherpa-rs-sys/**') }}
+
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
 
@@ -105,10 +123,16 @@ jobs:
       - name: Build bundles
         shell: bash
         run: |
+          if [ "$RUNNER_OS" = "Windows" ] && node scripts/sherpa-directml-cache.mjs check; then
+            export SHERPA_LIB_PATH="$(node scripts/sherpa-directml-cache.mjs print)"
+          fi
           if [ -n "${{ matrix.target }}" ]; then
             pnpm tauri build --target "${{ matrix.target }}" --bundles "${{ matrix.bundles }}"
           else
             pnpm tauri build --bundles "${{ matrix.bundles }}"
+          fi
+          if [ "$RUNNER_OS" = "Windows" ] && ! node scripts/sherpa-directml-cache.mjs check; then
+            node scripts/sherpa-directml-cache.mjs capture
           fi
 
       - name: Check that bundles were produced
@@ -133,6 +157,7 @@ jobs:
     name: publish release
     needs: [prepare, build]
     runs-on: ubuntu-22.04
+    timeout-minutes: 20
     steps:
       - uses: actions/download-artifact@v4
         with:

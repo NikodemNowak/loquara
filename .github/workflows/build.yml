@@ -1,18 +1,29 @@
 name: ci
 
+# A push to main is what publishes caches that other branches can restore.
+# Caches saved on a feature branch stay invisible to main. Running on every
+# push and on pull_request also executes this workflow twice for one commit.
 on:
   push:
-    branches: ["**"]
+    branches: [main]
     tags-ignore: ["**"]
   pull_request:
   workflow_dispatch:
 
 permissions:
   contents: read
+  actions: write
+
+# A newer push replaces an in-progress PR run. Main is left running so the
+# shared cache is still uploaded.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   frontend:
     runs-on: ubuntu-22.04
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
@@ -43,6 +54,7 @@ jobs:
 
   rust:
     name: rust (${{ matrix.os }})
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -93,11 +105,35 @@ jobs:
       - name: Build frontend
         run: pnpm build
 
+      # Windows builds sherpa-onnx from source (DirectML). The installed
+      # libraries are cached on their own: rust-cache removes this path
+      # dependency because it sits inside src-tauri. SHERPA_LIB_PATH tells
+      # the build script to link those libraries instead of running CMake.
+      - name: Cache Windows speech engine
+        if: runner.os == 'Windows'
+        uses: actions/cache@v4
+        with:
+          path: src-tauri/.sherpa-directml
+          key: sherpa-directml-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('src-tauri/vendor/sherpa-rs-sys/**') }}
+
       # The app's build script stages the engine libraries, and Cargo does not
       # order it after sherpa-rs-sys. Building the engine first is what makes
       # the staging deterministic.
       - name: Build speech engine
-        run: cargo build --manifest-path src-tauri/Cargo.toml -p sherpa-rs-sys
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ] && node scripts/sherpa-directml-cache.mjs check; then
+            export SHERPA_LIB_PATH="$(node scripts/sherpa-directml-cache.mjs print)"
+          fi
+          cargo build --manifest-path src-tauri/Cargo.toml -p sherpa-rs-sys
+          if [ "$RUNNER_OS" = "Windows" ] && ! node scripts/sherpa-directml-cache.mjs check; then
+            node scripts/sherpa-directml-cache.mjs capture
+          fi
 
       - name: Rust tests
-        run: cargo test --manifest-path src-tauri/Cargo.toml --lib
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ] && node scripts/sherpa-directml-cache.mjs check; then
+            export SHERPA_LIB_PATH="$(node scripts/sherpa-directml-cache.mjs print)"
+          fi
+          cargo test --manifest-path src-tauri/Cargo.toml --lib
