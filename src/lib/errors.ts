@@ -21,6 +21,10 @@ const exactMessages: Record<string, TranslationKey> = {
   "Hugging Face rejected the access token.": "errors.tokenRejected",
   "The access token is empty.": "errors.tokenEmpty",
   "The access token contains spaces.": "errors.tokenSpaces",
+  "Download the transcription model before recording a meeting.": "meeting.error.model",
+  "Meetings are transcribed on this computer. Download the local model first.": "meeting.error.model",
+  "A meeting is already being recorded or transcribed.": "meeting.error.busy",
+  "The meeting recording was interrupted. Retry to transcribe what was saved.": "meeting.error.interrupted",
 };
 
 /** Backend messages with dynamic parts, matched by pattern. */
@@ -30,6 +34,8 @@ const patternMessages: Array<[
   (match: RegExpMatchArray) => Record<string, string>,
 ]> = [
   [/^The selected model is not ready\. Download it before retrying: (.+)\.$/, "errors.modelNotReady", (m) => ({ model: m[1] })],
+  [/^Could not open the microphone: (.+)$/, "meeting.error.mic", (m) => ({ error: m[1] })],
+  [/^Could not record system audio: (.+)$/, "meeting.error.system", (m) => ({ error: m[1] })],
   [/^Missing or empty files: (.+)$/, "errors.missingFiles", (m) => ({ files: m[1] })],
   [/^Mode "(.+)" is disabled\.$/, "errors.modeDisabled", (m) => ({ mode: m[1] })],
   [/^Invalid (.+): (.+)$/, "errors.invalidIndex", (m) => ({ name: m[1], error: m[2] })],

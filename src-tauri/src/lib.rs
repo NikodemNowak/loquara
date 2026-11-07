@@ -1,5 +1,7 @@
 pub mod models;
 pub mod engine;
+pub mod loopback;
+pub mod meeting;
 pub mod audio;
 pub mod microphones;
 #[cfg(windows)]
@@ -118,8 +120,11 @@ pub fn run() {
                 storage,
                 data_dir.join("models"),
             );
+            // Tracks a crash left behind become retryable meetings.
+            meeting::recover_interrupted(&state.storage);
             // Register state before any window can invoke a Tauri command.
             app.manage(state.clone());
+            app.manage(meeting::MeetingState::default());
             let (level_sender, level_receiver) = std::sync::mpsc::sync_channel(2);
             state.audio.set_level_sender(level_sender);
             let level_app = app.handle().clone();
@@ -171,6 +176,22 @@ pub fn run() {
                     }
                     "open" => {
                         let _ = platform::show_main(app);
+                    }
+                    "meeting" => {
+                        let recording = app
+                            .try_state::<meeting::MeetingState>()
+                            .is_some_and(|meetings| meetings.is_recording());
+                        let result = if recording {
+                            meeting::stop_meeting_inner(app)
+                        } else {
+                            meeting::start_meeting_inner(app)
+                        };
+                        if result.is_err() {
+                            // Consent, a missing model or a device problem is
+                            // explained in the window, not in a tray tooltip.
+                            let _ = platform::show_main(app);
+                            let _ = app.emit("meeting://open", ());
+                        }
                     }
                     "quit" => app.exit(0),
                     id if id.starts_with("mic:") => {
@@ -280,6 +301,12 @@ pub fn run() {
             dictation::clear_cloud_api_key,
             dictation::test_cloud_transcription,
             dictation::system_locale,
+            meeting::get_meeting_status,
+            meeting::acknowledge_meeting_consent,
+            meeting::start_meeting,
+            meeting::stop_meeting,
+            meeting::cancel_meeting,
+            meeting::retry_meeting,
         ])
         .build(tauri::generate_context!())
         .expect("failed to launch the Loquara app")
@@ -294,6 +321,9 @@ struct TrayLabels {
     submenu_microphones: &'static str,
     toggle: &'static str,
     paste: &'static str,
+    meeting_start: &'static str,
+    meeting_stop: &'static str,
+    meeting_tooltip: &'static str,
     mic_none: &'static str,
     open: &'static str,
     quit: &'static str,
@@ -305,6 +335,9 @@ fn tray_labels(locale: &str) -> TrayLabels {
             submenu_microphones: "Mikrofon",
             toggle: "Start/Zatrzymaj nagrywanie",
             paste: "Wklej ostatni tekst",
+            meeting_start: "Nagraj spotkanie",
+            meeting_stop: "● Zatrzymaj nagrywanie spotkania",
+            meeting_tooltip: "Loquara — nagrywanie spotkania",
             mic_none: "(brak mikrofonów)",
             open: "Otwórz Loquarę",
             quit: "Zakończ",
@@ -313,6 +346,9 @@ fn tray_labels(locale: &str) -> TrayLabels {
             submenu_microphones: "Microphone",
             toggle: "Start/Stop recording",
             paste: "Paste last transcript",
+            meeting_start: "Record meeting",
+            meeting_stop: "● Stop meeting recording",
+            meeting_tooltip: "Loquara — recording a meeting",
             mic_none: "(no microphones)",
             open: "Open Loquara",
             quit: "Quit",
@@ -365,15 +401,34 @@ fn build_tray_menu<R: tauri::Runtime, M: tauri::Manager<R>>(
         };
         mic_menu = mic_menu.text(format!("mic:{}", device.id), &label);
     }
+    let meeting_recording = app
+        .try_state::<meeting::MeetingState>()
+        .is_some_and(|meetings| meetings.is_recording());
     MenuBuilder::new(app)
         .text("toggle", labels.toggle)
         .text("paste", labels.paste)
+        .text("meeting", if meeting_recording { labels.meeting_stop } else { labels.meeting_start })
         .separator()
         .item(&mic_menu.build()?)
         .separator()
         .text("open", labels.open)
         .text("quit", labels.quit)
         .build()
+}
+
+/// Brings the tray menu and tooltip in line with whether a meeting is being
+/// recorded, so the recording stays visible while the window is hidden.
+pub fn refresh_tray(app: &tauri::AppHandle) {
+    let Some(state) = app.try_state::<AppState>() else { return };
+    let Ok(locale) = state.settings.read().map(|settings| resolved_language(&settings)) else { return };
+    rebuild_tray_menu(app, &state, locale);
+    let recording = app
+        .try_state::<meeting::MeetingState>()
+        .is_some_and(|meetings| meetings.is_recording());
+    if let Some(tray) = app.tray_by_id("loquara") {
+        let tooltip = if recording { tray_labels(locale).meeting_tooltip } else { "Loquara" };
+        let _ = tray.set_tooltip(Some(tooltip));
+    }
 }
 
 /// Rebuilds the "loquara" tray menu in place so a language change is reflected

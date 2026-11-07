@@ -10,6 +10,8 @@ import { HistoryPage } from "../features/history/HistoryPage";
 import { SettingsPage } from "../features/settings/SettingsPage";
 import { ModesPage } from "../features/modes/ModesPage";
 import { VocabularyPage } from "../features/vocabulary/VocabularyPage";
+import { MeetingBar, MeetingStartButton } from "../features/meeting/MeetingBar";
+import { useMeeting } from "../features/meeting/useMeeting";
 import { getAdapter, type AppAdapter } from "../lib/tauri";
 import { useI18n, type TranslationKey } from "../lib/i18n";
 import { useAppModel } from "./useAppModel";
@@ -47,6 +49,27 @@ export function App({ adapter: adapterProp }: { adapter?: AppAdapter }) {
     window.setTimeout(() => setToasts((items) => items.filter((item) => item.id !== id)), 5000);
   }, []);
   const { snapshot, setSnapshot, history, refreshHistory, loading } = useAppModel(adapter, toast);
+  const onMeetingFinished = useCallback(() => {
+    void refreshHistory();
+  }, [refreshHistory]);
+  const meeting = useMeeting(adapter, toast, onMeetingFinished);
+  // A meeting adds its row when it starts and fills it in when it is
+  // transcribed; history follows both.
+  useEffect(() => {
+    void refreshHistory();
+  }, [meeting.status.phase, refreshHistory]);
+  const startMeeting = meeting.start;
+  useEffect(() => {
+    let active = true;
+    let unlisten: (() => void) | undefined;
+    // The tray could not start the meeting (first use, or a problem it
+    // cannot show); trying again here explains why.
+    void adapter.onMeetingOpen(() => startMeeting()).then((dispose) => {
+      if (active) unlisten = dispose;
+      else dispose();
+    });
+    return () => { active = false; unlisten?.(); };
+  }, [adapter, startMeeting]);
   const [activeModeName, setActiveModeName] = useState("");
   useEffect(() => {
     let active = true;
@@ -135,7 +158,7 @@ export function App({ adapter: adapterProp }: { adapter?: AppAdapter }) {
   if (page === "dictate") {
     content = <DictatePage adapter={adapter} snapshot={snapshot} recordings={history} modelReady={installed === "ready"} onSnapshot={setSnapshot} onHistory={openHistory} onSettings={() => setPage("settings")} onToast={toast} />;
   } else if (page === "history") {
-    content = <HistoryPage adapter={adapter} recordings={history} initialSelectedId={historySelectedId} onRefresh={refreshHistory} onToast={toast} />;
+    content = <HistoryPage adapter={adapter} recordings={history} initialSelectedId={historySelectedId} onRefresh={refreshHistory} onToast={toast} onRetryMeeting={meeting.retry} />;
   } else if (page === "modes") {
     content = <ModesPage adapter={adapter} settings={snapshot.settings} onSettingsChange={(settings) => setSnapshot((current) => ({ ...current, settings }))} onToast={toast} />;
   } else if (page === "vocabulary") {
@@ -178,6 +201,7 @@ export function App({ adapter: adapterProp }: { adapter?: AppAdapter }) {
             })}
           </nav>
         <div className="app-content">
+          <MeetingBar meeting={meeting} />
           {deliveryNotice && <div className="delivery-notice" role="alert">
             <div><strong>{t("overlay.deliveryFailed")}</strong>{deliveryNotice.detail && <p>{deliveryNotice.detail}</p>}</div>
             <button className="icon-button" aria-label={t("overlay.dismiss")} title={t("overlay.dismiss")} onClick={() => {
@@ -201,6 +225,7 @@ export function App({ adapter: adapterProp }: { adapter?: AppAdapter }) {
                 {engine.state === "downloading" ? t("engine.downloading", { percent: transferPercent }) : t(engine.label)}
               </span>}
           </button>
+          <MeetingStartButton meeting={meeting} />
           <button className="mode-shortcut" onClick={() => setPage("modes")} aria-label={t("modes.change")}>
             {activeModeName ? t("dictate.modeLabel", { mode: activeModeName }) : t("modes.title")}<ArrowRight size={13} />
           </button>

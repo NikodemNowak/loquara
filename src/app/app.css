@@ -597,3 +597,28 @@ input[type="checkbox"]:disabled { opacity: 0.45; cursor: not-allowed; }
   .record-inspector > * { flex-shrink:0; }
   .record-inspector .inspector-transcript { flex:1 0 auto; min-height:160px; }
 }
+
+/* ===== Meetings ========================================================= */
+.meeting-bar { display:flex; align-items:center; gap:var(--s-3); flex:0 0 auto; margin:16px 48px 0; padding:10px 14px; border:1px solid var(--border-strong); border-radius:var(--r-sm); background:var(--recording-soft); font-size:var(--t-small); }
+.meeting-bar--processing { background:var(--surface); }
+.meeting-bar__dot { width:8px; height:8px; flex:0 0 auto; border-radius:50%; background:var(--recording); animation:meeting-pulse 1.6s ease-in-out infinite; }
+.meeting-bar__copy { display:flex; flex-wrap:wrap; align-items:baseline; gap:4px 10px; flex:1 1 auto; min-width:0; }
+.meeting-bar__copy strong { font-weight:var(--w-medium); color:var(--text); }
+.meeting-bar__copy p { flex-basis:100%; margin:0; color:var(--muted); font-size:var(--t-micro); }
+.meeting-bar__clock { color:var(--recording); font-variant-numeric:tabular-nums; }
+.meeting-bar__progress { flex:0 1 160px; height:3px; border-radius:var(--r-full); background:var(--border); overflow:hidden; }
+.meeting-bar__progress i { display:block; height:100%; background:var(--accent); transition:width var(--medium) var(--ease); }
+@keyframes meeting-pulse { 50% { opacity:.35; } }
+@media (prefers-reduced-motion:reduce) { .meeting-bar__dot { animation:none; } }
+.meeting-start { display:flex; align-items:center; gap:7px; flex:0 0 auto; margin-left:auto; padding:4px 0; border:0; background:transparent; color:var(--muted); font-size:12px; }
+.meeting-start:hover:not(:disabled) { color:var(--text); }
+.meeting-start > i { width:6px; height:6px; border-radius:50%; background:var(--recording); }
+.meeting-badge { padding:0 6px; border:1px solid var(--border-strong); border-radius:var(--r-full); color:var(--muted); font-size:11px; line-height:16px; }
+.meeting-transcript { display:flex; flex-direction:column; gap:var(--s-2); min-height:0; }
+.meeting-turns { display:flex; flex-direction:column; gap:var(--s-3); max-height:340px; margin:0; padding:0; overflow:auto; list-style:none; }
+.meeting-turn { display:grid; gap:2px; }
+.meeting-turn__who { display:flex; gap:8px; align-items:baseline; color:var(--muted); font-size:var(--t-micro); font-weight:var(--w-medium); }
+.meeting-turn__who time { color:var(--faint); font-weight:var(--w-regular); font-variant-numeric:tabular-nums; }
+.meeting-turn--me .meeting-turn__who { color:var(--text); }
+.meeting-turn p { margin:0; font-size:var(--t-body); line-height:var(--lh-normal); overflow-wrap:anywhere; }
+@media (max-width:640px) { .meeting-bar { margin-inline:20px; flex-wrap:wrap; } }

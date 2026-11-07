@@ -4,6 +4,8 @@
 <dict>
   <key>NSMicrophoneUsageDescription</key>
   <string>Loquara records only while you are dictating, then transcribes the audio on this Mac.</string>
+  <key>NSAudioCaptureUsageDescription</key>
+  <string>Loquara records what your Mac plays only while you record a meeting, so the other participants can be transcribed on this Mac.</string>
   <key>NSAppleEventsUsageDescription</key>
   <string>Loquara uses System Events to paste the finished transcript into the app you are writing in.</string>
   <key>NSHighResolutionCapable</key>

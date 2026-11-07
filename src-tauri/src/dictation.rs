@@ -1271,6 +1271,19 @@ pub fn recover_terminal_state(
 }
 
 impl AppState {
+    /// Records that the engine just did work, so the keep-alive watchdog does
+    /// not unload the model in the middle of a long meeting transcription.
+    pub fn touch_engine(&self) {
+        if let Ok(mut last_used) = self.engine_last_used.lock() {
+            *last_used = Instant::now();
+        }
+    }
+
+    /// Where the Silero VAD model and the transcription models are kept.
+    pub fn model_home(&self) -> &Path {
+        &self.model_home
+    }
+
     pub fn new(
         audio: AudioRecorder,
         storage: Storage,
@@ -1860,6 +1873,8 @@ fn start_recording_locked(app: &AppHandle, state: &AppState, hold: Option<Arc<Ho
         error: None,
         // Filled in when the capture stops and the envelope is known.
         peaks: None,
+        kind: crate::storage::RecordingKind::Dictation,
+        meeting: None,
     };
     if let Err(error) = state.storage.insert_recording(&recording) {
         let _ = state.audio.cancel();
@@ -2745,6 +2760,11 @@ pub fn needs_transcript(recording: &Recording) -> bool {
 }
 
 fn retry_audio_path(recording: &Recording) -> Result<PathBuf, AppError> {
+    if recording.kind == crate::storage::RecordingKind::Meeting {
+        return Err(AppError::NotRetryable {
+            message: "meetings are retried from the meeting view".into(),
+        });
+    }
     if !needs_transcript(recording) {
         return Err(AppError::NotRetryable {
             message: "the recording already has a transcript".into(),
@@ -3097,6 +3117,12 @@ fn delete_history_safely(
     }
     if let Some(audio_path) = recording.audio_path {
         remove_managed_audio(Path::new(&audio_path), storage.recordings_dir())?;
+    }
+    if let Some(tracks) = recording.meeting.as_ref().and_then(|meeting| meeting.tracks.as_ref()) {
+        for track in [&tracks.me, &tracks.others] {
+            remove_managed_audio(Path::new(track), storage.recordings_dir())?;
+        }
+        crate::meeting::remove_tracks(tracks);
     }
     let deleted = storage.delete_recording(recording_id)?;
     drop(machine);
@@ -3829,6 +3855,8 @@ mod tests {
             source_app: None,
             error: None,
             peaks: None,
+            kind: crate::storage::RecordingKind::Dictation,
+            meeting: None,
         }
     }
 
@@ -5091,7 +5119,8 @@ mod buffered_delivery_tests {
         let storage = Storage::open_in_memory(dir.path()).unwrap();
         let state = AppState::new(AudioRecorder::new(dir.path()), storage, dir.path());
         state.storage.insert_recording(&Recording { id: "take".into(), created_at: 1, duration_ms: 0,
-            status: RecordingStatus::Processing, text: None, model: None, audio_path: Some("take.wav".into()), source_app: None, error: None, peaks: None }).unwrap();
+            status: RecordingStatus::Processing, text: None, model: None, audio_path: Some("take.wav".into()), source_app: None, error: None, peaks: None,
+            kind: crate::storage::RecordingKind::Dictation, meeting: None }).unwrap();
         state.machine.lock().unwrap().state = DictationState::Processing { recording_id: "take".into(), audio_path: "take.wav".into() };
         let take = FrozenTake::capture(&state, AppSettings::default(), Some(WindowTarget(42)), "take".into());
         *state.active_take.lock().unwrap() = Some(take.clone());
