@@ -12,6 +12,7 @@ import type { ToastKind } from "../../components/Toast";
 import { useAsyncAction } from "../../lib/useAsyncAction";
 import { dateLocale, useI18n } from "../../lib/i18n";
 import { normalizeError } from "../../lib/errors";
+import { MeetingTranscript } from "../meeting/MeetingTranscript";
 
 const formatDuration = (ms: number) =>
   `${String(Math.floor(ms / 60_000)).padStart(2, "0")}:${String(Math.floor(ms / 1000) % 60).padStart(2, "0")}`;
@@ -22,12 +23,14 @@ export function HistoryPage({
   initialSelectedId,
   onRefresh,
   onToast,
+  onRetryMeeting,
 }: {
   adapter: AppAdapter;
   recordings: Recording[];
   initialSelectedId?: string;
   onRefresh: () => Promise<void>;
   onToast: (message: string, kind: ToastKind) => void;
+  onRetryMeeting?: (recordingId: string) => Promise<void>;
 }) {
   const { t, lang } = useI18n();
   const [search, setSearch] = useState("");
@@ -59,6 +62,10 @@ export function HistoryPage({
     item.text?.trim()
       ? item.text
       : item.error ?? (item.status === "completed" ? t("history.transcript.missing") : labels[item.status]);
+  const isMeeting = (item: Recording) => item.kind === "meeting";
+  /** A meeting is retried from its two tracks, which stay until it has a transcript. */
+  const canRetry = (item: Recording) =>
+    isMeeting(item) ? Boolean(item.meeting?.tracks && onRetryMeeting) : Boolean(item.audioPath);
   const formatTime = (timestamp: number) =>
     new Intl.DateTimeFormat(dateLocale(lang), { hour: "2-digit", minute: "2-digit" }).format(timestamp);
 
@@ -160,6 +167,7 @@ export function HistoryPage({
                   {rowLabel(item)}
                 </span>
                 <span className="history-row__meta">
+                  {isMeeting(item) && <span className="meeting-badge">{t("meeting.badge")}</span>}
                   {item.status !== "completed" && (
                     <span className={`record-status record-status--${item.status}`} title={labels[item.status]} />
                   )}
@@ -176,7 +184,9 @@ export function HistoryPage({
 
         <aside className="record-inspector" aria-label={t("history.inspector.label")}>
           {selected ? <>
-            {selected.status === "completed" ? (
+            {selected.status === "completed" && isMeeting(selected) && selected.meeting ? (
+              <MeetingTranscript meeting={selected.meeting} />
+            ) : selected.status === "completed" ? (
               <div className="inspector-transcript">
                 <div className="inspector-transcript__head">
                   <span>{t("history.transcript.title")}</span>
@@ -255,9 +265,10 @@ export function HistoryPage({
                 </button>
               )}
               {awaitsTranscript(selected) && (
-                selected.audioPath
-                  ? <button className="text-button" disabled={busy} onClick={() => void action("retry", () => adapter.retryTranscription(selected.id))}>
-                      <RotateCcw size={14} />{pendingKey === "retry" ? t("history.action.retrying") : t("common.retry")}
+                canRetry(selected)
+                  ? <button className="text-button" disabled={busy} onClick={() => void action("retry", () =>
+                      isMeeting(selected) && onRetryMeeting ? onRetryMeeting(selected.id) : adapter.retryTranscription(selected.id))}>
+                      <RotateCcw size={14} />{pendingKey === "retry" ? t("history.action.retrying") : isMeeting(selected) ? t("meeting.retry") : t("common.retry")}
                     </button>
                   : <span className="retry-unavailable">{t("history.action.retryUnavailable")}</span>
               )}

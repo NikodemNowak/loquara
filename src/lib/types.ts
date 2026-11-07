@@ -222,6 +222,46 @@ export interface Recording {
   /** Amplitude envelope, one byte per bucket (0-255). Null for recordings
    *  captured before envelopes were stored, and while one is still running. */
   peaks: number[] | null;
+  /** Absent on rows from before meetings existed, which are dictations. */
+  kind?: RecordingKind;
+  meeting?: MeetingTranscript | null;
+}
+
+export type RecordingKind = "dictation" | "meeting";
+
+export type Speaker = "me" | "others";
+
+export interface MeetingSegment {
+  speaker: Speaker;
+  startMs: number;
+  endMs: number;
+  text: string;
+}
+
+export interface MeetingTracks {
+  me: string;
+  others: string;
+  meOffsetMs: number;
+  othersOffsetMs: number;
+}
+
+export interface MeetingTranscript {
+  segments: MeetingSegment[];
+  /** Kept only until the meeting has been transcribed. */
+  tracks?: MeetingTracks | null;
+  /** "others_silent": the system-audio track held nothing but silence. */
+  warnings?: string[];
+}
+
+export type MeetingPhase = "idle" | "recording" | "processing";
+
+export interface MeetingStatus {
+  phase: MeetingPhase;
+  meetingId: string | null;
+  startedAt: number | null;
+  progress: number | null;
+  othersSilent: boolean;
+  consentAcknowledged: boolean;
 }
 
 export interface HistoryQuery {

@@ -78,6 +78,33 @@ pub struct Recording {
     /// history list after the WAV is gone.
     #[serde(default)]
     pub peaks: Option<Vec<u8>>,
+    /// A dictation, or a meeting captured as two tracks.
+    #[serde(default)]
+    pub kind: RecordingKind,
+    /// Speaker-labelled segments and track files of a meeting.
+    #[serde(default)]
+    pub meeting: Option<crate::meeting::MeetingTranscript>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecordingKind {
+    #[default]
+    Dictation,
+    Meeting,
+}
+
+impl RecordingKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Dictation => "dictation",
+            Self::Meeting => "meeting",
+        }
+    }
+
+    fn parse(value: &str) -> Self {
+        if value == "meeting" { Self::Meeting } else { Self::Dictation }
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -184,7 +211,9 @@ impl Storage {
                audio_path TEXT,
                source_app TEXT,
                error TEXT,
-               peaks BLOB
+               peaks BLOB,
+               kind TEXT NOT NULL DEFAULT 'dictation',
+               meeting_json TEXT
              );
              CREATE INDEX IF NOT EXISTS history_created_at ON history(created_at DESC);
              CREATE INDEX IF NOT EXISTS history_status ON history(status);
@@ -240,6 +269,25 @@ impl Storage {
                     .execute_batch("ALTER TABLE history ADD COLUMN peaks BLOB;")?;
             }
         }
+        if version < 4 {
+            // Meetings share the history list with dictations; older rows are
+            // all dictations, which is what the column defaults to.
+            let columns: Vec<String> = self
+                .connection()?
+                .prepare("PRAGMA table_info(history)")?
+                .query_map([], |row| row.get::<_, String>(1))?
+                .collect::<Result<_, _>>()?;
+            let mut migrations = String::new();
+            if !columns.iter().any(|column| column == "kind") {
+                migrations.push_str("ALTER TABLE history ADD COLUMN kind TEXT NOT NULL DEFAULT 'dictation';");
+            }
+            if !columns.iter().any(|column| column == "meeting_json") {
+                migrations.push_str("ALTER TABLE history ADD COLUMN meeting_json TEXT;");
+            }
+            if !migrations.is_empty() {
+                self.connection()?.execute_batch(&migrations)?;
+            }
+        }
         self.connection()?.execute_batch(
             "INSERT OR IGNORE INTO modes
                (id,config_json,name,description,prompt,enabled,is_default,created_at)
@@ -247,7 +295,7 @@ impl Storage {
                ('clean','{}','Clean','Light text normalization','',1,1,0),
                ('message','{}','Message','Natural message style','',1,0,1),
                ('code','{}','Code','Dictating technical terms','',1,0,2);
-             UPDATE schema_version SET version = 3 WHERE version < 3;",
+             UPDATE schema_version SET version = 4 WHERE version < 4;",
         )?;
         Ok(())
     }
@@ -279,8 +327,8 @@ impl Storage {
     pub fn insert_recording(&self, recording: &Recording) -> Result<(), StorageError> {
         self.connection()?.execute(
             "INSERT INTO history
-             (id, created_at, duration_ms, status, text, model, audio_path, source_app, error, peaks)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+             (id, created_at, duration_ms, status, text, model, audio_path, source_app, error, peaks, kind, meeting_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 recording.id,
                 recording.created_at,
@@ -292,6 +340,12 @@ impl Storage {
                 recording.source_app,
                 recording.error,
                 recording.peaks,
+                recording.kind.as_str(),
+                recording
+                    .meeting
+                    .as_ref()
+                    .map(serde_json::to_string)
+                    .transpose()?,
             ],
         )?;
         Ok(())
@@ -300,7 +354,7 @@ impl Storage {
     pub fn update_recording(&self, recording: &Recording) -> Result<bool, StorageError> {
         Ok(self.connection()?.execute(
             "UPDATE history SET created_at=?2, duration_ms=?3, status=?4, text=?5,
-             model=?6, audio_path=?7, source_app=?8, error=?9, peaks=?10 WHERE id=?1",
+             model=?6, audio_path=?7, source_app=?8, error=?9, peaks=?10, kind=?11, meeting_json=?12 WHERE id=?1",
             params![
                 recording.id,
                 recording.created_at,
@@ -312,6 +366,12 @@ impl Storage {
                 recording.source_app,
                 recording.error,
                 recording.peaks,
+                recording.kind.as_str(),
+                recording
+                    .meeting
+                    .as_ref()
+                    .map(serde_json::to_string)
+                    .transpose()?,
             ],
         )? > 0)
     }
@@ -354,7 +414,7 @@ impl Storage {
     pub fn get_recording(&self, id: &str) -> Result<Option<Recording>, StorageError> {
         let connection = self.connection()?;
         let mut statement = connection.prepare(
-            "SELECT id, created_at, duration_ms, status, text, model, audio_path, source_app, error, peaks
+            "SELECT id, created_at, duration_ms, status, text, model, audio_path, source_app, error, peaks, kind, meeting_json
              FROM history WHERE id=?1",
         )?;
         let raw = statement.query_row([id], raw_recording).optional()?;
@@ -370,7 +430,7 @@ impl Storage {
         let status = query.status.map(RecordingStatus::as_str);
         let connection = self.connection()?;
         let mut statement = connection.prepare(
-            "SELECT id, created_at, duration_ms, status, text, model, audio_path, source_app, error, peaks
+            "SELECT id, created_at, duration_ms, status, text, model, audio_path, source_app, error, peaks, kind, meeting_json
              FROM history
              WHERE (?1 IS NULL OR status=?1) AND COALESCE(text,'') LIKE ?2
              ORDER BY created_at DESC, id DESC",
@@ -789,6 +849,8 @@ struct RawRecording {
     source_app: Option<String>,
     error: Option<String>,
     peaks: Option<Vec<u8>>,
+    kind: String,
+    meeting_json: Option<String>,
 }
 
 fn raw_recording(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawRecording> {
@@ -803,6 +865,8 @@ fn raw_recording(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawRecording> {
         source_app: row.get(7)?,
         error: row.get(8)?,
         peaks: row.get(9)?,
+        kind: row.get(10)?,
+        meeting_json: row.get(11)?,
     })
 }
 
@@ -821,6 +885,12 @@ impl TryFrom<RawRecording> for Recording {
             source_app: raw.source_app,
             error: raw.error,
             peaks: raw.peaks,
+            kind: RecordingKind::parse(&raw.kind),
+            meeting: raw
+                .meeting_json
+                .as_deref()
+                .map(serde_json::from_str)
+                .transpose()?,
         })
     }
 }
@@ -1026,6 +1096,8 @@ mod tests {
             source_app: Some("Notatnik".to_owned()),
             error: None,
             peaks: None,
+            kind: RecordingKind::Dictation,
+            meeting: None,
         }
     }
 
@@ -1033,11 +1105,35 @@ mod tests {
     fn migrates_all_tables_and_records_schema_version() {
         let (_temp, storage) = storage();
 
-        assert_eq!(storage.schema_version().unwrap(), 3);
+        assert_eq!(storage.schema_version().unwrap(), 4);
         assert_eq!(
             storage.table_names().unwrap(),
             vec!["history", "modes", "settings", "vocabulary"]
         );
+    }
+
+    #[test]
+    fn a_meeting_keeps_its_kind_and_labelled_segments() {
+        use crate::meeting::{MeetingSegment, MeetingTracks, MeetingTranscript, Speaker};
+        let (_temp, storage) = storage();
+        let mut meeting = recording("meeting-1", RecordingStatus::Failed, None);
+        meeting.kind = RecordingKind::Meeting;
+        meeting.meeting = Some(MeetingTranscript {
+            segments: vec![MeetingSegment { speaker: Speaker::Others, start_ms: 10, end_ms: 20, text: "Tak".into() }],
+            tracks: Some(MeetingTracks { me: "me.wav".into(), others: "others.wav".into(), me_offset_ms: 0, others_offset_ms: 15 }),
+            warnings: vec!["others_silent".into()],
+        });
+        storage.insert_recording(&meeting).unwrap();
+        storage.insert_recording(&recording("dictation-1", RecordingStatus::Completed, Some("x"))).unwrap();
+
+        assert_eq!(storage.get_recording("meeting-1").unwrap(), Some(meeting.clone()));
+        let dictation = storage.get_recording("dictation-1").unwrap().unwrap();
+        assert_eq!((dictation.kind, dictation.meeting), (RecordingKind::Dictation, None));
+
+        meeting.status = RecordingStatus::Completed;
+        meeting.meeting.as_mut().unwrap().tracks = None;
+        assert!(storage.update_recording(&meeting).unwrap());
+        assert_eq!(storage.get_recording("meeting-1").unwrap(), Some(meeting));
     }
 
     #[test]
@@ -1065,7 +1161,7 @@ mod tests {
 
         let storage = Storage::open(&database, &recordings).unwrap();
 
-        assert_eq!(storage.schema_version().unwrap(), 3);
+        assert_eq!(storage.schema_version().unwrap(), 4);
         assert_eq!(
             storage.list_modes().unwrap().iter().map(|mode| mode.id.clone()).collect::<Vec<_>>(),
             vec!["clean", "message", "code"]
@@ -1114,7 +1210,7 @@ mod tests {
         let migrated = storage.get_recording("old").unwrap().unwrap();
         assert_eq!(migrated.text.as_deref(), Some("spoken before envelopes existed"));
         assert_eq!(migrated.peaks, None);
-        assert_eq!(storage.schema_version().unwrap(), 3);
+        assert_eq!(storage.schema_version().unwrap(), 4);
     }
 
     #[test]

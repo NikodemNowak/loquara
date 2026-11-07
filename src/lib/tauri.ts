@@ -8,6 +8,7 @@ import type {
   HistoryQuery,
   InputDeviceInfo,
   InputDevicesChanged,
+  MeetingStatus,
   Mode,
   ModelDescriptor,
   ModelDownloadProgress,
@@ -73,6 +74,18 @@ export interface AppAdapter {
   onLevel(listener: Listener<number>): Promise<UnlistenFn>;
   onModelProgress(listener: Listener<ModelDownloadProgress>): Promise<UnlistenFn>;
   onError(listener: Listener<string>): Promise<UnlistenFn>;
+  getMeetingStatus(): Promise<MeetingStatus>;
+  /** Records that the notice about recording other people has been read. */
+  acknowledgeMeetingConsent(): Promise<MeetingStatus>;
+  startMeeting(): Promise<MeetingStatus>;
+  stopMeeting(): Promise<MeetingStatus>;
+  cancelMeeting(): Promise<MeetingStatus>;
+  retryMeeting(recordingId: string): Promise<MeetingStatus>;
+  onMeetingStatus(listener: Listener<MeetingStatus>): Promise<UnlistenFn>;
+  /** Fires with the meeting's id once its transcript is saved or has failed. */
+  onMeetingFinished(listener: Listener<string>): Promise<UnlistenFn>;
+  /** The tray asks the window to show the meeting controls. */
+  onMeetingOpen(listener: Listener<void>): Promise<UnlistenFn>;
 }
 export function platformErrorMessage(payload: unknown): string {
   return normalizeError(payload, translate("errors.platform"));
@@ -164,6 +177,17 @@ const realAdapter: AppAdapter = {
       unlistenPersistence();
     };
   },
+  getMeetingStatus: () => invokeAfterStateReady("get_meeting_status"),
+  acknowledgeMeetingConsent: () => invoke("acknowledge_meeting_consent"),
+  startMeeting: () => invoke("start_meeting"),
+  stopMeeting: () => invoke("stop_meeting"),
+  cancelMeeting: () => invoke("cancel_meeting"),
+  retryMeeting: (recordingId) => invoke("retry_meeting", { recordingId }),
+  onMeetingStatus: (listener) =>
+    listen<MeetingStatus>("meeting://status", (event) => listener(event.payload)),
+  onMeetingFinished: (listener) =>
+    listen<string>("meeting://finished", (event) => listener(event.payload)),
+  onMeetingOpen: (listener) => listen("meeting://open", () => listener()),
 };
 const initialSettings: AppSettings = {
   inputDevice: null,
@@ -478,6 +502,35 @@ export function createBrowserAdapter(): AppAdapter {
       const timer = window.setTimeout(() => listener(translate("demo.previewError")), 50);
       return () => window.clearTimeout(timer);
     },
+    ...createDemoMeetings(),
+  };
+}
+
+/** Meetings in the browser demo: a timer, no audio. */
+function createDemoMeetings(): Pick<AppAdapter, "getMeetingStatus" | "acknowledgeMeetingConsent" | "startMeeting" | "stopMeeting" | "cancelMeeting" | "retryMeeting" | "onMeetingStatus" | "onMeetingFinished" | "onMeetingOpen"> {
+  let status: MeetingStatus = { phase: "idle", meetingId: null, startedAt: null, progress: null, othersSilent: false, consentAcknowledged: false };
+  const listeners = new Set<Listener<MeetingStatus>>();
+  const publish = (next: MeetingStatus) => {
+    status = next;
+    listeners.forEach((listener) => listener(status));
+    return status;
+  };
+  return {
+    getMeetingStatus: async () => status,
+    acknowledgeMeetingConsent: async () => publish({ ...status, consentAcknowledged: true }),
+    startMeeting: async () => publish({ ...status, phase: "recording", meetingId: `meeting-${Date.now()}`, startedAt: Date.now() }),
+    stopMeeting: async () => {
+      window.setTimeout(() => publish({ ...status, phase: "idle", meetingId: null, startedAt: null, progress: null }), 1_500);
+      return publish({ ...status, phase: "processing", startedAt: null, progress: 0 });
+    },
+    cancelMeeting: async () => publish({ ...status, phase: "idle", meetingId: null, startedAt: null, progress: null }),
+    retryMeeting: async (recordingId) => publish({ ...status, phase: "processing", meetingId: recordingId, progress: 0 }),
+    onMeetingStatus: async (listener) => {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+    onMeetingFinished: async () => () => undefined,
+    onMeetingOpen: async () => () => undefined,
   };
 }
 let browserAdapter: AppAdapter | undefined;

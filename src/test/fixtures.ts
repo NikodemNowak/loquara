@@ -2,6 +2,7 @@ import { demoCloudProviders, type AppAdapter } from "../lib/tauri";
 import type {
   AppSettings,
   AppSnapshot,
+  MeetingStatus,
   Mode,
   Recording,
   VocabularyEntry,
@@ -45,6 +46,35 @@ export const recordings: Recording[] = [
     peaks: [10, 120, 200, 255, 140, 60, 20],
   },
 ];
+export const idleMeeting: MeetingStatus = {
+  phase: "idle",
+  meetingId: null,
+  startedAt: null,
+  progress: null,
+  othersSilent: false,
+  consentAcknowledged: true,
+};
+export const meetingRecording: Recording = {
+  id: "meeting-1",
+  createdAt: 1_786_000_300_000,
+  durationMs: 65_000,
+  status: "completed",
+  text: "Ja: Zaczynamy?\n\nPozostali: Tak, slychac cie dobrze.",
+  model: "parakeet",
+  audioPath: "C:\\Mow\\meeting-1.wav",
+  sourceApp: null,
+  error: null,
+  peaks: [10, 120, 200],
+  kind: "meeting",
+  meeting: {
+    segments: [
+      { speaker: "me", startMs: 1_000, endMs: 2_000, text: "Zaczynamy?" },
+      { speaker: "others", startMs: 62_500, endMs: 64_000, text: "Tak, slychac cie dobrze." },
+    ],
+    tracks: null,
+    warnings: [],
+  },
+};
 export const settings: AppSettings = {
   inputDevice: null,
   shortcut: "Ctrl+Space",
@@ -166,6 +196,15 @@ export function adapterStub(overrides: Partial<AppAdapter> = {}): AppAdapter {
     onModelProgress: async () => () => undefined,
     onInputDevicesChanged: async () => () => undefined,
     onError: async () => () => undefined,
+    getMeetingStatus: async () => idleMeeting,
+    acknowledgeMeetingConsent: async () => ({ ...idleMeeting, consentAcknowledged: true }),
+    startMeeting: async () => ({ ...idleMeeting, phase: "recording", meetingId: "meeting-1", startedAt: Date.now() }),
+    stopMeeting: async () => ({ ...idleMeeting, phase: "processing", meetingId: "meeting-1", progress: 0 }),
+    cancelMeeting: async () => idleMeeting,
+    retryMeeting: async (recordingId) => ({ ...idleMeeting, phase: "processing", meetingId: recordingId, progress: 0 }),
+    onMeetingStatus: async () => () => undefined,
+    onMeetingFinished: async () => () => undefined,
+    onMeetingOpen: async () => () => undefined,
     ...overrides,
   };
 }

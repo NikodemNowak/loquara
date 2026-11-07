@@ -43,6 +43,28 @@ pub enum AudioSamples {
 }
 
 impl AudioSamples {
+    /// Interleaved samples in the packet (frames times channels).
+    pub fn len(&self) -> usize {
+        match self {
+            Self::I8(samples) => samples.len(),
+            Self::F32(samples) => samples.len(),
+            Self::I16(samples) => samples.len(),
+            Self::I24(samples) => samples.len(),
+            Self::I32(samples) => samples.len(),
+            Self::I64(samples) => samples.len(),
+            Self::U8(samples) => samples.len(),
+            Self::U16(samples) => samples.len(),
+            Self::U32(samples) => samples.len(),
+            Self::U64(samples) => samples.len(),
+            Self::F64(samples) => samples.len(),
+            Self::Error(_) => 0,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     fn as_f32(&self) -> Vec<f32> {
         self.pcm16()
             .unwrap_or_default()
@@ -173,7 +195,7 @@ impl CaptureFaultSink {
     fn message(&self) -> Option<String> { self.message.lock().ok().and_then(|slot| slot.clone()) }
 }
 
-fn try_send_samples(
+pub(crate) fn try_send_samples(
     sender: &SyncSender<AudioSamples>,
     overflowed: &AtomicBool,
     samples: AudioSamples,
@@ -236,10 +258,18 @@ impl InputBackend for CpalInputBackend {
     }
 }
 
-struct PreparedCpalInput {
+pub(crate) struct PreparedCpalInput {
     device: cpal::Device,
     id: String,
     supported: cpal::SupportedStreamConfig,
+}
+
+impl PreparedCpalInput {
+    /// Wraps any device whose stream cpal can open for capture, including an
+    /// output device in loopback mode.
+    pub(crate) fn new(device: cpal::Device, id: String, supported: cpal::SupportedStreamConfig) -> Self {
+        Self { device, id, supported }
+    }
 }
 
 impl PreparedInput for PreparedCpalInput {
@@ -538,14 +568,6 @@ impl AudioRecorder {
     }
 
     pub fn start(&self, device_id: Option<&str>) -> Result<StartedRecording, AudioError> {
-        let mut active = self
-            .active
-            .lock()
-            .map_err(|_| AudioError::Io("recorder lock poisoned".into()))?;
-        if active.is_some() {
-            return Err(AudioError::AlreadyRecording);
-        }
-        fs::create_dir_all(&self.recordings_dir)?;
         let epoch_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -555,6 +577,29 @@ impl AudioRecorder {
         let nonce = NEXT_RECORDING.fetch_add(1, Ordering::Relaxed);
         let id = recording_id(epoch_ms, nonce);
         let path = self.recordings_dir.join(format!("{id}.wav"));
+        self.start_at(device_id, id, path)
+    }
+
+    /// Starts a capture written to `path` (through `path.part` while it runs).
+    ///
+    /// Meetings keep their two tracks under one folder with fixed names, so
+    /// the caller chooses both the identifier and the file.
+    pub fn start_at(
+        &self,
+        device_id: Option<&str>,
+        id: String,
+        path: PathBuf,
+    ) -> Result<StartedRecording, AudioError> {
+        let mut active = self
+            .active
+            .lock()
+            .map_err(|_| AudioError::Io("recorder lock poisoned".into()))?;
+        if active.is_some() {
+            return Err(AudioError::AlreadyRecording);
+        }
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
         let part_path = part_path_for(&path);
         let prepared = self.backend.prepare(device_id)?;
         let format = prepared.format();
