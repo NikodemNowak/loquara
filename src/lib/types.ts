@@ -47,9 +47,29 @@ export interface AppSettings {
   pasteMode: PasteMode;
   /** Background music/video while recording; calls are never touched. */
   mediaDuringDictation: MediaDuringDictation;
+  /** How much hesitation ("yyy", "to to") is taken out of the text. */
+  fillerRemoval: FillerRemoval;
+  /** "nowa linia", "nowy akapit", "skasuj to", "wyślij" act instead of being typed. */
+  voiceCommands: boolean;
+  snippets: Snippet[];
+  appProfiles: AppProfile[];
 }
 
 export type MediaDuringDictation = "muffle" | "duck" | "pause" | "off";
+export type FillerRemoval = "off" | "light" | "strong";
+
+export interface Snippet {
+  trigger: string;
+  text: string;
+}
+
+export interface AppProfile {
+  /** Process name without ".exe", e.g. "slack", "code", "windowsterminal". */
+  app: string;
+  noTrailingPeriod: boolean;
+  lowercaseStart: boolean;
+  pressEnter: boolean;
+}
 
 export interface ModelStatus {
   state: "ready" | "not_installed" | "error";

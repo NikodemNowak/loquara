@@ -159,6 +159,10 @@ const initialSettings: AppSettings = {
   modelKeepAliveSecs: 0,
   pasteMode: "auto",
   mediaDuringDictation: "muffle",
+  fillerRemoval: "light",
+  voiceCommands: true,
+  snippets: [],
+  appProfiles: [],
 };
 
 /** A speech-shaped envelope, so the demo mode looks like real dictation. */

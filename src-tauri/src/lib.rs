@@ -14,6 +14,7 @@ pub mod streaming;
 pub mod buffered;
 pub mod progressive;
 pub mod storage;
+pub mod textops;
 pub mod transcription;
 pub mod vocabulary;
 

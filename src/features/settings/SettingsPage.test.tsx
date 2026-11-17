@@ -4,6 +4,7 @@ import { describe, expect, test, vi } from "vitest";
 
 import { SettingsPage } from "./SettingsPage";
 import { adapterStub, settings } from "../../test/fixtures";
+import type { AppSettings } from "../../lib/types";
 import { renderWithI18n } from "../../test/renderWithI18n";
 
 describe("ustawienia", () => {
@@ -365,6 +366,9 @@ test("task tabs expose their controls once and support arrow/home/end navigation
   expect(screen.queryByRole("checkbox", { name: "Uruchamiaj z systemem" })).toBeNull();
   dictation.focus();
   await userEvent.keyboard("{ArrowRight}");
+  expect(screen.getByRole("tab", { name: "Tekst" })).toHaveFocus();
+  expect(screen.getByRole("checkbox", { name: "Komendy głosowe" })).toBeVisible();
+  await userEvent.keyboard("{ArrowRight}");
   expect(screen.getByRole("tab", { name: "Modele" })).toHaveFocus();
   expect(screen.getByRole("radiogroup", { name: "Wybierz silnik" })).toBeVisible();
   expect(screen.queryByRole("checkbox", { name: "Podgląd na żywo" })).toBeNull();
@@ -374,6 +378,33 @@ test("task tabs expose their controls once and support arrow/home/end navigation
   await userEvent.keyboard("{Home}");
   expect(dictation).toHaveFocus();
   expect(dictation).toHaveAttribute("aria-selected", "true");
+});
+
+test("text tab saves fillers, snippets and app profiles", async () => {
+  const updateSettings = vi.fn(async (next: AppSettings) => ({ settings: next, warning: null }));
+  const adapter = adapterStub({ updateSettings, getSettings: async () => updateSettings.mock.calls.at(-1)?.[0] ?? settings });
+  renderWithI18n(<SettingsPage adapter={adapter} initialSettings={settings} onToast={() => undefined} />);
+  await userEvent.click(screen.getByRole("tab", { name: "Tekst" }));
+
+  await userEvent.click(screen.getByRole("checkbox", { name: "Komendy głosowe" }));
+  await waitFor(() => expect(updateSettings).toHaveBeenLastCalledWith(expect.objectContaining({ voiceCommands: false })));
+
+  await userEvent.type(screen.getByRole("textbox", { name: "Fraza" }), "mój mail");
+  await userEvent.type(screen.getByRole("textbox", { name: "Tekst do wklejenia" }), "jan@example.com");
+  await userEvent.click(screen.getAllByRole("button", { name: "Dodaj" })[0]);
+  await waitFor(() => expect(updateSettings).toHaveBeenLastCalledWith(expect.objectContaining({
+    snippets: [{ trigger: "mój mail", text: "jan@example.com" }],
+  })));
+
+  await userEvent.type(screen.getByRole("textbox", { name: "Nazwa procesu" }), "Slack.exe");
+  await userEvent.click(screen.getAllByRole("button", { name: "Dodaj" })[1]);
+  await waitFor(() => expect(updateSettings).toHaveBeenLastCalledWith(expect.objectContaining({
+    appProfiles: [{ app: "slack", noTrailingPeriod: false, lowercaseStart: false, pressEnter: false }],
+  })));
+  await userEvent.click(await screen.findByRole("checkbox", { name: "Enter po wklejeniu" }));
+  await waitFor(() => expect(updateSettings).toHaveBeenLastCalledWith(expect.objectContaining({
+    appProfiles: [{ app: "slack", noTrailingPeriod: false, lowercaseStart: false, pressEnter: true }],
+  })));
 });
 
 test("active engine summary opens model management without changing saved engine", async () => {

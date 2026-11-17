@@ -232,6 +232,10 @@ pub trait WindowsApi {
     fn send_shift_insert(&mut self) -> Result<(), PlatformError> {
         self.send_ctrl_v()
     }
+    /// Process name of the app that will receive the text, for app profiles.
+    fn target_app(&mut self, _target: Option<WindowTarget>) -> Option<String> { None }
+    /// Presses Enter in the focused window (a "wyślij" command or a profile).
+    fn send_enter(&mut self) -> Result<(), PlatformError> { Ok(()) }
     fn send_paste(&mut self, target: Option<WindowTarget>, mode: PasteMode) -> Result<(), PlatformError> {
         let _ = target;
         match mode {
@@ -1115,6 +1119,35 @@ pub fn detect_terminal_paste_type(hwnd: windows_sys::Win32::Foundation::HWND) ->
     TerminalPasteType::None
 }
 
+/// File name of the process that owns `hwnd` ("Code.exe").
+#[cfg(windows)]
+fn window_exe_name(hwnd: windows_sys::Win32::Foundation::HWND) -> Option<String> {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION};
+    use windows_sys::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
+    if hwnd.is_null() {
+        return None;
+    }
+    let mut pid = 0u32;
+    unsafe { GetWindowThreadProcessId(hwnd, &mut pid) };
+    if pid == 0 {
+        return None;
+    }
+    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if process.is_null() {
+        return None;
+    }
+    let mut buffer = [0u16; 1024];
+    let mut size = buffer.len() as u32;
+    let ok = unsafe { QueryFullProcessImageNameW(process, 0, buffer.as_mut_ptr(), &mut size) };
+    unsafe { CloseHandle(process) };
+    if ok == 0 || size == 0 {
+        return None;
+    }
+    let path = String::from_utf16_lossy(&buffer[..size as usize]);
+    path.rsplit('\\').next().map(str::to_owned)
+}
+
 #[cfg(all(unix, not(target_os = "macos")))]
 fn xdotool_key(chord: &str) -> Result<(), PlatformError> {
     let output = std::process::Command::new("xdotool")
@@ -1259,6 +1292,59 @@ fn key_input(key: u16, flags: u32) -> windows_sys::Win32::UI::Input::KeyboardAnd
 pub struct SystemWindows;
 
 impl WindowsApi for SystemWindows {
+    fn target_app(&mut self, target: Option<WindowTarget>) -> Option<String> {
+        #[cfg(windows)]
+        {
+            use windows_sys::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+            let hwnd = match target {
+                Some(target) if target.0 != 0 => target.0 as windows_sys::Win32::Foundation::HWND,
+                _ => unsafe { GetForegroundWindow() },
+            };
+            window_exe_name(hwnd)
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let _ = target;
+            // The overlay never takes focus, so the frontmost app is the target.
+            let output = std::process::Command::new("osascript")
+                .args(["-e", r#"tell application "System Events" to get name of first application process whose frontmost is true"#])
+                .output()
+                .ok()?;
+            let name = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+            (output.status.success() && !name.is_empty()).then_some(name)
+        }
+        #[cfg(all(unix, not(target_os = "macos")))]
+        {
+            let _ = target;
+            let output = std::process::Command::new("xdotool").args(["getactivewindow", "getwindowpid"]).output().ok()?;
+            let pid: u32 = String::from_utf8_lossy(&output.stdout).trim().parse().ok()?;
+            let name = std::fs::read_to_string(format!("/proc/{pid}/comm")).ok()?;
+            Some(name.trim().to_owned()).filter(|name| !name.is_empty())
+        }
+    }
+
+    fn send_enter(&mut self) -> Result<(), PlatformError> {
+        // Let the target take in the pasted text before the key arrives.
+        std::thread::sleep(std::time::Duration::from_millis(120));
+        #[cfg(windows)]
+        {
+            use windows_sys::Win32::UI::Input::KeyboardAndMouse::{KEYEVENTF_KEYUP, VK_RETURN};
+            send_inputs_with_hold(&[key_input(VK_RETURN, 0)], &[key_input(VK_RETURN, KEYEVENTF_KEYUP)])
+        }
+        #[cfg(target_os = "macos")]
+        {
+            macos_keystroke(r#"tell application "System Events" to key code 36"#)
+        }
+        #[cfg(all(unix, not(target_os = "macos")))]
+        {
+            xdotool_key("Return")
+        }
+        #[cfg(not(any(windows, target_os = "macos", all(unix, not(target_os = "macos")))))]
+        {
+            Ok(())
+        }
+    }
+
     fn paste_keys_released(&mut self, shortcut: Option<&Shortcut>) -> Result<bool, PlatformError> {
         if !self.modifiers_released()? { return Ok(false); }
         match shortcut { Some(shortcut) => Ok(!shortcut.key_state()?.main_down), None => Ok(true) }

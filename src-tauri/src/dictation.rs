@@ -251,6 +251,21 @@ pub struct AppSettings {
     /// and meetings are never touched.
     #[serde(default)]
     pub media_during_dictation: crate::media::MediaMode,
+    /// How much hesitation ("yyy", "to to") is taken out of the text.
+    #[serde(default)]
+    pub filler_removal: crate::textops::FillerLevel,
+    /// "nowa linia", "nowy akapit", "skasuj to", "wyślij" act instead of
+    /// being written.
+    #[serde(default = "default_voice_commands")]
+    pub voice_commands: bool,
+    #[serde(default)]
+    pub snippets: Vec<crate::textops::Snippet>,
+    #[serde(default)]
+    pub app_profiles: Vec<crate::textops::AppProfile>,
+}
+
+const fn default_voice_commands() -> bool {
+    true
 }
 
 const fn default_launch_on_login() -> bool {
@@ -322,6 +337,10 @@ impl Default for AppSettings {
             model_keep_alive_secs: 0,
             paste_mode: PasteMode::default(),
             media_during_dictation: crate::media::MediaMode::default(),
+            filler_removal: crate::textops::FillerLevel::default(),
+            voice_commands: default_voice_commands(),
+            snippets: Vec::new(),
+            app_profiles: Vec::new(),
         }
     }
 }
@@ -2095,6 +2114,16 @@ fn complete_take(state: &AppState, take: &FrozenTake, audio_path: &Path, result:
     // Silence stays silence: nothing is delivered for an empty final.
     let transcript = if result.text.trim().is_empty() { String::new() }
         else { finish_transcript(&result.text, &VocabularyEntry::matcher(&take.vocabulary).protect(state.storage.everyday_words())) };
+    // Fillers, spoken commands, snippets and the target app's profile. The
+    // app is only looked up when a profile could use it.
+    let app = if take.settings.app_profiles.is_empty() { None } else { windows.target_app(take.target) };
+    let polished = crate::textops::polish(&transcript, &crate::textops::Options {
+        fillers: take.settings.filler_removal,
+        commands: take.settings.voice_commands,
+        snippets: &take.settings.snippets,
+        profile: crate::textops::profile_for(&take.settings.app_profiles, app.as_deref()),
+    });
+    let transcript = polished.text;
     let mut delivery = Ok(());
     complete_transcription_durably(&state.machine, state.storage.as_ref(), DurableTranscript {
         recording_id: &take.recording_id, audio_path: &audio_path.to_string_lossy(), transcript: &transcript,
@@ -2104,7 +2133,8 @@ fn complete_take(state: &AppState, take: &FrozenTake, audio_path: &Path, result:
             match &release {
                 Ok(()) => {
                     if let Ok(mut until) = state.suppress_shortcut_until.lock() { *until = Some(Instant::now() + Duration::from_secs(2)); }
-                    let result = platform::copy_and_paste_cancellable(windows, take.target, &transcript, take.settings.paste_mode, shortcut.as_ref(), || !take.owns(state));
+                    let mut result = platform::copy_and_paste_cancellable(windows, take.target, &transcript, take.settings.paste_mode, shortcut.as_ref(), || !take.owns(state));
+                    if result.is_ok() && polished.press_enter && take.owns(state) { result = windows.send_enter(); }
                     if let Ok(mut until) = state.suppress_shortcut_until.lock() { *until = Some(Instant::now() + Duration::from_millis(250)); }
                     result
                 }
@@ -3324,6 +3354,7 @@ pub fn update_settings(
     if crate::models::spec(&settings.model).is_none() {
         return Err(format!("Nieznany model: {}.", settings.model));
     }
+    crate::textops::validate(&mut settings.snippets, &mut settings.app_profiles)?;
     let _update_guard = state
         .settings_update
         .lock()

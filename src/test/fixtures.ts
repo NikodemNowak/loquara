@@ -61,6 +61,10 @@ export const settings: AppSettings = {
   modelKeepAliveSecs: 0,
   pasteMode: "auto",
   mediaDuringDictation: "muffle",
+  fillerRemoval: "light",
+  voiceCommands: true,
+  snippets: [],
+  appProfiles: [],
 };
 export const snapshot: AppSnapshot = {
   dictation: { status: "idle" },

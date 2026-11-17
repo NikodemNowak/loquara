@@ -18,6 +18,10 @@ const fallbackSettings: AppSettings = {
   modelKeepAliveSecs: 0,
   pasteMode: "auto",
   mediaDuringDictation: "muffle",
+  fillerRemoval: "light",
+  voiceCommands: true,
+  snippets: [],
+  appProfiles: [],
 };
 export function useAppModel(adapter: AppAdapter, onError: (message: string) => void) {
   const [snapshot, setSnapshot] = useState<AppSnapshot>({

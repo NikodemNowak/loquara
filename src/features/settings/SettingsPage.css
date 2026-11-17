@@ -101,3 +101,19 @@
 .settings-page .settings-microphones__actions { display:flex; flex-wrap:wrap; gap:10px; }
 .settings-page .settings-microphones__favorites { counter-reset:favorite; }
 .settings-page .settings-microphones__favorites li > span::before { counter-increment:favorite; content:counter(favorite) ". "; font-variant-numeric:tabular-nums; }
+
+/* Text tab: snippets and app profiles */
+.settings-page .text-rules { list-style:none; margin:0 0 12px; padding:0; border:1px solid var(--border); border-radius:8px; }
+.settings-page .text-rule { display:flex; align-items:center; gap:12px; padding:9px 8px 9px 12px; }
+.settings-page .text-rule + .text-rule { border-top:1px solid var(--border); }
+.settings-page .text-rule__main { display:flex; flex-direction:column; flex:1 1 auto; min-width:0; }
+.settings-page .text-rule__main strong { color:var(--text); font-size:13px; font-weight:500; }
+.settings-page .text-rule__main small { color:var(--muted); font-size:12px; white-space:pre-wrap; overflow-wrap:anywhere; max-height:3.6em; overflow:hidden; }
+.settings-page .text-rule__options { display:flex; flex-wrap:wrap; gap:4px 14px; color:var(--muted); font-size:12px; }
+.settings-page .text-rule__options label { display:inline-flex; align-items:center; gap:6px; cursor:pointer; }
+.settings-page .text-rule-form { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:8px; }
+.settings-page .text-rule-form textarea { grid-column:1 / -1; grid-row:2; resize:vertical; }
+.settings-page .text-rule-form input,.settings-page .text-rule-form textarea { min-width:0; padding:8px 10px; border:1px solid var(--border); border-radius:7px; color:var(--text); background:var(--surface-raised); font:inherit; font-size:13px; }
+.settings-page .text-rule-form > button { grid-column:2; grid-row:1; }
+.settings-page .settings-empty { margin:0 0 10px; color:var(--muted); font-size:13px; }
+@media (max-width: 640px) { .settings-page .text-rule--profile { flex-wrap:wrap; } }

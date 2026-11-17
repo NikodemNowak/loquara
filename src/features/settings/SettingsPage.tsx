@@ -5,6 +5,7 @@ import "./SettingsPage.css";
 import { BrandLogo } from "../../components/BrandLogo";
 import { ConfirmDialog } from "../../components/ConfirmDialog";
 import { ShortcutCapture } from "./ShortcutCapture";
+import { TextSettings } from "./TextSettings";
 import { Select } from "../../components/Select";
 import type { ToastKind } from "../../components/Toast";
 import type { AppAdapter } from "../../lib/tauri";
@@ -50,7 +51,7 @@ export function SettingsPage({
 }) {
   const { t } = useI18n();
   const [settings, setSettings] = useState(initialSettings);
-  const [tab, setTab] = useState<"dictation" | "models" | "app">("dictation");
+  const [tab, setTab] = useState<"dictation" | "text" | "models" | "app">("dictation");
   const [devices, setDevices] = useState<InputDeviceInfo[]>([]);
   const [deviceError, setDeviceError] = useState("");
   const [devicesLoading, setDevicesLoading] = useState(true);
@@ -246,10 +247,10 @@ export function SettingsPage({
         <h1>{t("settings.title")}</h1>
 
       <div className="settings-tabs" role="tablist" aria-label={t("settings.tabs")}>
-        {(["dictation", "models", "app"] as const).map((item) => <button type="button" key={item} id={`settings-tab-${item}`}
+        {(["dictation", "text", "models", "app"] as const).map((item) => <button type="button" key={item} id={`settings-tab-${item}`}
           role="tab" aria-selected={tab === item} aria-controls={`settings-panel-${item}`} tabIndex={tab === item ? 0 : -1}
           onClick={() => setTab(item)} onKeyDown={(event) => {
-            const items = ["dictation", "models", "app"] as const;
+            const items = ["dictation", "text", "models", "app"] as const;
             const index = items.indexOf(item);
             const next = event.key === "ArrowRight" ? items[(index + 1) % items.length]
               : event.key === "ArrowLeft" ? items[(index + items.length - 1) % items.length]
@@ -533,6 +534,7 @@ export function SettingsPage({
           </label>
           </div>
         </section> : null}
+        {tab === "text" ? <TextSettings settings={settings} save={save} /> : null}
         {tab === "app" ? <section className="settings-group settings-group--composed">
           <div className="group-heading"><h2>{t("settings.app.startup.title")}</h2><p>{t("settings.app.startup.help")}</p></div>
           <div className="settings-controls">
