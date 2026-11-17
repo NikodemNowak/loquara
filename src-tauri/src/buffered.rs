@@ -99,8 +99,16 @@ mod tests {
 pub struct LocalPreview {
     consumed: u64,
     committed: String,
+    rebase: Option<(String, u64)>,
 }
 impl LocalPreview {
+    /// Replaces the preview's committed prefix with final text that covers
+    /// the capture up to `consumed` (16 kHz samples from the start), so the
+    /// preview shows final windows and only previews what follows them.
+    /// Applied on the next update if that point is still in the buffer.
+    pub fn rebase(&mut self, committed: String, consumed: u64) {
+        self.rebase = Some((committed, consumed));
+    }
     pub fn update(
         &mut self,
         generation: u64,
@@ -108,6 +116,13 @@ impl LocalPreview {
         mut decode: impl FnMut(&[f32]) -> Result<String, String>,
     ) -> Result<String, String> {
         let first_retained = generation.saturating_sub(samples.len() as u64);
+        if let Some((committed, consumed)) = self.rebase.take()
+            && consumed >= first_retained
+            && consumed <= generation
+        {
+            self.committed = committed;
+            self.consumed = consumed;
+        }
         if first_retained > self.consumed {
             return Err("local preview fell behind; using complete recording".into());
         }
@@ -188,6 +203,24 @@ mod long_preview_tests {
                 ))
                 .is_err()
         );
+    }
+    #[test]
+    fn final_windows_replace_the_preview_prefix_and_only_the_rest_is_previewed() {
+        let mut preview = LocalPreview::default();
+        let mut buffer = PreviewBuffer::default();
+        buffer.push(&vec![1000; 16_000 * 8]);
+        let (n, samples) = buffer.snapshot();
+        assert_eq!(preview.update(n, &samples, |_| Ok("draft".into())).unwrap(), "draft");
+        buffer.push(&vec![1000; 16_000 * 4]);
+        preview.rebase("Final window.".into(), 16_000 * 10);
+        let (n, samples) = buffer.snapshot();
+        let text = preview
+            .update(n, &samples, |chunk| {
+                assert_eq!(chunk.len(), 16_000 * 2, "only audio after the final window is previewed");
+                Ok("tail".into())
+            })
+            .unwrap();
+        assert_eq!(text, "Final window. tail");
     }
     #[test]
     fn long_uninterrupted_speech_falls_back_before_losing_words() {

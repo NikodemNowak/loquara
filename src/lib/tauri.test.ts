@@ -29,12 +29,20 @@ describe("adapter demonstracyjny", () => {
     const second = createBrowserAdapter();
     const before = await second.listVocabulary();
 
-    await first.addVocabulary("parakit", "Parakeet");
+    await first.addVocabulary("Claude", ["kloda"]);
 
     expect(await second.listVocabulary()).toEqual(before);
     const history = await first.listHistory({});
     expect(history.length).toBeGreaterThan(2);
     expect(history.some((item) => item.text?.includes("spotkania"))).toBe(true);
+  });
+
+  test("dodanie istniejącego słowa scala warianty w ten sam wpis", async () => {
+    const adapter = createBrowserAdapter();
+    const first = await adapter.addVocabulary("Claude", ["kloda"]);
+    const merged = await adapter.addVocabulary("claude", ["klod", "kloda"]);
+    expect(merged).toEqual({ id: first.id, term: "Claude", aliases: ["kloda", "klod"] });
+    expect((await adapter.listVocabulary()).filter(({ term }) => term === "Claude")).toHaveLength(1);
   });
 
   test("normalizuje obiektowy błąd platformy i zachowuje zgodność ze stringiem", () => {
@@ -58,13 +66,13 @@ test("browser snapshot includes engine metadata and publishes bounded scoped syn
   vi.useFakeTimers();
   try {
     const adapter = createBrowserAdapter();
-    expect(await adapter.getAppSnapshot()).toMatchObject({ model: { installed: true, source: "local", key: "parakeet" } });
+    expect(await adapter.getAppSnapshot()).toMatchObject({ model: { installed: true, key: "parakeet" } });
     const events: unknown[] = [];
     const dispose = await adapter.onState((state) => events.push(state));
     const started = await adapter.startRecording();
     const id = started.dictation.status === "recording" ? started.dictation.recordingId : "";
     vi.advanceTimersByTime(2500);
-    expect(await adapter.getAppSnapshot()).toMatchObject({ liveTranscript: { recordingId: id, revision: 3, status: "draft", clipboardReady: false } });
+    expect(await adapter.getAppSnapshot()).toMatchObject({ liveTranscript: { recordingId: id, revision: 3, status: "draft" } });
     expect(events).toHaveLength(4);
     await adapter.cancelRecording();
     vi.advanceTimersByTime(10000);
@@ -91,7 +99,7 @@ test("cancelling during synthetic finalization prevents late history publication
 test("browser model catalogue matches the shipped int8 Parakeet engine", async () => {
   const models = await createBrowserAdapter().listModels();
   expect(models).toHaveLength(1);
-  expect(models[0]).toMatchObject({ key: "parakeet", estimatedSizeBytes: 670_478_772, installedSizeBytes: 670_478_772, minVramGb: 0, minRamGb: 2 });
+  expect(models[0]).toMatchObject({ key: "parakeet", estimatedSizeBytes: 1_020_355_800, installedSizeBytes: 1_020_355_800, minVramGb: 0, minRamGb: 2 });
 });
 
 

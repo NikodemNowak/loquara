@@ -1,7 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { Check, Trash2 } from "../../components/Icons";
-import { Logo } from "../../components/Logo";
 import "./SettingsPage.css";
 import { BrandLogo } from "../../components/BrandLogo";
 import { ConfirmDialog } from "../../components/ConfirmDialog";
@@ -9,12 +8,12 @@ import { ShortcutCapture } from "./ShortcutCapture";
 import { Select } from "../../components/Select";
 import type { ToastKind } from "../../components/Toast";
 import type { AppAdapter } from "../../lib/tauri";
-import type { AppSettings, CloudProviderInfo, DownloadStatus, InputDeviceInfo, ModelDescriptor, ModelDownloadProgress, ModelStatus, PasteMode, TranscriptionSource } from "../../lib/types";
+import type { AppSettings, DownloadStatus, InputDeviceInfo, MediaDuringDictation, ModelDescriptor, ModelDownloadProgress, ModelStatus, PasteMode } from "../../lib/types";
 import { realtimeEnabled, realtimeEngineKey } from "../../lib/types";
 import { microphoneChoices, microphonePreferences } from "../../lib/microphones";
 import { normalizeError } from "../../lib/errors";
 import { formatBytes as formatSize } from "../../lib/bytes";
-import { useI18n, type TranslationKey } from "../../lib/i18n";
+import { useI18n } from "../../lib/i18n";
 
 function ProviderMark({ provider }: { provider: string }) {
   return <span className={`provider-mark provider-mark--${provider.toLowerCase()}`} aria-label={provider} title={provider}>
@@ -31,32 +30,6 @@ function ProviderMark({ provider }: { provider: string }) {
  */
 const SYSTEM_DEFAULT_DEVICE = "loquara:system-default";
 const UNRESOLVED_DEVICE = "loquara:unresolved";
-
-/**
- * Languages the cloud engines take as a hint.
- *
- * Short on purpose: this only nudges formatting and punctuation, and every
- * provider accepts "auto" when the speaker is somewhere else entirely.
- */
-const CLOUD_LANGUAGES = ["auto", "pl", "en", "de", "fr", "es", "it"] as const;
-
-const CLOUD_LANGUAGE_LABELS: Record<(typeof CLOUD_LANGUAGES)[number], TranslationKey> = {
-  auto: "settings.cloud.language.auto",
-  pl: "settings.cloud.language.pl",
-  en: "settings.cloud.language.en",
-  de: "settings.cloud.language.de",
-  fr: "settings.cloud.language.fr",
-  es: "settings.cloud.language.es",
-  it: "settings.cloud.language.it",
-};
-
-/**
- * Stands for "write the model id myself" in the model dropdown.
- *
- * The empty string cannot be used: the dropdown reserves it to mean "no value
- * selected", so an option carrying it renders blank.
- */
-const CUSTOM_MODEL = "loquara:custom-model";
 
 export function SettingsPage({
   adapter,
@@ -95,27 +68,6 @@ export function SettingsPage({
   const [deleting, setDeleting] = useState("");
   const [pendingDelete, setPendingDelete] = useState<ModelDescriptor>();
   const [downloadProgress, setDownloadProgress] = useState<ModelDownloadProgress>();
-  const [providers, setProviders] = useState<CloudProviderInfo[]>([]);
-  const [providersLoading, setProvidersLoading] = useState(true);
-  const [providersError, setProvidersError] = useState("");
-  const [providersRetry, setProvidersRetry] = useState(0);
-  const [cloudKeys, setCloudKeys] = useState<string[]>([]);
-  const [keysLoading, setKeysLoading] = useState(true);
-  const [keysError, setKeysError] = useState("");
-  const [keysRetry, setKeysRetry] = useState(0);
-  const [apiKeyDraft, setApiKeyDraft] = useState("");
-  const [keyBusy, setKeyBusy] = useState(false);
-  const [testing, setTesting] = useState(false);
-  // The model and address fields write on blur rather than on every key: a
-  // save per character would rewrite the database while the user types.
-  const [modelDraft, setModelDraft] = useState("");
-  const [baseUrlDraft, setBaseUrlDraft] = useState("");
-  const [fetchedModels, setFetchedModels] = useState<string[]>([]);
-  const [fetchingModels, setFetchingModels] = useState(false);
-  const [fetchModelsMessage, setFetchModelsMessage] = useState("");
-  const [fetchModelsFailed, setFetchModelsFailed] = useState(false);
-  const modelFetchAttempt = useRef(0);
-  const [customModel, setCustomModel] = useState(false);
 
   const formatBytes = (bytes: number | null | undefined) =>
     formatSize(bytes, t("settings.models.notDownloadedBytes"));
@@ -175,43 +127,6 @@ export function SettingsPage({
       const vramGb = 0;
       setSystemMemory({ vramGb, ramGb, cpuCores: navigator.hardwareConcurrency ?? 0 });
   }, []);
-
-  useEffect(() => {
-    let active = true;
-    setProvidersLoading(true);
-    setProvidersError("");
-    void adapter.listCloudProviders()
-      .then((loaded) => { if (active) setProviders(loaded); })
-      .catch((error) => { if (active) setProvidersError(normalizeError(error)); })
-      .finally(() => { if (active) setProvidersLoading(false); });
-    return () => { active = false; };
-  }, [adapter, providersRetry]);
-
-  useEffect(() => {
-    let active = true;
-    setKeysLoading(true);
-    setKeysError("");
-    void adapter.listCloudKeys()
-      .then((loaded) => { if (active) setCloudKeys(loaded); })
-      .catch((error) => { if (active) setKeysError(normalizeError(error)); })
-      .finally(() => { if (active) setKeysLoading(false); });
-    return () => { active = false; };
-  }, [adapter, keysRetry]);
-
-  useEffect(() => {
-    modelFetchAttempt.current += 1;
-    setFetchedModels([]);
-    setFetchingModels(false);
-    setFetchModelsMessage("");
-    setFetchModelsFailed(false);
-    return () => { modelFetchAttempt.current += 1; };
-  }, [settings.cloudProvider, settings.cloudBaseUrl, adapter]);
-
-  // Credentials belong to the provider; changing its endpoint must preserve
-  // a key the user has typed but has not explicitly saved yet.
-  useEffect(() => {
-    setApiKeyDraft("");
-  }, [settings.cloudProvider, adapter]);
 
   useEffect(() => {
     let active = true;
@@ -314,146 +229,7 @@ export function SettingsPage({
     }
   };
 
-  const source: TranscriptionSource = settings.transcriptionSource ?? "local";
-  const provider = providers.find((item) => item.key === settings.cloudProvider);
-  // Empty settings mean "whatever the provider calls its current model".
-  const effectiveModel = settings.cloudModel || provider?.defaultModel || "";
-  const realtimeSupported = source === "local" ? settings.model === "parakeet" : Boolean(provider?.streaming);
-  const keyStored = cloudKeys.includes(settings.cloudProvider);
-  // Presets and anything the provider itself listed, without duplicates.
-  const modelOptions = useMemo(
-    () => Array.from(new Set([...(provider?.models ?? []), ...fetchedModels])),
-    [provider, fetchedModels],
-  );
-
-  // A model that is not on the list was typed by hand, so it keeps the text
-  // field rather than looking like a value the dropdown lost.
-  useEffect(() => {
-    if (settings.cloudModel && modelOptions.length && !modelOptions.includes(settings.cloudModel)) {
-      setCustomModel(true);
-    }
-  }, [settings.cloudModel, modelOptions]);
-
-  // The drafts follow the saved values, so a change made elsewhere — or a
-  // provider switch that resets the model — lands in the fields too.
-  useEffect(() => {
-    setModelDraft(effectiveModel);
-  }, [effectiveModel]);
-  useEffect(() => {
-    setBaseUrlDraft(settings.cloudBaseUrl);
-  }, [settings.cloudBaseUrl]);
-
-  const changeProvider = (key: string) => {
-    const chosen = providers.find((item) => item.key === key);
-    modelFetchAttempt.current += 1;
-    setFetchedModels([]);
-    setCustomModel(false);
-    void save({
-      cloudProvider: key,
-      cloudModel: chosen?.defaultModel ?? "",
-      cloudBaseUrl: "",
-    });
-  };
-
-  const fetchModels = async () => {
-    const attempt = ++modelFetchAttempt.current;
-    const owner = { provider: latest.current.cloudProvider, baseUrl: latest.current.cloudBaseUrl };
-    const isCurrent = () => attempt === modelFetchAttempt.current
-      && owner.provider === latest.current.cloudProvider
-      && owner.baseUrl === latest.current.cloudBaseUrl;
-    setFetchingModels(true);
-    setFetchModelsMessage("");
-    setFetchModelsFailed(false);
-    try {
-      const models = await adapter.listCloudModels();
-      if (!isCurrent()) return;
-      setFetchedModels(models);
-      if (!models.length) {
-        setFetchModelsMessage(t("settings.cloud.model.fetchEmpty"));
-        onToast(t("settings.cloud.model.fetchEmpty"), "info");
-        return;
-      }
-      onToast(t("settings.cloud.model.fetched", { count: models.length }), "success");
-    } catch (error) {
-      if (!isCurrent()) return;
-      const message = t("settings.cloud.model.fetchError", { error: normalizeError(error) });
-      setFetchModelsMessage(message);
-      setFetchModelsFailed(true);
-      onToast(message, "error");
-    } finally {
-      if (isCurrent()) setFetchingModels(false);
-    }
-  };
-
-  const chooseModel = (next: string) => {
-    if (next === CUSTOM_MODEL) {
-      setCustomModel(true);
-      return;
-    }
-    setCustomModel(false);
-    setModelDraft(next);
-    void save({ cloudModel: next });
-  };
-
-  const commitModel = () => {
-    const next = modelDraft.trim();
-    if (next !== settings.cloudModel) void save({ cloudModel: next });
-  };
-
-  const commitBaseUrl = () => {
-    const next = baseUrlDraft.trim();
-    if (next !== settings.cloudBaseUrl) void save({ cloudBaseUrl: next });
-  };
-
-  const saveApiKey = async () => {
-    if (!apiKeyDraft.trim()) return;
-    const owner = settings.cloudProvider;
-    setKeyBusy(true);
-    try {
-      setCloudKeys(await adapter.setCloudApiKey(owner, apiKeyDraft));
-      setKeysError("");
-      if (latest.current.cloudProvider === owner) setApiKeyDraft("");
-      onToast(t("settings.cloud.key.saved"), "success");
-    } catch (error) {
-      onToast(t("settings.cloud.key.error", { error: normalizeError(error) }), "error");
-    } finally {
-      setKeyBusy(false);
-    }
-  };
-
-  const clearApiKey = async () => {
-    const owner = settings.cloudProvider;
-    setKeyBusy(true);
-    try {
-      setCloudKeys(await adapter.clearCloudApiKey(owner));
-      setKeysError("");
-      if (latest.current.cloudProvider === owner) setApiKeyDraft("");
-      onToast(t("settings.cloud.key.cleared"), "info");
-    } catch (error) {
-      onToast(t("settings.cloud.key.error", { error: normalizeError(error) }), "error");
-    } finally {
-      setKeyBusy(false);
-    }
-  };
-
-  const testCloud = async () => {
-    setTesting(true);
-    try {
-      const answer = await adapter.testCloudTranscription();
-      const seconds = (answer.elapsedMs / 1000).toFixed(1);
-      onToast(
-        answer.text.trim()
-          ? t("settings.cloud.testOk", { seconds, text: answer.text.trim() })
-          : t("settings.cloud.testOkEmpty", { seconds }),
-        "success",
-      );
-    } catch (error) {
-      onToast(t("settings.cloud.testError", { error: normalizeError(error) }), "error");
-    } finally {
-      setTesting(false);
-    }
-  };
-
+  const realtimeSupported = settings.model === "parakeet";
   const selectedModel = models.find((model) => model.key === settings.model);
   const selectedState = modelStatus?.state ?? selectedModel?.status;
   const selectedStatusLabel = !modelStatus
@@ -485,144 +261,7 @@ export function SettingsPage({
       <div className="settings-column" role="tabpanel" id={`settings-panel-${tab}`} aria-labelledby={`settings-tab-${tab}`}>
 
         {tab === "models" ? <section className="settings-group settings-models">
-          <div className="settings-source segment" role="radiogroup" aria-label={t("settings.cloud.source.label")}>
-            {([["local", "settings.cloud.source.local"], ["cloud", "settings.cloud.source.cloud"]] as const).map(([value, label]) => (
-              <label key={value}>
-                <input type="radio" name="transcription-source" aria-label={t(label)} aria-describedby="settings-source-privacy" checked={source === value} onChange={() => void save({ transcriptionSource: value })} />
-                <span>{t(label)}</span>
-              </label>
-            ))}
-          </div>
-          <p className="settings-source-privacy" id="settings-source-privacy">
-            {source === "local" ? t("settings.privacy.body") : t("settings.cloud.privacy", { provider: provider?.display ?? settings.cloudProvider })}
-          </p>
-          {source === "cloud" ? (
-            <div className="cloud-panel">
-              {providersLoading ? <p className="settings-feedback" role="status">{t("settings.models.checking")}</p> : providersError || !providers.length ? <div className={`settings-feedback ${providersError ? "settings-feedback--error" : ""}`} role={providersError ? "alert" : "status"}><span>{providersError ? t("settings.cloud.providers.error", { error: providersError }) : t("settings.cloud.providers.empty")}</span><button className="text-button" type="button" onClick={() => setProvidersRetry((value) => value + 1)}>{t("settings.retry")}</button></div> : null}
-              <label className="setting-row cloud-provider-row">
-                <span><strong>{t("settings.cloud.provider.label")}</strong><small>{t("settings.cloud.provider.description")}</small></span>
-                <Select
-                  label={t("settings.cloud.provider.label")}
-                  value={settings.cloudProvider}
-                  onChange={changeProvider}
-                  disabled={providersLoading || Boolean(providersError) || !providers.length}
-                  options={providers.map((item) => ({ value: item.key, label: item.display }))}
-                />
-              </label>
-              <div className="setting-row cloud-model-row">
-                <span><strong>{t("settings.cloud.model.label")}</strong><small>{t("settings.cloud.model.description")}</small></span>
-                <div className="cloud-model">
-                  {customModel ? (
-                    <input
-                      value={modelDraft}
-                      placeholder={provider?.defaultModel || t("settings.cloud.model.placeholder")}
-                      aria-label={t("settings.cloud.model.label")}
-                      onChange={(event) => setModelDraft(event.target.value)}
-                      onBlur={commitModel}
-                      onKeyDown={(event) => { if (event.key === "Enter") event.currentTarget.blur(); }}
-                    />
-                  ) : (
-                    <Select
-                      label={t("settings.cloud.model.label")}
-                      value={effectiveModel}
-                      onChange={chooseModel}
-                      options={[
-                        ...modelOptions.map((model) => ({ value: model, label: model })),
-                        { value: CUSTOM_MODEL, label: t("settings.cloud.model.custom") },
-                      ]}
-                    />
-                  )}
-                  <div className="cloud-model__actions">
-                    {provider?.listsModels ? (
-                      <button
-                        type="button"
-                        className="text-button"
-                        disabled={fetchingModels || keysLoading || Boolean(keysError) || !keyStored}
-                        onClick={() => void fetchModels()}
-                      >
-                        {fetchingModels ? <><Logo size={15} motion="loading" />{t("settings.cloud.model.fetching")}</> : t(fetchModelsFailed ? "settings.retry" : "settings.cloud.model.fetch")}
-                      </button>
-                    ) : null}
-                    {customModel ? (
-                      <button type="button" className="text-button" onClick={() => setCustomModel(false)}>
-                        {t("settings.cloud.model.pick")}
-                      </button>
-                    ) : null}
-                  </div>
-                  {fetchModelsMessage ? <small className={fetchModelsFailed ? "settings-feedback--error" : ""} role={fetchModelsFailed ? "alert" : "status"}>{fetchModelsMessage}</small> : null}
-                </div>
-              </div>
-              {provider?.custom ? (
-                <label className="setting-row">
-                  <span><strong>{t("settings.cloud.baseUrl.label")}</strong><small>{t("settings.cloud.baseUrl.description")}</small></span>
-                  <input
-                    value={baseUrlDraft}
-                    placeholder="https://api.example.com/v1"
-                    aria-label={t("settings.cloud.baseUrl.label")}
-                    onChange={(event) => setBaseUrlDraft(event.target.value)}
-                    onBlur={commitBaseUrl}
-                    onKeyDown={(event) => { if (event.key === "Enter") event.currentTarget.blur(); }}
-                  />
-                </label>
-              ) : null}
-              <label className="setting-row cloud-language-row">
-                <span><strong>{t("settings.cloud.language.label")}</strong><small>{t("settings.cloud.language.description")}</small></span>
-                <Select
-                  label={t("settings.cloud.language.label")}
-                  value={settings.cloudLanguage || "auto"}
-                  onChange={(next) => void save({ cloudLanguage: next === "auto" ? "" : next })}
-                  options={CLOUD_LANGUAGES.map((code) => ({ value: code, label: t(CLOUD_LANGUAGE_LABELS[code]) }))}
-                />
-              </label>
-              <div className="setting-row cloud-key-row">
-                <span>
-                  <strong>{t("settings.cloud.key.label")}</strong>
-                  <small>{keysLoading ? t("settings.models.checking") : !keysError ? keyStored ? t("settings.cloud.key.present") : t("settings.cloud.key.description") : null}</small>
-                </span>
-                <div className="cloud-key">
-                  <input
-                    type="password"
-                    value={apiKeyDraft}
-                    placeholder={t("settings.cloud.key.placeholder")}
-                    aria-label={t("settings.cloud.key.label")}
-                    onChange={(event) => setApiKeyDraft(event.target.value)}
-                    onKeyDown={(event) => { if (event.key === "Enter") void saveApiKey(); }}
-                  />
-                  <button
-                    type="button"
-                    className="secondary-button"
-                    disabled={keyBusy || !apiKeyDraft.trim()}
-                    onClick={() => void saveApiKey()}
-                  >
-                    {keyBusy ? <><Logo size={15} motion="loading" />{t("settings.cloud.key.saving")}</> : t("settings.cloud.key.save")}
-                  </button>
-                  {keyStored ? (
-                    <button
-                      type="button"
-                      className="text-button"
-                      disabled={keyBusy}
-                      onClick={() => void clearApiKey()}
-                    >
-                      {t("settings.cloud.key.clear")}
-                    </button>
-                  ) : null}
-                </div>
-              </div>
-              {keysError ? <div className="settings-feedback settings-feedback--error cloud-keys-error" role="alert"><span>{t("settings.cloud.keys.error", { error: keysError })}</span><button className="text-button" type="button" onClick={() => setKeysRetry((value) => value + 1)}>{t("settings.retry")}</button></div> : null}
-              <div className="setting-row cloud-test-row">
-                <span><strong>{t("settings.cloud.test.label")}</strong><small>{t("settings.cloud.test.description")}</small></span>
-                <button
-                  type="button"
-                  className="secondary-button"
-                  disabled={testing || keysLoading || Boolean(keysError) || !keyStored}
-                  onClick={() => void testCloud()}
-                >
-                  {testing ? <><Logo size={15} motion="loading" />{t("settings.cloud.testing")}</> : t("settings.cloud.test")}
-                </button>
-              </div>
-            </div>
-          ) : (
-          <>
+          <p className="settings-source-privacy" id="settings-source-privacy">{t("settings.privacy.body")}</p>
           {modelsLoading ? <p className="settings-feedback" role="status">{t("settings.models.checking")}</p>
             : modelsError ? <div className="settings-feedback settings-feedback--error" role="alert"><span>{t("settings.models.loadError", { error: modelsError })}</span><button className="text-button" type="button" onClick={() => setModelsRetry((value) => value + 1)}>{t("settings.retry")}</button></div>
             : !models.length ? <div className="settings-feedback" role="status"><span>{t("settings.models.empty")}</span><button className="text-button" type="button" onClick={() => setModelsRetry((value) => value + 1)}>{t("settings.retry")}</button></div> : null}
@@ -677,7 +316,6 @@ export function SettingsPage({
                   <span className="model-option__meta">
                     <span className={`model-option__status model-option__status--${model.status}`}>
                       <i aria-hidden="true" />
-                      {model.source === "cloud" ? `${t("settings.models.source.cloud")} · ` : ""}
                       {model.status === "ready" ? t("settings.models.status.downloaded") : model.status === "error" ? t("common.error") : t("settings.models.status.notDownloaded")}
                     </span>
                     {!installed && !disabled ? (
@@ -749,8 +387,6 @@ export function SettingsPage({
           </label>
             </div>
           </section>
-          </>
-          )}
         </section> : null}
         {tab === "dictation" ? <section className="settings-shortcut">
           <div className="settings-shortcut__copy"><h2>{t("settings.shortcut.title")}</h2><p>{t(settings.activationMode === "push_to_talk" ? "settings.shortcut.holdHelp" : "settings.shortcut.help")}</p></div>
@@ -843,15 +479,29 @@ export function SettingsPage({
             <input type="checkbox" aria-label={t("settings.realtime.label")} checked={realtimeEnabled(settings, realtimeSupported)} disabled={!realtimeSupported}
               onChange={(event) => void save({ realtimeByEngine: { ...latest.current.realtimeByEngine, [realtimeEngineKey(latest.current)]: event.target.checked } })} />
           </label>
+          <label className="setting-row">
+            <span><strong>{t("settings.media.label")}</strong><small>{t("settings.media.description")}</small></span>
+            <Select
+              label={t("settings.media.label")}
+              value={settings.mediaDuringDictation ?? "muffle"}
+              onChange={(next) => void save({ mediaDuringDictation: next as MediaDuringDictation })}
+              options={[
+                { value: "muffle", label: t("settings.media.muffle") },
+                { value: "duck", label: t("settings.media.duck") },
+                { value: "pause", label: t("settings.media.pause") },
+                { value: "off", label: t("settings.media.off") },
+              ]}
+            />
+          </label>
           <div className="settings-engine">
             <span className={`group-status group-status--${selectedState ?? "checking"}`}>
-              {source === "local" && selectedState === "ready" ? <Check size={13} /> : null}
-              <span>{source === "cloud" ? effectiveModel || provider?.display || settings.cloudProvider : selectedModel?.display ?? settings.model}</span>
-              {source === "local" ? <span className="settings-engine__status">{selectedStatusLabel}</span> : null}
+              {selectedState === "ready" ? <Check size={13} /> : null}
+              <span>{selectedModel?.display ?? settings.model}</span>
+              <span className="settings-engine__status">{selectedStatusLabel}</span>
             </span>
             <button type="button" className="text-button" onClick={() => setTab("models")}>{t("settings.manageModels")}</button>
           </div>
-          {source === "local" && modelStatus?.message && selectedState !== "ready"
+          {modelStatus?.message && selectedState !== "ready"
             ? <div className="settings-feedback settings-feedback--error" role="alert"><span>{modelStatus.message}</span><button className="text-button" type="button" onClick={() => setStatusRetry((value) => value + 1)}>{t("settings.retry")}</button></div> : null}
 
           </div>
@@ -929,17 +579,8 @@ export function SettingsPage({
           </div>
         </section> : null}
         {tab !== "dictation" && tab !== "models" ? <p className="privacy-line">
-          {source === "cloud" ? (
-            <>
-              <strong>{t("settings.privacy.cloudTitle")}</strong>
-              <span>{t("settings.privacy.cloudBody", { provider: provider?.display ?? settings.cloudProvider })}</span>
-            </>
-          ) : (
-            <>
-              <strong>{t("settings.privacy.title")}</strong>
-              <span>{t("settings.privacy.body")}</span>
-            </>
-          )}
+          <strong>{t("settings.privacy.title")}</strong>
+          <span>{t("settings.privacy.body")}</span>
         </p> : null}
       </div>
 

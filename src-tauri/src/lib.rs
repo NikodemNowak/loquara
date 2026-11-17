@@ -4,17 +4,18 @@ pub mod audio;
 pub mod microphones;
 #[cfg(windows)]
 mod windows_microphones;
-pub mod cloud;
 pub mod dictation;
 mod hold;
 pub mod domain;
+pub mod media;
 pub mod platform;
-pub mod secret;
 pub mod sound;
 pub mod streaming;
 pub mod buffered;
+pub mod progressive;
 pub mod storage;
 pub mod transcription;
+pub mod vocabulary;
 
 use crate::dictation::{AppSettings, AppState, LanguageChoice};
 use serde::{Deserialize, Serialize};
@@ -113,6 +114,15 @@ pub fn run() {
             // A transfer that was interrupted by a closing app leaves parts
             // behind; nothing resumes them, so nothing should keep them.
             let _ = models::sweep_parts(&data_dir.join("models"));
+            // The sherpa-onnx model of earlier versions is only removed once
+            // its replacement is complete, so an upgrade never leaves the
+            // user with no model at all while the new one is still missing.
+            for spec in models::CATALOGUE {
+                let directory = models::model_dir(&data_dir.join("models"), spec.key);
+                if engine::MODEL_FILES.iter().all(|name| directory.join(name).is_file()) {
+                    let _ = models::remove_legacy(&directory);
+                }
+            }
             let state = AppState::new(
                 audio::AudioRecorder::new(recordings_dir),
                 storage,
@@ -139,13 +149,21 @@ pub fn run() {
                 .read()
                 .map_err(|_| "settings lock poisoned")?
                 .launch_on_login;
-            platform::sync_autostart(app.handle(), launch_on_login)
-                .map_err(|error| error.to_string())?;
-            dictation::cleanup_retention(&state)?;
+            // None of these is worth refusing to start over: the tray, history
+            // and settings still work, and Settings can fix each of them.
+            if let Err(error) = platform::sync_autostart(app.handle(), launch_on_login) {
+                state.add_startup_warning(format!("Launch on login could not be updated: {error}"));
+            }
+            if let Err(error) = dictation::cleanup_retention(&state) {
+                eprintln!("Loquara startup: retention cleanup failed: {error}");
+            }
+            // Undo any ducking a crashed or killed previous run left behind.
+            media::MediaController::default().recover_after_crash();
             dictation::warm_up_model(app.handle(), &state);
             dictation::spawn_model_keep_alive_watchdog(&state);
-            platform::register_shortcuts(app.handle(), &shortcut)
-                .map_err(|error| error.to_string())?;
+            if let Err(error) = platform::register_shortcuts(app.handle(), &shortcut) {
+                state.add_startup_warning(format!("The shortcut {shortcut} could not be registered: {error}. Choose another one in Settings."));
+            }
 
             let settings_guard = state
                 .settings
@@ -161,6 +179,7 @@ pub fn run() {
                     "toggle" => {
                         let app = app.clone();
                         let state = app.state::<AppState>().inner().clone();
+                        // A start failure is shown on the overlay by toggle_recording.
                         tauri::async_runtime::spawn(async move {
                             let _ = dictation::toggle_recording(app, state).await;
                         });
@@ -228,11 +247,11 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            if window.label() == "main"
-                && let WindowEvent::CloseRequested { api, .. } = event
-            {
-                api.prevent_close();
-                let _ = window.hide();
+            // Closing the main window destroys it, and with it its webview
+            // renderer; the tray, a second launch or a notification build it
+            // again (platform::show_main). The app keeps running in the tray.
+            if window.label() == "main" && matches!(event, WindowEvent::CloseRequested { .. }) {
+                platform::remember_main_geometry(window);
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -262,9 +281,7 @@ pub fn run() {
             dictation::list_vocabulary,
             dictation::add_vocabulary,
             dictation::delete_vocabulary,
-            dictation::list_modes,
-            dictation::upsert_mode,
-            dictation::delete_mode,
+            dictation::vocabulary_suggestions,
             dictation::get_settings,
             dictation::get_model_status,
             dictation::list_models,
@@ -273,17 +290,21 @@ pub fn run() {
             dictation::delete_model,
             dictation::update_settings,
             dictation::update_setting_value,
-            dictation::list_cloud_providers,
-            dictation::list_cloud_keys,
-            dictation::list_cloud_models,
-            dictation::set_cloud_api_key,
-            dictation::clear_cloud_api_key,
-            dictation::test_cloud_transcription,
             dictation::system_locale,
         ])
         .build(tauri::generate_context!())
         .expect("failed to launch the Loquara app")
         .run(|app, event| {
+            // Closing windows never quits: Loquara lives in the tray, and the
+            // main window is destroyed rather than hidden when it closes. Only
+            // an explicit exit (the tray's Quit, which carries a code) ends it.
+            if let tauri::RunEvent::ExitRequested { code: None, api, .. } = &event {
+                api.prevent_exit();
+            }
+            // Quitting mid-take must not leave other apps ducked or paused.
+            if matches!(event, tauri::RunEvent::Exit) && let Some(state) = app.try_state::<AppState>() {
+                state.end_media_and_wait(std::time::Duration::from_millis(600));
+            }
             #[cfg(windows)]
             if matches!(event, tauri::RunEvent::Exit) && let Some(monitor) = app.try_state::<windows_microphones::MicrophoneMonitor>() { monitor.shutdown(); }
         });

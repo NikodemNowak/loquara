@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 
-import { normalizeError } from "./errors";
+import { errorDetail, normalizeError } from "./errors";
 
 describe("normalizeError", () => {
   test.each([
@@ -39,7 +39,28 @@ describe("normalizeError", () => {
     expect(normalizeError("Missing or empty files: config.json.")).toBe(
       "Brakujące lub puste pliki: config.json.",
     );
-    expect(normalizeError('Mode "clean" is disabled.')).toBe("Tryb „clean” jest wyłączony.");
+  });
+
+  test.each([
+    ["could not restore target focus: target unavailable; final text is in the clipboard", "Nie udało się wkleić — okno docelowe jest niedostępne. Tekst jest w schowku."],
+    [{ code: "focus_failed", message: "target unavailable; final text is in the clipboard" }, "Nie udało się wkleić — okno docelowe jest niedostępne. Tekst jest w schowku."],
+    ["paste injection failed: modifier keys are still held; final text is in the clipboard", "Nie wklejono, bo klawisze Ctrl, Alt lub Shift były wciąż wciśnięte. Tekst jest w schowku."],
+    ["paste injection failed: input desktop unavailable; final text is in the clipboard", "Nie wklejono — pulpit jest zablokowany lub niedostępny. Tekst jest w schowku."],
+    ["paste injection failed: delivery cancelled; final text is in the clipboard", "Wklejanie anulowano. Tekst jest w schowku."],
+    ["could not restore target focus: SetForegroundWindow failed", "Nie udało się wrócić do okna docelowego. Tekst jest w schowku."],
+    ["could not load the model: onnxruntime error 7", "Nie udało się wczytać modelu. Spróbuj ponownie albo pobierz model jeszcze raz w Ustawieniach."],
+    ["recording is not active", "Nagrywanie nie jest aktywne."],
+    ["audio error: recording is not active", "Nagrywanie nie jest aktywne."],
+    ["the requested operation is invalid for the current state", "Tej czynności nie można wykonać w tej chwili."],
+    ["another lifecycle operation is in progress", "Trwa inna operacja. Spróbuj ponownie za chwilę."],
+    ["recording not found", "Nie znaleziono tego nagrania."],
+  ])("lokalizuje błąd backendu %o", (input, expected) => {
+    expect(normalizeError(input)).toBe(expected);
+  });
+
+  test("zachowuje surowy szczegół tylko dla przetłumaczonych komunikatów", () => {
+    expect(errorDetail("could not load the model: onnxruntime error 7")).toBe("could not load the model: onnxruntime error 7");
+    expect(errorDetail("Coś nieprzewidzianego")).toBeUndefined();
   });
 
   test("bezpiecznie obsługuje cykliczny obiekt", () => {

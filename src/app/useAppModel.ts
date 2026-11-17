@@ -10,7 +10,6 @@ const fallbackSettings: AppSettings = {
   retentionDays: 30,
   launchOnLogin: false,
   startMinimized: false,
-  activeMode: "clean",
   showOverlay: true,
   overlaySize: "mini",
   model: "parakeet",
@@ -18,11 +17,7 @@ const fallbackSettings: AppSettings = {
   language: "system",
   modelKeepAliveSecs: 0,
   pasteMode: "auto",
-  transcriptionSource: "local",
-  cloudProvider: "xai",
-  cloudModel: "",
-  cloudBaseUrl: "",
-  cloudLanguage: "",
+  mediaDuringDictation: "muffle",
 };
 export function useAppModel(adapter: AppAdapter, onError: (message: string) => void) {
   const [snapshot, setSnapshot] = useState<AppSnapshot>({
@@ -55,6 +50,7 @@ export function useAppModel(adapter: AppAdapter, onError: (message: string) => v
           previousStatus.current = nextSnapshot.dictation.status;
           setSnapshot(nextSnapshot);
         }
+        if (nextSnapshot.startupWarning) onError(translate("useAppModel.startupWarning", { error: nextSnapshot.startupWarning }));
         setHistory(nextHistory);
       })
       .catch((error) => onError(translate("useAppModel.initError", { error: normalizeError(error) })))

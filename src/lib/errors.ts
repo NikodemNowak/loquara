@@ -11,8 +11,6 @@ const exactMessages: Record<string, TranslationKey> = {
   "Stop dictating before deleting a model.": "errors.stopBeforeModelDelete",
   "Select another model before deleting the active one.": "errors.selectOtherBeforeModelDelete",
   "Only local WAV files are supported": "errors.onlyWav",
-  "Cannot disable the mode that is currently in use.": "errors.modeInUseDisable",
-  "Cannot delete the mode that is currently in use.": "errors.modeInUseDelete",
   "Could not determine the engine directory.": "errors.engineDir",
   "Could not read the download progress.": "errors.downloadProgress",
   "Could not read the download error.": "errors.downloadError",
@@ -21,6 +19,10 @@ const exactMessages: Record<string, TranslationKey> = {
   "Hugging Face rejected the access token.": "errors.tokenRejected",
   "The access token is empty.": "errors.tokenEmpty",
   "The access token contains spaces.": "errors.tokenSpaces",
+  "recording is not active": "errors.recordingNotActive",
+  "the requested operation is invalid for the current state": "errors.invalidState",
+  "another lifecycle operation is in progress": "errors.lifecycleBusy",
+  "recording not found": "errors.recordingNotFound",
 };
 
 /** Backend messages with dynamic parts, matched by pattern. */
@@ -29,9 +31,21 @@ const patternMessages: Array<[
   TranslationKey,
   (match: RegExpMatchArray) => Record<string, string>,
 ]> = [
+  // Delivery failures arrive either bare (the paste_error payload) or prefixed
+  // with the platform error kind (the overlay notice detail); both read the same.
+  [/target unavailable; final text is in the clipboard$/, "errors.deliveryTargetUnavailable", () => ({})],
+  [/modifier keys are still held; final text is in the clipboard$/, "errors.deliveryModifiersHeld", () => ({})],
+  [/input desktop unavailable; final text is in the clipboard$/, "errors.deliveryDesktopUnavailable", () => ({})],
+  [/delivery cancelled; final text is in the clipboard$/, "errors.deliveryCancelled", () => ({})],
+  [/^could not restore target focus: /, "errors.deliveryFocusFailed", () => ({})],
+  [/final text is in the clipboard\.?$/, "errors.deliveryFailed", () => ({})],
+  [/^(?:.+: )?could not load the model: /, "errors.modelLoadFailed", () => ({})],
+  [/^(?:.+: )?recording is not active$/, "errors.recordingNotActive", () => ({})],
+  [/^(?:.+: )?recording not found$/, "errors.recordingNotFound", () => ({})],
+  [/^(?:.+: )?another lifecycle operation is in progress$/, "errors.lifecycleBusy", () => ({})],
+  [/^(?:.+: )?the requested operation is invalid for the current state$/, "errors.invalidState", () => ({})],
   [/^The selected model is not ready\. Download it before retrying: (.+)\.$/, "errors.modelNotReady", (m) => ({ model: m[1] })],
   [/^Missing or empty files: (.+)$/, "errors.missingFiles", (m) => ({ files: m[1] })],
-  [/^Mode "(.+)" is disabled\.$/, "errors.modeDisabled", (m) => ({ mode: m[1] })],
   [/^Invalid (.+): (.+)$/, "errors.invalidIndex", (m) => ({ name: m[1], error: m[2] })],
   [/^Could not check model artifacts: (.+)$/, "errors.artifactsCheck", (m) => ({ error: m[1] })],
   [/^Could not inspect the local model cache: (.+)$/, "errors.cacheCheck", (m) => ({ error: m[1] })],
@@ -43,7 +57,20 @@ const patternMessages: Array<[
 ];
 
 export function normalizeError(error: unknown, fallback = translate("errors.unknown")): string {
-  const message = extractMessage(error, fallback);
+  return localize(extractMessage(error, fallback));
+}
+
+/**
+ * The raw backend text behind a localized message, kept for a "details"
+ * disclosure. Undefined when the message was shown as-is, so nothing repeats.
+ */
+export function errorDetail(error: unknown): string | undefined {
+  const raw = extractMessage(error, "");
+  if (!raw) return undefined;
+  return localize(raw) === raw ? undefined : raw;
+}
+
+function localize(message: string): string {
   const exact = exactMessages[message];
   if (exact) return translate(exact);
   for (const [pattern, key, toParams] of patternMessages) {

@@ -65,7 +65,7 @@ describe("ekran Dyktuj", () => {
       const view = renderWithI18n(<DictatePage {...props} snapshot={{
         settings: { ...settings, language }, modelLoading: false,
         dictation: { status: "recording", recordingId: "r", audioPath: "r.wav" },
-        liveTranscript: phase ? { recordingId: "r", text: "", revision: 1, status: phase, clipboardReady: false } : null,
+        liveTranscript: phase ? { recordingId: "r", text: "", revision: 1, status: phase } : null,
       }} />, { language });
       expect(screen.getByText(copy)).toBeVisible();
       expect(screen.queryByText(language === "pl" ? "Zacznij mówić. Tekst pojawi się tutaj." : "Start speaking. Your words appear here.")).not.toBeInTheDocument();
@@ -75,7 +75,7 @@ describe("ekran Dyktuj", () => {
 
   test("bieżący dokument podąża za tekstem, ale zachowuje celowe przewinięcie w górę", () => {
     const props = { adapter: adapterStub(), recordings: [], onSnapshot: vi.fn(), onHistory: vi.fn(), onToast: vi.fn() };
-    const take: AppSnapshot = { settings, modelLoading: false, dictation: { status: "recording", recordingId: "r", audioPath: "r.wav" }, liveTranscript: { recordingId: "r", revision: 1, status: "draft", text: "Pierwsze słowa", clipboardReady: true } };
+    const take: AppSnapshot = { settings, modelLoading: false, dictation: { status: "recording", recordingId: "r", audioPath: "r.wav" }, liveTranscript: { recordingId: "r", revision: 1, status: "draft", text: "Pierwsze słowa" } };
     const view = renderWithI18n(<DictatePage {...props} snapshot={take} />);
     const canvas = screen.getByRole("region", { name: "Wersja robocza" });
     let height = 500;
@@ -94,18 +94,18 @@ describe("ekran Dyktuj", () => {
     const current: AppSnapshot = {
       settings, modelLoading: false,
       dictation: { status: "recording", recordingId: "current", audioPath: "current.wav" },
-      liveTranscript: { recordingId: "old", text: "Nieaktualny tekst", revision: 1, status: "draft", clipboardReady: true },
+      liveTranscript: { recordingId: "old", text: "Nieaktualny tekst", revision: 1, status: "draft" },
     };
     const view = renderWithI18n(<DictatePage {...props} snapshot={current} />);
     const canvas = screen.getByRole("region", { name: "Wersja robocza" });
     expect(canvas).not.toHaveTextContent("Nieaktualny tekst");
     expect(canvas).not.toHaveTextContent("Przygotuj proszę");
-    view.rerender(<DictatePage {...props} snapshot={{ ...current, liveTranscript: { ...current.liveTranscript!, recordingId: "current", text: "Dzień dobry", clipboardReady: false } }} />);
+    view.rerender(<DictatePage {...props} snapshot={{ ...current, liveTranscript: { ...current.liveTranscript!, recordingId: "current", text: "Dzień dobry" } }} />);
     expect(canvas).toHaveTextContent("Dzień dobry");
     expect(screen.queryByText("W schowku")).not.toBeInTheDocument();
     view.rerender(<DictatePage {...props} snapshot={{ ...current, liveTranscript: { ...current.liveTranscript!, recordingId: "current", text: "Dzień dobry Państwu.", revision: 2 } }} />);
     expect(canvas).toHaveTextContent("Dzień dobry Państwu.");
-    expect(screen.getByText("W schowku")).toBeVisible();
+    expect(screen.queryByText("W schowku")).not.toBeInTheDocument();
     view.rerender(<DictatePage {...props} snapshot={{ ...current, dictation: { status: "cancelling", recordingId: "current", audioPath: "current.wav" }, liveTranscript: { ...current.liveTranscript!, recordingId: "current", text: "Dzień dobry Państwu." } }} />);
     expect(canvas).not.toHaveTextContent("Dzień dobry");
   });
@@ -138,7 +138,7 @@ describe("ekran Dyktuj", () => {
     expect(screen.getAllByRole("article")).toHaveLength(2);
     view.rerender(<DictatePage {...props} snapshot={{ ...idle,
       dictation: { status: "recording", recordingId: "new", audioPath: "new.wav" },
-      liveTranscript: { recordingId: "new", revision: 1, text: "Bieżące słowa.", status: "draft", clipboardReady: true },
+      liveTranscript: { recordingId: "new", revision: 1, text: "Bieżące słowa.", status: "draft" },
     }} />);
     expect(screen.queryByText("Poprzednia wiadomość.")).not.toBeInTheDocument();
     expect(screen.queryByText(recordings[2].text!)).not.toBeInTheDocument();
@@ -296,12 +296,11 @@ describe("ekran Dyktuj", () => {
     // żaden model nie był pobrany, więc skrót mógł się tylko wysypać.
     renderWithI18n(<DictatePage
       adapter={adapterStub()}
-      snapshot={{ dictation: { status: "idle" }, settings, model: { key: "parakeet", display: "Parakeet TDT 0.6B v3", provider: "NVIDIA", installed: false, totalBytes: 670_478_772, source: "local" }, modelLoading: false }}
+      snapshot={{ dictation: { status: "idle" }, settings, model: { key: "parakeet", display: "Parakeet TDT 0.6B v3", provider: "NVIDIA", installed: false, totalBytes: 670_478_772 }, modelLoading: false }}
       recordings={[]}
       modelReady={false}
       onSnapshot={() => undefined}
       onHistory={() => undefined}
-      onSettings={() => undefined}
       onToast={() => undefined}
     />);
 
@@ -311,43 +310,11 @@ describe("ekran Dyktuj", () => {
     expect(screen.queryByRole("button", { name: "Zacznij nagrywać" })).not.toBeInTheDocument();
   });
 
-  test("w trybie chmury bez klucza odsyła do ustawień, a nie po model", async () => {
-    const onSettings = vi.fn();
-    renderWithI18n(<DictatePage
-      adapter={adapterStub()}
-      snapshot={{
-        dictation: { status: "idle" },
-        settings: { ...settings, transcriptionSource: "cloud" },
-        model: {
-          key: "",
-          display: "xAI (Grok) · grok-voice-transcribe-2.0",
-          provider: "xAI (Grok)",
-          installed: false,
-          totalBytes: 0,
-          source: "cloud",
-        },
-        modelLoading: false,
-      }}
-      recordings={[]}
-      modelReady={false}
-      onSnapshot={() => undefined}
-      onHistory={() => undefined}
-      onSettings={onSettings}
-      onToast={() => undefined}
-    />);
-
-    expect(screen.getByRole("heading", { name: "Dodaj klucz API" })).toBeVisible();
-    await userEvent.click(screen.getByRole("button", { name: "Otwórz ustawienia" }));
-
-    expect(onSettings).toHaveBeenCalled();
-    expect(screen.queryByRole("button", { name: "Pobierz model" })).toBeNull();
-  });
-
   test("pobieranie zaczęte gdzie indziej widać po powrocie na ekran", async () => {
     // Stan pobierania należy do aplikacji, nie do ekranu. Trzymany w
     // komponencie znikał po wyjściu, a przycisk wracał gotowy do klikania —
     // i drugie pobieranie pisało po plikach pierwszego.
-    const model = { key: "parakeet", display: "Parakeet TDT 0.6B v3", provider: "NVIDIA", installed: false, totalBytes: 670_478_772, source: "local" as const };
+    const model = { key: "parakeet", display: "Parakeet TDT 0.6B v3", provider: "NVIDIA", installed: false, totalBytes: 670_478_772 };
     const downloadModel = vi.fn(async () => undefined);
     renderWithI18n(<DictatePage
       adapter={adapterStub({ downloadModel })}
@@ -362,7 +329,6 @@ describe("ekran Dyktuj", () => {
       modelReady={false}
       onSnapshot={() => undefined}
       onHistory={() => undefined}
-      onSettings={() => undefined}
       onToast={() => undefined}
     />);
 
@@ -376,22 +342,19 @@ describe("ekran Dyktuj", () => {
     // zgięcia — klikało się i pozornie nic się nie działo.
     const startRecording = vi.fn();
     const downloadModel = vi.fn(async () => undefined);
-    const onSettings = vi.fn();
     renderWithI18n(<DictatePage
       adapter={adapterStub({ startRecording, downloadModel })}
-      snapshot={{ dictation: { status: "idle" }, settings, model: { key: "parakeet", display: "Parakeet TDT 0.6B v3", provider: "NVIDIA", installed: false, totalBytes: 670_478_772, source: "local" }, modelLoading: false }}
+      snapshot={{ dictation: { status: "idle" }, settings, model: { key: "parakeet", display: "Parakeet TDT 0.6B v3", provider: "NVIDIA", installed: false, totalBytes: 670_478_772 }, modelLoading: false }}
       recordings={[]}
       modelReady={false}
       onSnapshot={() => undefined}
       onHistory={() => undefined}
-      onSettings={onSettings}
       onToast={() => undefined}
     />);
 
     await userEvent.click(screen.getByRole("button", { name: "Pobierz model" }));
 
     expect(downloadModel).toHaveBeenCalledWith("parakeet");
-    expect(onSettings).not.toHaveBeenCalled();
     expect(startRecording).not.toHaveBeenCalled();
 
     // Katalog ma dziś jeden model, więc ekran tego nie ukrywa.

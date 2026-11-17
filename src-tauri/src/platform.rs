@@ -618,17 +618,80 @@ pub fn replace_toggle_shortcut<R: Runtime>(
     manager
         .register(new.as_str())
         .map_err(|error| PlatformError::ShortcutRegistration(error.to_string()))?;
-    if let Err(error) = manager.unregister(old.as_str()) {
+    // The old combination may already be gone (a failed startup registration,
+    // or an earlier partial change); only one that is held needs releasing.
+    if manager.is_registered(old.as_str()) && let Err(error) = manager.unregister(old.as_str()) {
         let _ = manager.unregister(new.as_str());
         return Err(PlatformError::ShortcutRegistration(error.to_string()));
     }
     Ok(())
 }
 
+/// Where the main window was when it last closed, so reopening it from the
+/// tray puts it back rather than at the configured default. Held for the
+/// life of the process, which is as long as a hidden window used to keep it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct MainGeometry {
+    position: PhysicalPosition<i32>,
+    size: tauri::PhysicalSize<u32>,
+    maximized: bool,
+}
+
+static MAIN_GEOMETRY: std::sync::Mutex<Option<MainGeometry>> = std::sync::Mutex::new(None);
+
+/// Remembers the main window's place before it is destroyed.
+pub fn remember_main_geometry<R: Runtime>(window: &tauri::Window<R>) {
+    let maximized = window.is_maximized().unwrap_or(false);
+    let (Ok(position), Ok(size)) = (window.outer_position(), window.inner_size()) else { return };
+    // A minimised window reports a parking position far off screen.
+    if window.is_minimized().unwrap_or(false) {
+        return;
+    }
+    if let Ok(mut slot) = MAIN_GEOMETRY.lock() {
+        *slot = Some(MainGeometry { position, size, maximized });
+    }
+}
+
+/// The main window, built from its `tauri.conf.json` entry if it is not open.
+///
+/// Closing the main window destroys it instead of hiding it: a hidden
+/// webview keeps its whole renderer process (about 300 MB measured) for as
+/// long as the app sits in the tray. Everything the window shows is read
+/// back from the backend when the page mounts.
+fn main_window<R: Runtime>(app: &AppHandle<R>) -> Result<tauri::WebviewWindow<R>, PlatformError> {
+    if let Some(window) = app.get_webview_window("main") {
+        return Ok(window);
+    }
+    let config = app
+        .config()
+        .app
+        .windows
+        .iter()
+        .find(|window| window.label == "main")
+        .cloned()
+        .ok_or_else(|| PlatformError::Other("main window is not configured".into()))?;
+    let mut builder = tauri::WebviewWindowBuilder::from_config(app, &config)
+        .map_err(|error| PlatformError::Other(error.to_string()))?
+        .visible(false);
+    if let Some(icon) = app.default_window_icon() {
+        builder = builder
+            .icon(icon.clone())
+            .map_err(|error| PlatformError::Other(error.to_string()))?;
+    }
+    let window = builder.build().map_err(|error| PlatformError::Other(error.to_string()))?;
+    let remembered = MAIN_GEOMETRY.lock().ok().and_then(|slot| *slot);
+    if let Some(geometry) = remembered {
+        let _ = window.set_size(geometry.size);
+        let _ = window.set_position(geometry.position);
+        if geometry.maximized {
+            let _ = window.maximize();
+        }
+    }
+    Ok(window)
+}
+
 pub fn show_main<R: Runtime>(app: &AppHandle<R>) -> Result<(), PlatformError> {
-    let window = app
-        .get_webview_window("main")
-        .ok_or_else(|| PlatformError::Other("main window is missing".into()))?;
+    let window = main_window(app)?;
     // Showing the window is the part that must work; the rest is manners.
     // Windows refuses to hand focus to a process that is not the foreground
     // one, which is ordinary rather than exceptional — and chaining it made

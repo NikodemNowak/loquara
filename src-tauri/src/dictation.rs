@@ -1,16 +1,14 @@
-use crate::cloud;
 use crate::hold::{HoldController, HoldGesture};
 use crate::engine::{Engine, EngineError};
 use crate::audio::{
     AudioRecorder, CompletedRecording, InputDeviceInfo, cleanup_partial, quantize_peaks,
 };
-use crate::secret;
 use crate::streaming;
 use crate::domain::{DictationEvent, DictationState, transition};
 use crate::platform::{self, PasteMode, SystemWindows, WindowTarget, WindowsApi};
 use crate::storage::{
-    HistoryQuery, Mode, Recording, RecordingStatus, Retention, Storage, StorageError,
-    VocabularyEntry, postprocess_for_mode,
+    HistoryQuery, Recording, RecordingStatus, Retention, Storage, StorageError,
+    VocabularyEntry, finish_transcript,
 };
 use crate::transcription::TranscriptionResult;
 use serde::{Deserialize, Serialize};
@@ -93,10 +91,9 @@ impl CoordinatorMachine {
     }
 
     pub fn stopped(&mut self) -> Result<(), CoordinatorError> {
-        if !matches!(
-            self.state,
-            DictationState::Recording { .. } | DictationState::Cancelling { .. }
-        ) {
+        // Cancelling is the Undo window of a take whose capture already ended;
+        // there is nothing left to stop, only Undo (retry) or dismissal.
+        if !matches!(self.state, DictationState::Recording { .. }) {
             return Err(CoordinatorError::InvalidState);
         }
         self.state = transition(self.state.clone(), DictationEvent::Stop);
@@ -212,15 +209,6 @@ pub enum OverlaySize {
     Large,
 }
 
-/// Where the words come from: the model on this machine, or a provider's API.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TranscriptionSource {
-    #[default]
-    Local,
-    Cloud,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppSettings {
@@ -241,8 +229,6 @@ pub struct AppSettings {
     /// alone.
     #[serde(default)]
     pub start_minimized: bool,
-    #[serde(default = "default_active_mode")]
-    pub active_mode: String,
     #[serde(default = "default_show_overlay")]
     pub show_overlay: bool,
     #[serde(default = "default_overlay_size")]
@@ -261,23 +247,10 @@ pub struct AppSettings {
     pub model_keep_alive_secs: u64,
     #[serde(default)]
     pub paste_mode: PasteMode,
-    /// Local engine or a cloud provider. Local is the default so an existing
-    /// installation keeps transcribing on this machine after an update.
+    /// What happens to background music and videos while recording. Calls
+    /// and meetings are never touched.
     #[serde(default)]
-    pub transcription_source: TranscriptionSource,
-    #[serde(default = "default_cloud_provider")]
-    pub cloud_provider: String,
-    /// Empty means "the provider's default model", which keeps the choice
-    /// alive when a provider renames its models.
-    #[serde(default)]
-    pub cloud_model: String,
-    /// Empty means "the provider's own address"; only custom providers need
-    /// this to be filled in.
-    #[serde(default)]
-    pub cloud_base_url: String,
-    /// ISO-639-1 code. Empty lets the model detect the language.
-    #[serde(default)]
-    pub cloud_language: String,
+    pub media_during_dictation: crate::media::MediaMode,
 }
 
 const fn default_launch_on_login() -> bool {
@@ -298,14 +271,6 @@ const fn default_streaming() -> bool {
 
 fn default_model() -> String {
     crate::models::default_model().to_owned()
-}
-
-fn default_active_mode() -> String {
-    "clean".into()
-}
-
-fn default_cloud_provider() -> String {
-    cloud::default_provider().key.to_owned()
 }
 
 const fn default_language() -> LanguageChoice {
@@ -348,7 +313,6 @@ impl Default for AppSettings {
             retention_days: Some(30),
             launch_on_login: false,
             start_minimized: false,
-            active_mode: default_active_mode(),
             show_overlay: default_show_overlay(),
             overlay_size: default_overlay_size(),
             model: default_model(),
@@ -357,87 +321,15 @@ impl Default for AppSettings {
             language: default_language(),
             model_keep_alive_secs: 0,
             paste_mode: PasteMode::default(),
-            transcription_source: TranscriptionSource::default(),
-            cloud_provider: default_cloud_provider(),
-            cloud_model: String::new(),
-            cloud_base_url: String::new(),
-            cloud_language: String::new(),
+            media_during_dictation: crate::media::MediaMode::default(),
         }
     }
 }
 
-/// The model a cloud transcription will actually ask for.
-fn resolve_cloud_model(settings: &AppSettings) -> String {
-    if !settings.cloud_model.trim().is_empty() {
-        return settings.cloud_model.trim().to_owned();
-    }
-    cloud::provider(&settings.cloud_provider)
-        .unwrap_or_else(|| cloud::default_provider())
-        .default_model
-        .to_owned()
-}
-
-/// Vocabulary turned into a provider's own hint list.
-///
-/// The replacement is what the user wants written, so that is the spelling a
-/// provider should be biased towards.
-fn keyterms_for(vocabulary: &[VocabularyEntry]) -> Vec<String> {
-    vocabulary
-        .iter()
-        .map(|entry| entry.replacement.clone())
-        .collect()
-}
-
-/// Where provider keys live in the settings table, still encrypted.
-fn stored_cloud_keys(storage: &Storage) -> std::collections::BTreeMap<String, String> {
-    storage
-        .get_setting::<std::collections::BTreeMap<String, String>>("cloud_keys")
-        .ok()
-        .flatten()
-        .unwrap_or_default()
-}
-
-/// One provider's key, decrypted, or `None` when the user has not set one.
-///
-/// A key that cannot be decrypted — a database copied from another Windows
-/// account, say — counts as absent, because a request sending it would only
-/// fail at the provider.
-fn cloud_api_key(storage: &Storage, provider: &str) -> Result<Option<String>, String> {
-    let Some(stored) = stored_cloud_keys(storage).get(provider).cloned() else {
-        return Ok(None);
-    };
-    match secret::unprotect(&stored) {
-        Ok(key) if !key.trim().is_empty() => Ok(Some(key)),
-        Ok(_) => Ok(None),
-        Err(_) => Ok(None),
-    }
-}
-
-/// Providers that have a usable key, for the interface to tick off.
-fn available_cloud_keys(storage: &Storage) -> Vec<String> {
-    stored_cloud_keys(storage)
-        .keys()
-        .filter(|provider| cloud_api_key(storage, provider).ok().flatten().is_some())
-        .cloned()
-        .collect()
-}
-
 /// Whether this take should be transcribed while the user is still speaking.
 fn streaming_wanted(settings: &AppSettings) -> bool {
-    match settings.transcription_source {
-        TranscriptionSource::Local => settings.model == "parakeet"
-            && settings.realtime_by_engine.get("local:parakeet").copied().unwrap_or(true),
-        TranscriptionSource::Cloud => settings.realtime_by_engine
-            .get(&format!("cloud:{}", settings.cloud_provider)).copied().unwrap_or(settings.streaming)
-            && cloud::provider(&settings.cloud_provider).is_some_and(|provider| provider.streaming),
-    }
-}
-
-/// "xAI (Grok) · grok-voice-transcribe-2.0", the label history stores.
-fn cloud_model_label(settings: &AppSettings) -> String {
-    let provider = cloud::provider(&settings.cloud_provider)
-        .unwrap_or_else(|| cloud::default_provider());
-    format!("{} · {}", provider.display, resolve_cloud_model(settings))
+    settings.model == "parakeet"
+        && settings.realtime_by_engine.get("local:parakeet").copied().unwrap_or(true)
 }
 
 #[derive(Clone)]
@@ -445,20 +337,21 @@ struct FrozenTake {
     recording_id: String,
     settings: AppSettings,
     vocabulary: Vec<VocabularyEntry>,
-    mode: Option<Mode>,
     target: Option<WindowTarget>,
     cancel: Arc<AtomicBool>,
     preview_stop: Arc<AtomicBool>,
     draft_fallback: Arc<AtomicBool>,
     hold: Option<Arc<HoldGesture>>,
+    /// Final windows decoded while recording (local engine, live takes only;
+    /// a retry from History never has one and runs the batch pass).
+    progressive: Option<Arc<crate::progressive::ProgressiveSession>>,
 }
 
 impl FrozenTake {
     fn capture(state: &AppState, settings: AppSettings, target: Option<WindowTarget>, recording_id: String) -> Self {
         let vocabulary = state.storage.list_vocabulary().unwrap_or_default();
-        let mode = state.storage.get_mode(&settings.active_mode).ok().flatten().filter(|mode| mode.enabled);
-        Self { recording_id, settings, vocabulary, mode, target,
-            hold: None, cancel: Arc::new(AtomicBool::new(false)), preview_stop: Arc::new(AtomicBool::new(false)), draft_fallback: Arc::new(AtomicBool::new(false)) }
+        Self { recording_id, settings, vocabulary, target,
+            hold: None, progressive: None, cancel: Arc::new(AtomicBool::new(false)), preview_stop: Arc::new(AtomicBool::new(false)), draft_fallback: Arc::new(AtomicBool::new(false)) }
     }
     fn owns(&self, state: &AppState) -> bool {
         !self.cancel.load(Ordering::SeqCst) && !self.hold.as_ref().is_some_and(|hold| hold.cancelled()) && self.is_current(state)
@@ -475,11 +368,11 @@ pub struct LiveTranscript {
     pub text: String,
     pub revision: u64,
     pub status: String,
-    pub clipboard_ready: bool,
 }
 
 /// Providers replace this pending value freely. A dedicated publisher coalesces
-/// UI and clipboard effects; it never exposes keyboard or focus operations.
+/// UI updates. Drafts never touch the clipboard, keyboard or focus: only the
+/// finished transcript is delivered, once, on stop.
 struct BufferedDraftSink { pending: Arc<Mutex<Option<String>>>, app: AppHandle, state: AppState, take: FrozenTake }
 impl streaming::TranscriptSink for BufferedDraftSink {
     fn publish(&self, text: &str) -> Result<(), String> {
@@ -514,11 +407,10 @@ fn start_draft_publisher(app: &AppHandle, state: &AppState, take: &FrozenTake) -
             }
             let text = pending.lock().ok().and_then(|mut pending| pending.take());
             if let Some(text) = text {
-                if publish_draft(&state, &take, &text, &mut SystemWindows) { emit_state(&app, &state); }
-                // Retry a temporarily locked clipboard, without losing a newer revision.
-                let ready = state.live_transcript.lock().ok().and_then(|live| live.as_ref().map(|live| live.clipboard_ready)).unwrap_or(false);
-                if !ready && !text.trim().is_empty() {
-                    if let Ok(mut pending) = pending.lock() && pending.is_none() { *pending = Some(text); }
+                if publish_draft(&state, &take, &text) { emit_state(&app, &state); }
+                else if let Ok(mut pending) = pending.lock() && pending.is_none() && state.lifecycle.try_lock().is_err() {
+                    // The lifecycle gate was busy: retry later unless a newer revision arrived.
+                    *pending = Some(text);
                 }
             }
         }
@@ -526,9 +418,9 @@ fn start_draft_publisher(app: &AppHandle, state: &AppState, take: &FrozenTake) -
     sink
 }
 
-/// Sole draft consumer. A cancellation/new take and a clipboard write are
-/// serialized, so no old worker can overwrite a subsequent external copy.
-fn publish_draft(state: &AppState, take: &FrozenTake, text: &str, windows: &mut impl WindowsApi) -> bool {
+/// Sole draft consumer. Updates the in-app preview only; serialized with
+/// cancellation so no old worker can publish into a subsequent take.
+fn publish_draft(state: &AppState, take: &FrozenTake, text: &str) -> bool {
     let Ok(_gate) = state.lifecycle.try_lock() else { return false };
     if !take.owns(state) || take.preview_stop.load(Ordering::SeqCst) || take.draft_fallback.load(Ordering::SeqCst) { return false; }
     let id = match state.machine.lock().ok().map(|machine| machine.snapshot()) {
@@ -536,94 +428,87 @@ fn publish_draft(state: &AppState, take: &FrozenTake, text: &str, windows: &mut 
         _ => return false,
     };
     let mut live = match state.live_transcript.lock() { Ok(live) => live, Err(_) => return false };
-    if live.as_ref().is_some_and(|live| live.text == text && live.clipboard_ready) { return false; }
-    let clipboard_ready = !text.trim().is_empty() && windows.write_clipboard(text).is_ok();
+    if live.as_ref().is_some_and(|live| live.text == text && live.status == "draft") { return false; }
     let revision = live.as_ref().map_or(1, |live| live.revision + 1);
-    *live = Some(LiveTranscript { recording_id: id, text: text.to_owned(), revision, status: "draft".into(), clipboard_ready });
+    *live = Some(LiveTranscript { recording_id: id, text: text.to_owned(), revision, status: "draft".into() });
     true
 }
 
-/// All live capture conversion is bounded and separate from native decode.
-/// The WAV writer remains the source of truth for final recognition.
+/// The live preview of the take being recorded. The WAV writer remains the
+/// source of truth for final recognition.
 struct ActiveLiveSession {
     recording_id: String,
-    session: Option<streaming::Session>,
-    cancellation: Option<streaming::Cancellation>,
-    pump: Arc<Mutex<Option<streaming::AudioPump>>>,
-    sender: Option<tokio::sync::mpsc::Sender<Vec<i16>>>,
-    failure: Arc<Mutex<Option<String>>>,
-}
-impl ActiveLiveSession {
-    fn flush(&mut self) {
-        let result = self.pump.lock().map_err(|_| "audio pump lock poisoned".to_owned())
-            .and_then(|mut pump| pump.as_mut().map_or(Ok(Vec::new()), |pump| pump.flush()));
-        match result {
-            Ok(tail) if !tail.is_empty() => {
-                if let Some(sender) = &self.sender && sender.try_send(tail).is_err() {
-                    *self.failure.lock().unwrap() = Some("live audio queue overflowed; using complete recording".into());
-                }
-            }
-            Err(error) => { *self.failure.lock().unwrap() = Some(error); }
-            _ => {}
-        }
-        if let Some(session) = &self.session && let Some(error) = self.failure.lock().ok().and_then(|error| error.clone()) { session.invalidate(error); }
-        self.sender.take();
-    }
 }
 
 fn start_live_session(app: &AppHandle, state: &AppState, take: &FrozenTake) -> Option<ActiveLiveSession> {
     let settings = &take.settings;
-    if !streaming_wanted(settings) { return None; }
+    let progressive = take.progressive.clone();
+    if !streaming_wanted(settings) {
+        // No live preview, but the local final pass still starts early.
+        if let Some(progressive) = progressive {
+            progressive.spawn_worker(state.engine.clone(), settings.model.clone(), take.preview_stop.clone(), take.cancel.clone(), |_| {});
+            state.audio.set_stream_sink(Some(Arc::new(move |pcm, format| progressive.feed(pcm, format.channels, format.sample_rate))));
+        }
+        return None;
+    }
     let sink = start_draft_publisher(app, state, take);
-    let failure = Arc::new(Mutex::new(None));
     let pump = Arc::new(Mutex::new(None::<streaming::AudioPump>));
     let buffer = Arc::new(Mutex::new(crate::buffered::PreviewBuffer::default()));
-    let (session, sender) = if settings.transcription_source == TranscriptionSource::Cloud {
-        let provider = cloud::provider(&settings.cloud_provider)?;
-        let api_key = cloud_api_key(&state.storage, provider.key).ok().flatten()?;
-        let (sender, receiver) = tokio::sync::mpsc::channel(128);
-        let url = streaming::xai_stream_url(&settings.cloud_base_url, &resolve_cloud_model(settings), &settings.cloud_language, &keyterms_for(&take.vocabulary));
-        (Some(streaming::spawn(streaming::Config { url, api_key }, sink.clone(), receiver)), Some(sender))
-    } else {
+    {
         let engine = state.engine.clone(); let model = settings.model.clone();
         let stop = take.preview_stop.clone(); let cancel = take.cancel.clone(); let buffer = buffer.clone(); let sink = sink.clone();
-        std::thread::spawn(move || {
-            let mut last = 0;
-            let mut preview = crate::buffered::LocalPreview::default();
-            while !stop.load(Ordering::SeqCst) && !cancel.load(Ordering::SeqCst) {
-                std::thread::sleep(Duration::from_millis(1800));
-                if stop.load(Ordering::SeqCst) || cancel.load(Ordering::SeqCst) { break; }
-                let (generation, samples) = match buffer.lock() { Ok(buffer) => buffer.snapshot(), Err(_) => break };
-                if generation == last || samples.len() < 8_000 { continue; }
-                last = generation;
-                // One decode in flight. Slow machines skip intermediate snapshots.
-                match preview.update(generation, &samples, |chunk| engine.transcribe_audio_samples(&model, chunk, &stop).map_err(|error| error.to_string())) {
-                    Ok(text) if !stop.load(Ordering::SeqCst) && !cancel.load(Ordering::SeqCst) => { let _ = sink.publish(&text); }
-                    Err(error) if !stop.load(Ordering::SeqCst) && !cancel.load(Ordering::SeqCst) => { sink.failed(&error.to_string()); break; }
-                    _ => {}
-                }
+        // One worker per take decodes final windows first, then the preview of
+        // whatever follows them, so the two never queue on the model lock and
+        // committed audio is decoded once.
+        let preview_engine = engine.clone(); let preview_model = model.clone(); let preview_stop = stop.clone(); let preview_cancel = cancel.clone();
+        let mut last = 0;
+        let mut last_preview = Instant::now();
+        let mut rebased = 0;
+        let mut preview = Some(crate::buffered::LocalPreview::default());
+        let mut tick = move |progressive: Option<&crate::progressive::ProgressiveSession>| {
+            let (stop, cancel) = (&preview_stop, &preview_cancel);
+            let Some(local) = preview.as_mut() else { return };
+            if last_preview.elapsed() < Duration::from_millis(1800) { return; }
+            last_preview = Instant::now();
+            if let Some((count, text, consumed)) = progressive.and_then(|progressive| progressive.decoded_prefix()) && count > rebased {
+                rebased = count;
+                local.rebase(text, consumed);
             }
-        });
-        (None, None)
-    };
-    let capture_pump = pump.clone(); let capture_sender = sender.clone(); let capture_failure = failure.clone();
-    state.audio.set_stream_sink(Some(Arc::new(move |pcm, format| {
-        let result = capture_pump.lock().map_err(|_| "audio pump lock poisoned".to_owned()).and_then(|mut pump| {
-            if pump.is_none() { *pump = Some(streaming::AudioPump::new(format.channels, format.sample_rate)?); }
-            pump.as_mut().unwrap().push(pcm)
-        });
-        match result {
-            Ok(frames) if !frames.is_empty() => {
-                if let Some(sender) = &capture_sender {
-                    if sender.try_send(frames).is_err() { *capture_failure.lock().unwrap() = Some("live audio queue overflowed; using complete recording".into()); }
-                } else if let Ok(mut buffer) = buffer.lock() { buffer.push(&frames); }
+            let (generation, samples) = match buffer.lock() { Ok(buffer) => buffer.snapshot(), Err(_) => { preview = None; return } };
+            if generation == last || samples.len() < 8_000 { return; }
+            last = generation;
+            // One decode in flight. Slow machines skip intermediate snapshots.
+            match local.update(generation, &samples, |chunk| preview_engine.transcribe_audio_samples(&preview_model, chunk, stop).map_err(|error| error.to_string())) {
+                Ok(text) if !stop.load(Ordering::SeqCst) && !cancel.load(Ordering::SeqCst) => { let _ = sink.publish(&text); }
+                // The preview gives up; the final windows keep decoding.
+                Err(error) if !stop.load(Ordering::SeqCst) && !cancel.load(Ordering::SeqCst) => { sink.failed(&error.to_string()); preview = None; }
+                _ => {}
             }
-            Err(error) => { *capture_failure.lock().unwrap() = Some(error); }
-            _ => {}
+        };
+        match progressive.clone() {
+            Some(progressive) => progressive.spawn_worker(engine, model, stop, cancel, move |session| tick(Some(session))),
+            None => {
+                std::thread::spawn(move || {
+                    while !stop.load(Ordering::SeqCst) && !cancel.load(Ordering::SeqCst) {
+                        std::thread::sleep(Duration::from_millis(1800));
+                        if stop.load(Ordering::SeqCst) || cancel.load(Ordering::SeqCst) { break; }
+                        tick(None);
+                    }
+                });
+            }
         }
+    }
+    state.audio.set_stream_sink(Some(Arc::new(move |pcm, format| {
+        if let Some(progressive) = &progressive { progressive.feed(pcm, format.channels, format.sample_rate); }
+        // The preview only ever sees what converted cleanly; the final pass
+        // reads the WAV, so a failed conversion costs the preview at most.
+        let frames = pump.lock().map_err(|_| "audio pump lock poisoned".to_owned()).and_then(|mut pump| {
+            if pump.is_none() { *pump = Some(streaming::AudioPump::new(format.channels, format.sample_rate)?); }
+            pump.as_mut().map_or(Ok(Vec::new()), |pump| pump.push(pcm))
+        });
+        if let Ok(frames) = frames && !frames.is_empty() && let Ok(mut buffer) = buffer.lock() { buffer.push(&frames); }
     })));
-    let cancellation = session.as_ref().map(|session| session.cancellation());
-    Some(ActiveLiveSession { recording_id: String::new(), session, cancellation, pump, sender, failure })
+    Some(ActiveLiveSession { recording_id: String::new() })
 }
 
 fn abandon_live_session(state: &AppState) {
@@ -633,32 +518,7 @@ fn abandon_live_session(state: &AppState) {
         take.preview_stop.store(true, Ordering::SeqCst);
     }
     if let Ok(mut live) = state.live_transcript.lock() { *live = None; }
-    if let Ok(mut slot) = state.streaming.lock() && let Some(live) = slot.take() && let Some(cancellation) = live.cancellation { cancellation.cancel(); }
-}
-
-/// Opens the provider's connection while the user is talking.
-///
-/// A TLS handshake plus DNS is a few hundred milliseconds; paying it while
-/// the recording runs is paying it when nobody is waiting. The request itself
-/// is the cheapest one the provider offers — a model list — and its answer is
-/// not used.
-fn warm_cloud_connection(state: &AppState, settings: &AppSettings) {
-    let Some(provider) = cloud::provider(&settings.cloud_provider) else {
-        return;
-    };
-    if !provider.lists_models {
-        return;
-    }
-    let Ok(Some(api_key)) = cloud_api_key(&state.storage, provider.key) else {
-        return;
-    };
-    let provider_key = provider.key;
-    let base_url = settings.cloud_base_url.clone();
-    std::thread::spawn(move || {
-        if let Some(provider) = cloud::provider(provider_key) {
-            let _ = cloud::list_models(provider, &base_url, &api_key);
-        }
-    });
+    if let Ok(mut slot) = state.streaming.lock() { slot.take(); }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -744,7 +604,7 @@ pub fn cleanup_retention(state: &AppState) -> Result<usize, String> {
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub enum OverlayNoticeKind { PasteRequested, Copied, Cancelled, DeliveryFailed }
+pub enum OverlayNoticeKind { PasteRequested, Copied, Cancelled, DeliveryFailed, StartFailed }
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -757,6 +617,8 @@ pub struct OverlayNotice {
     #[serde(skip)]
     expires_monotonic: Option<Instant>,
     pub detail: Option<String>,
+    /// Set on a delivered take whose input was distorted or near silent.
+    pub mic_level: Option<crate::audio::MicLevel>,
 }
 
 #[derive(Default)]
@@ -775,7 +637,7 @@ fn publish_overlay_notice(state: &AppState, recording_id: &str, kind: OverlayNot
     feedback.sequence = feedback.sequence.wrapping_add(1);
     let notice = OverlayNotice { key: format!("{}:{}", feedback.generation, feedback.sequence), generation: feedback.generation,
         recording_id: recording_id.into(), kind, expires_at: duration_ms.map(|ms| epoch_ms() + ms),
-        expires_monotonic: duration_ms.map(|ms| Instant::now() + Duration::from_millis(ms.max(0) as u64)), detail };
+        expires_monotonic: duration_ms.map(|ms| Instant::now() + Duration::from_millis(ms.max(0) as u64)), detail, mic_level: None };
     feedback.notice = Some(notice.clone());
     notice
 }
@@ -875,6 +737,9 @@ pub struct AppSnapshot {
     pub recording_started_at: Option<i64>,
     pub live_transcript: Option<LiveTranscript>,
     pub overlay_notice: Option<OverlayNotice>,
+    /// Setup steps that failed without stopping the app, such as a global
+    /// shortcut another program already holds.
+    pub startup_warning: Option<String>,
 }
 
 /// A download in progress.
@@ -906,14 +771,10 @@ pub struct ModelSummary {
     pub key: String,
     pub display: String,
     pub provider: String,
-    /// Whether the selected engine can run right now: for a local model that
-    /// means the files are here, for a cloud provider that the key is set.
+    /// Whether the model files are here, so the shortcut can produce words.
     pub installed: bool,
     /// What it will cost to fetch, so the interface can say so before asking.
     pub total_bytes: u64,
-    /// Which engine this summary is about, so the interface can say "no key"
-    /// rather than "no model" when the cloud is selected.
-    pub source: TranscriptionSource,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -921,15 +782,6 @@ pub struct ModelSummary {
 pub struct SettingsUpdateResult {
     pub settings: AppSettings,
     pub warning: Option<String>,
-}
-
-/// What a connection check found: the provider's answer and how long it took.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CloudCheck {
-    /// Empty for silence, which is still a pass.
-    pub text: String,
-    pub elapsed_ms: u64,
 }
 
 #[derive(Clone)]
@@ -951,6 +803,8 @@ pub struct AppState {
     lifecycle: Arc<Mutex<()>>,
     hold: Arc<Mutex<HoldController>>,
     suppress_shortcut_until: Arc<Mutex<Option<Instant>>>,
+    /// Input level verdicts of stopped takes, read when the take is delivered.
+    mic_levels: Arc<Mutex<std::collections::HashMap<String, crate::audio::MicLevel>>>,
     overlay_feedback: Arc<Mutex<OverlayFeedback>>,
     settings_update: Arc<Mutex<()>>,
     model_home: PathBuf,
@@ -961,6 +815,9 @@ pub struct AppState {
     streaming: Arc<Mutex<Option<ActiveLiveSession>>>,
     active_take: Arc<Mutex<Option<FrozenTake>>>,
     live_transcript: Arc<Mutex<Option<LiveTranscript>>>,
+    startup_warning: Arc<Mutex<Option<String>>>,
+    /// Background media ducked or paused for the take being captured.
+    media: Arc<Mutex<Option<crate::media::MediaGuard>>>,
 }
 
 /// Tracks model warm-up so transcription never loads the model twice and waits
@@ -1304,6 +1161,7 @@ impl AppState {
             lifecycle: Arc::new(Mutex::new(())),
             hold: Arc::new(Mutex::new(HoldController::default())),
             suppress_shortcut_until: Arc::new(Mutex::new(None)),
+            mic_levels: Arc::new(Mutex::new(std::collections::HashMap::new())),
             overlay_feedback: Arc::new(Mutex::new(OverlayFeedback::default())),
             settings_update: Arc::new(Mutex::new(())),
             model_home,
@@ -1311,6 +1169,44 @@ impl AppState {
             streaming: Arc::new(Mutex::new(None)),
             active_take: Arc::new(Mutex::new(None)),
             live_transcript: Arc::new(Mutex::new(None)),
+            startup_warning: Arc::new(Mutex::new(None)),
+            media: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    /// Ducks or pauses background media for a take that just started
+    /// capturing. Returns at once; the work runs on its own thread. Tests get
+    /// an inert guard so they never touch the machine's real audio.
+    fn begin_media(&self, mode: crate::media::MediaMode) {
+        #[cfg(test)]
+        let guard = (mode != crate::media::MediaMode::Off).then(crate::media::MediaGuard::inert);
+        #[cfg(not(test))]
+        let guard = crate::media::MediaController::default().begin(mode);
+        // Replacing a leftover guard drops it, which restores its media.
+        let previous = self.media.lock().ok().and_then(|mut slot| std::mem::replace(&mut *slot, guard));
+        drop(previous);
+    }
+
+    /// Restores background media. Called as soon as capture stops (stop,
+    /// cancel, microphone loss, failed start); idempotent.
+    pub fn end_media(&self) {
+        let guard = self.media.lock().ok().and_then(|mut slot| slot.take());
+        if let Some(guard) = guard { guard.end(); }
+    }
+
+    /// Restores background media and waits briefly, for app exit.
+    pub fn end_media_and_wait(&self, timeout: Duration) {
+        let guard = self.media.lock().ok().and_then(|mut slot| slot.take());
+        if let Some(guard) = guard { guard.end_and_wait(timeout); }
+    }
+
+    /// Records a setup step that failed without stopping the app. It rides on
+    /// every snapshot, because an event sent during setup reaches no window.
+    pub fn add_startup_warning(&self, message: impl Into<String>) {
+        let message = message.into();
+        eprintln!("Loquara startup: {message}");
+        if let Ok(mut warning) = self.startup_warning.lock() {
+            *warning = Some(match warning.take() { Some(previous) => format!("{previous}\n{message}"), None => message });
         }
     }
 
@@ -1332,29 +1228,6 @@ impl AppState {
             .read()
             .map(|settings| settings.clone())
             .unwrap_or_default();
-        if settings.transcription_source == TranscriptionSource::Cloud {
-            let provider = cloud::provider(&settings.cloud_provider)
-                .unwrap_or_else(|| cloud::default_provider());
-            let model = resolve_cloud_model(&settings);
-            // Asking whether the key decrypts is the cloud's version of
-            // "are the model files here": both answer whether pressing the
-            // shortcut can produce words right now. A custom provider also
-            // needs an address before it can go anywhere.
-            let has_address = !provider.custom || !settings.cloud_base_url.trim().is_empty();
-            let ready = has_address
-                && cloud_api_key(&self.storage, provider.key)
-                    .ok()
-                    .flatten()
-                    .is_some();
-            return ModelSummary {
-                key: String::new(),
-                display: format!("{} · {}", provider.display, model),
-                provider: provider.display.to_owned(),
-                installed: ready,
-                total_bytes: 0,
-                source: TranscriptionSource::Cloud,
-            };
-        }
         let key = settings.model.clone();
         let spec = crate::models::spec(&key);
         ModelSummary {
@@ -1363,7 +1236,6 @@ impl AppState {
             installed: self.engine.is_installed(&key),
             total_bytes: spec.map(|spec| spec.total_bytes()).unwrap_or(0),
             key,
-            source: TranscriptionSource::Local,
         }
     }
 
@@ -1396,6 +1268,7 @@ impl AppState {
             recording_started_at,
             live_transcript: self.live_transcript.lock().ok().and_then(|live| live.clone()),
             overlay_notice: self.overlay_feedback.lock().ok().and_then(|feedback| feedback.notice.clone()),
+            startup_warning: self.startup_warning.lock().ok().and_then(|warning| warning.clone()),
         })
     }
 
@@ -1426,6 +1299,11 @@ fn overlay_position(state: &AppState) -> Option<(i32, i32)> {
 
 struct TauriShortcutSettings<'a> {
     app: &'a AppHandle,
+    /// Settings is capturing a new combination and every global shortcut is
+    /// released. Registering now would bring the toggle back mid-capture, and
+    /// unregistering the old one would fail; resuming registers whatever the
+    /// saved shortcut is by then.
+    suspended: bool,
 }
 
 impl ShortcutSettingsEffect for TauriShortcutSettings<'_> {
@@ -1436,6 +1314,7 @@ impl ShortcutSettingsEffect for TauriShortcutSettings<'_> {
     }
 
     fn replace(&mut self, old: &str, new: &str) -> Result<(), String> {
+        if self.suspended { return self.validate(old).and_then(|()| self.validate(new)); }
         platform::replace_toggle_shortcut(self.app, old, new).map_err(|error| error.to_string())
     }
 }
@@ -1485,11 +1364,6 @@ pub fn warm_up_model(app: &AppHandle, state: &AppState) {
         .read()
         .map(|settings| settings.clone())
         .unwrap_or_default();
-    // A cloud engine has nothing to load, and keeping the local model warm
-    // for it would hold gigabytes for no reason.
-    if settings.transcription_source == TranscriptionSource::Cloud {
-        return;
-    }
     let warm = state.model_warm.clone();
     let engine = state.engine.clone();
     let engine_last_used = state.engine_last_used.clone();
@@ -1527,21 +1401,23 @@ fn emit_state(app: &AppHandle, state: &AppState) {
         // here, so this is where the key is claimed and given back.
         let _ = platform::arm_recorder_keys(
             app,
-            holds_discardable_audio(&snapshot.dictation) && state.hold.lock().is_ok_and(|hold| !hold.suspended),
+            claims_escape(&snapshot.dictation, state.show_overlay()) && state.hold.lock().is_ok_and(|hold| !hold.suspended),
             awaits_cancel_answer(&snapshot.dictation),
         );
         let _ = app.emit("dictation://state", snapshot);
     }
 }
 
-/// Whether there is a recording in progress that Escape could discard.
-pub fn holds_discardable_audio(state: &DictationState) -> bool {
-    matches!(
-        state,
-        DictationState::Recording { .. }
-            | DictationState::Cancelling { .. }
-            | DictationState::Processing { .. }
-    )
+/// Whether Escape has something to do: discard a capture, dismiss its Undo
+/// chip, or dismiss a failure pill on the overlay. Not while processing: the
+/// user has just stopped and is back in their editor, where Escape is theirs
+/// and must not silently throw the transcript away. The overlay X remains.
+pub fn claims_escape(state: &DictationState, overlay_shown: bool) -> bool {
+    match state {
+        DictationState::Recording { .. } | DictationState::Cancelling { .. } => true,
+        DictationState::Failed { .. } => overlay_shown,
+        _ => false,
+    }
 }
 
 /// Watches the idle worker and unloads the model from GPU/RAM after the
@@ -1552,6 +1428,17 @@ pub fn holds_discardable_audio(state: &DictationState) -> bool {
 /// Loquara lives in the tray for weeks, so a cleanup that only ran at startup
 /// would let "keep audio for a day" mean "keep it until the next reboot".
 const RETENTION_TICKS: u64 = 180;
+
+/// Whether the idle model may be released. Only between takes: a recording
+/// or transcription in progress is about to use it, however long it has run.
+fn keep_alive_expired(dictation: &DictationState, idle_elapsed: Duration, keep_secs: u64) -> bool {
+    keep_secs > 0 && matches!(dictation, DictationState::Idle) && idle_elapsed >= Duration::from_secs(keep_secs)
+}
+
+/// Marks the engine as in use, so the keep-alive timer counts from now.
+fn touch_engine(state: &AppState) {
+    if let Ok(mut last_used) = state.engine_last_used.lock() { *last_used = Instant::now(); }
+}
 
 pub fn spawn_model_keep_alive_watchdog(state: &AppState) {
     let state = state.clone();
@@ -1569,8 +1456,10 @@ pub fn spawn_model_keep_alive_watchdog(state: &AppState) {
                     .lock()
                     .map(|last| last.elapsed())
                     .unwrap_or_default();
-                if idle_elapsed >= Duration::from_secs(keep)
+                let dictation = state.machine.lock().ok().map(|machine| machine.snapshot());
+                if dictation.is_some_and(|dictation| keep_alive_expired(&dictation, idle_elapsed, keep))
                     && state.engine.loaded_model().is_some()
+                    && !state.model_warm.is_loading()
                 {
                     state.engine.unload();
                     state.model_warm.forget();
@@ -1627,7 +1516,7 @@ fn hold_may_start(state: &AppState, gesture: &Arc<HoldGesture>) -> bool {
     !gesture.released() && !gesture.cancelled()
         && state.settings.read().is_ok_and(|settings| settings.activation_mode == ActivationMode::PushToTalk)
         && state.hold.lock().is_ok_and(|hold| !hold.suspended)
-        && state.machine.lock().is_ok_and(|machine| matches!(machine.snapshot(), DictationState::Idle))
+        && state.machine.lock().is_ok_and(|machine| may_begin_take(&machine.snapshot()))
 }
 fn owns_held_capture(state: &AppState, gesture: &Arc<HoldGesture>) -> bool {
     state.active_take.lock().is_ok_and(|take| take.as_ref().is_some_and(|take|
@@ -1678,9 +1567,10 @@ pub fn dispatch_activation_press(app: AppHandle, state: AppState) {
         return;
     }
     let Ok(machine) = state.machine.try_lock() else { return };
-    let idle = matches!(machine.snapshot(), DictationState::Idle);
+    // A failure or Undo chip on screen is settled by the start, as in toggle.
+    let startable = may_begin_take(&machine.snapshot());
     drop(machine);
-    let Some(gesture) = holds.press(idle) else { return };
+    let Some(gesture) = holds.press(startable) else { return };
     drop(holds);
     drop(update);
     let monitor_state = state.clone();
@@ -1698,7 +1588,9 @@ pub fn dispatch_activation_press(app: AppHandle, state: AppState) {
     });
     tauri::async_runtime::spawn(async move {
         let start_app = app.clone(); let start_state = state.clone(); let start_hold = gesture.clone();
-        let _ = tauri::async_runtime::spawn_blocking(move || start_recording_with_hold(&start_app, &start_state, Some(start_hold))).await;
+        if let Ok(Err(error)) = tauri::async_runtime::spawn_blocking(move || start_recording_with_hold(&start_app, &start_state, Some(start_hold))).await {
+            report_start_failure(&app, &state, &error);
+        }
         while !gesture.released() { tokio::time::sleep(Duration::from_millis(10)).await; }
         if gesture.cancelled() {
             cancel_owned_hold(&app, &state, &gesture);
@@ -1737,7 +1629,9 @@ pub fn dispatch_cancel_press(app: AppHandle, state: AppState, key: RecorderKey) 
         });
         return;
     }
-    let gesture = if matches!(observed, DictationState::Idle) { pending } else { active_hold };
+    // A failed take may still name the hold that recorded it; Escape on a
+    // failure pill revokes only a new hold that is starting, else dismisses.
+    let gesture = match observed { DictationState::Idle | DictationState::Failed { .. } => pending, _ => active_hold };
     if key == RecorderKey::Escape && let Some(gesture) = gesture {
         gesture.cancel();
         tauri::async_runtime::spawn_blocking(move || cancel_owned_hold(&app, &state, &gesture));
@@ -1789,6 +1683,7 @@ fn start_recording_with_hold(app: &AppHandle, state: &AppState, hold: Option<Arc
 fn with_capture_start(state: &AppState, hold: Option<&Arc<HoldGesture>>, start: impl FnOnce() -> Result<AppSnapshot, String>) -> Result<AppSnapshot, String> {
     let _lifecycle = lifecycle_guard(&state.lifecycle).map_err(|error| error.to_string())?;
     if hold.is_some_and(|gesture| !hold_may_start(state, gesture)) { return state.snapshot(); }
+    settle_finished_take(state)?;
     start()
 }
 
@@ -1801,17 +1696,13 @@ fn start_recording_locked(app: &AppHandle, state: &AppState, hold: Option<Arc<Ho
         .read()
         .map_err(|_| "settings lock poisoned")?
         .clone();
-    if settings.transcription_source == TranscriptionSource::Local
-        && !state.engine.is_installed(&settings.model)
-    {
+    if !state.engine.is_installed(&settings.model) {
         return Err("Najpierw pobierz wybrany model.".into());
     }
-    // Warm the model — or the provider's connection — while the user talks,
-    // so transcription does not pay the setup cost the moment they stop.
+    // Warm the model while the user talks, so transcription does not pay
+    // the setup cost the moment they stop.
+    touch_engine(state);
     warm_up_model(app, state);
-    if settings.transcription_source == TranscriptionSource::Cloud {
-        warm_cloud_connection(state, &settings);
-    }
     let mut windows = SystemWindows;
     let target = windows.foreground_window();
     let devices = state.audio.list_devices().map_err(|error| error.to_string())?;
@@ -1823,6 +1714,7 @@ fn start_recording_locked(app: &AppHandle, state: &AppState, hold: Option<Arc<Ho
     platform::hide_overlay(app);
     let mut take = FrozenTake::capture(state, settings.clone(), target, String::new());
     take.hold = hold;
+    take.progressive = Some(crate::progressive::ProgressiveSession::new());
     *state.active_take.lock().map_err(|_| "take lock poisoned")? = Some(take.clone());
     *state.live_transcript.lock().map_err(|_| "draft lock poisoned")? = None;
     let live = start_live_session(app, state, &take);
@@ -1832,7 +1724,7 @@ fn start_recording_locked(app: &AppHandle, state: &AppState, hold: Option<Arc<Ho
             state.audio.set_stream_sink(None);
             take.cancel.store(true, Ordering::SeqCst);
             take.preview_stop.store(true, Ordering::SeqCst);
-            if let Some(live) = live && let Some(cancellation) = live.cancellation { cancellation.cancel(); }
+            drop(live);
             return Err(error.to_string());
         }
     };
@@ -1843,7 +1735,7 @@ fn start_recording_locked(app: &AppHandle, state: &AppState, hold: Option<Arc<Ho
         *slot = Some(live);
         *state.live_transcript.lock().map_err(|_| "draft lock poisoned")? = Some(LiveTranscript {
             recording_id: started.id.clone(), text: String::new(), revision: 0,
-            status: if settings.transcription_source == TranscriptionSource::Cloud { "connecting" } else { "listening" }.into(), clipboard_ready: false,
+            status: "listening".into(),
         });
     }
     state.transcription_cancel.store(false, Ordering::SeqCst);
@@ -1862,6 +1754,7 @@ fn start_recording_locked(app: &AppHandle, state: &AppState, hold: Option<Arc<Ho
         peaks: None,
     };
     if let Err(error) = state.storage.insert_recording(&recording) {
+        state.end_media();
         let _ = state.audio.cancel();
         abandon_live_session(state);
         return Err(error.to_string());
@@ -1876,6 +1769,9 @@ fn start_recording_locked(app: &AppHandle, state: &AppState, hold: Option<Arc<Ho
         .map_err(|_| "coordinator lock poisoned")?
         .started(started.id, audio_path)
         .map_err(|error| error.to_string())?;
+    // Only once the take is really recording, so no failed start leaves
+    // anything ducked.
+    state.begin_media(settings.media_during_dictation);
     if state.show_overlay() {
         // Shown without activation so the app the user is dictating into
         // keeps the keyboard. Esc and the configured shortcut are global.
@@ -1911,14 +1807,20 @@ pub fn set_shortcut_suspended(
         invalidate_hold(&app, &state);
         platform::suspend_shortcuts(&app).map_err(|error| error.to_string())
     } else {
+        // Serialised with update_settings, so resuming registers the shortcut
+        // that a save made during capture just committed, not the one it replaced.
+        let _update = state.settings_update.lock().map_err(|_| "settings update lock poisoned")?;
         let shortcut = state
             .settings
             .read()
             .map(|settings| settings.shortcut.clone())
             .unwrap_or_else(|_| default_shortcut().to_string());
-        platform::register_shortcuts(&app, &shortcut).map_err(|error| error.to_string())?;
+        let registered = platform::register_shortcuts(&app, &shortcut).map_err(|error| error.to_string());
         state.hold.lock().map_err(|_| "hold lock poisoned")?.suspended = false;
-        Ok(())
+        // Registration starts from a clean slate, which drops an armed Escape;
+        // re-arm the recorder keys for whatever dictation is doing now.
+        emit_state(&app, &state);
+        registered
     }
 }
 
@@ -1943,7 +1845,7 @@ pub async fn stop_recording_inner(app: AppHandle, state: AppState) -> Result<App
 pub fn interrupt_microphone_capture(state: &AppState, fault: &crate::audio::CaptureFault) -> Result<bool, String> {
     let _gate = state.lifecycle.lock().map_err(|_| "lifecycle lock poisoned")?;
     if !state.audio.owns_capture(&fault.recording_id) { return Ok(false); }
-    if !matches!(state.snapshot()?.dictation, DictationState::Recording { ref recording_id, .. } | DictationState::Cancelling { ref recording_id, .. } if recording_id == &fault.recording_id) {
+    if !matches!(state.snapshot()?.dictation, DictationState::Recording { ref recording_id, .. } if recording_id == &fault.recording_id) {
         return Ok(false);
     }
     // The sink retains the fault before queuing it, so committed stop takes
@@ -1983,18 +1885,12 @@ async fn stop_recording_owned(app: AppHandle, state: AppState, hold: Option<Arc<
         let take = blocking_state.active_take.lock().map_err(|_| "take lock poisoned")?
             .as_ref().filter(|take| take.recording_id == completed.id).cloned().ok_or("recording context missing")?;
         take.preview_stop.store(true, Ordering::SeqCst);
-        let live = blocking_state.streaming.lock().ok().and_then(|mut slot| {
-            slot.as_mut().filter(|live| live.recording_id == completed.id).and_then(|live| {
-                live.flush();
-                live.session.take()
-            })
-        });
         if let Ok(mut draft) = blocking_state.live_transcript.lock() && let Some(draft) = draft.as_mut() { draft.status = "finalizing".into(); }
-        Ok::<_, String>((completed, live, take))
+        Ok::<_, String>((completed, take))
     }))
     .await
     .map_err(|error| error.to_string())?;
-    let (completed, live, take) = match completed_result {
+    let (completed, take) = match completed_result {
         Ok(completed) => completed,
         Err(error) => {
             emit_state(&app, &state);
@@ -2007,48 +1903,15 @@ async fn stop_recording_owned(app: AppHandle, state: AppState, hold: Option<Arc<
     let background_app = app.clone();
     let background_state = state.clone();
     tauri::async_runtime::spawn(async move {
-        match live {
-            Some(session) => {
-                finish_live_take(background_app, background_state, completed, session, take).await
-            }
-            None => {
-                transcribe_recording(
-                    background_app,
-                    background_state,
-                    completed.id,
-                    completed.path,
-                    take,
-                )
-                .await
-            }
-        }
+        transcribe_recording(background_app, background_state, completed.id, completed.path, take).await
     });
     Ok(snapshot)
-}
-
-/// A live result is authoritative only when the provider explicitly finished
-/// and every audio packet arrived. Empty final is valid silence, not fallback.
-async fn finish_live_take(app: AppHandle, state: AppState, completed: CompletedRecording, session: streaming::Session, take: FrozenTake) {
-    let outcome = session.finish(Duration::from_secs(8)).await;
-    if !take.owns(&state) { return; }
-    if let Some(text) = outcome.authoritative_final() {
-        finish_success(&app, &state, &completed.id, &completed.path, TranscriptionResult {
-            text: text.to_owned(), model: cloud_model_label(&take.settings), language: None, duration_ms: 0,
-        }, &take);
-    } else {
-        if let Ok(_gate) = state.lifecycle.lock() {
-            if !take.owns(&state) { return; }
-            if let Ok(mut draft) = state.live_transcript.lock() && let Some(draft) = draft.as_mut() { draft.status = "fallback".into(); }
-            emit_state(&app, &state);
-        }
-        transcribe_recording(app, state, completed.id, completed.path, take).await;
-    }
 }
 
 fn stop_capture_or_abandon(state: &AppState) -> Result<CompletedRecording, String> {
     // The caller holds the lifecycle gate. A duplicate/stale stop is not an
     // audio failure and must not revoke the already-processing take.
-    if !matches!(state.snapshot()?.dictation, DictationState::Recording { .. } | DictationState::Cancelling { .. }) {
+    if !matches!(state.snapshot()?.dictation, DictationState::Recording { .. }) {
         return Err(CoordinatorError::InvalidState.to_string());
     }
     match stop_recording_committed(state) {
@@ -2062,13 +1925,12 @@ fn stop_recording_committed(state: &AppState) -> Result<CompletedRecording, Stri
         DictationState::Recording {
             recording_id,
             audio_path,
-        }
-        | DictationState::Cancelling {
-            recording_id,
-            audio_path,
         } => (recording_id, audio_path),
         _ => return Err(CoordinatorError::InvalidState.to_string()),
     };
+    // Capture is ending (stop or microphone loss): the music comes back now,
+    // not after transcription.
+    state.end_media();
     let completed = match state.audio.stop() {
         Ok(completed) => completed,
         Err(error) => {
@@ -2091,6 +1953,10 @@ fn stop_recording_committed(state: &AppState) -> Result<CompletedRecording, Stri
         let _ = state
             .storage
             .store_peaks(&completed.id, &quantize_peaks(&completed.peaks));
+        if let Some(level) = crate::audio::assess_level(&completed.peaks) && let Ok(mut levels) = state.mic_levels.lock() {
+            levels.clear();
+            levels.insert(completed.id.clone(), level);
+        }
     }
     if let Some(message) = &completed.interrupted {
         let message = format!("Microphone interrupted: {message}. Retained audio is available in History; retry manually.");
@@ -2170,30 +2036,29 @@ async fn transcribe_recording(
 ) {
     if !take.owns(&state) { return; }
     let settings = take.settings.clone();
-    let vocabulary = take.vocabulary.clone();
     let started = Instant::now();
     let cancel = take.cancel.clone();
-    let outcome = match settings.transcription_source {
-        TranscriptionSource::Cloud => {
-            let storage = state.storage.clone();
-            let audio = audio_path.clone();
-            tauri::async_runtime::spawn_blocking(move || {
-                transcribe_in_cloud(&storage, &settings, &vocabulary, &audio, &cancel, started)
-            })
-            .await
-        }
-        TranscriptionSource::Local => {
+    let outcome = {
+        {
+            touch_engine(&state);
             let engine = state.engine.clone();
             let engine_last_used = state.engine_last_used.clone();
             let audio_for_engine = audio_path.clone();
             let warm = state.model_warm.clone();
             let model = settings.model.clone();
+            let progressive = take.progressive.clone();
             tauri::async_runtime::spawn_blocking(move || {
                 // A warm-up started when recording began may still be
                 // finishing; the engine would serialise on its own lock
                 // anyway, but waiting here keeps the reported state honest.
                 let _ = warm.wait_until_ready_for(&model, Duration::from_secs(240));
-                let text = engine.transcribe(&model, &audio_for_engine, Some(&cancel))?;
+                // Windows decoded while recording are reused; only the rest
+                // (usually the last window) is decoded now. Same result as the
+                // batch pass, which runs if the progressive state is unusable.
+                let text = match progressive.and_then(|progressive| progressive.finish(&audio_for_engine)) {
+                    Some((samples, cache)) => engine.transcribe_prepared(&model, &samples, &cache, Some(&cancel))?,
+                    None => engine.transcribe(&model, &audio_for_engine, Some(&cancel))?,
+                };
                 if let Ok(mut last_used) = engine_last_used.lock() {
                     *last_used = Instant::now();
                 }
@@ -2215,61 +2080,6 @@ async fn transcribe_recording(
     }
 }
 
-/// One recording transcribed by the configured provider.
-fn transcribe_in_cloud(
-    storage: &Storage,
-    settings: &AppSettings,
-    vocabulary: &[VocabularyEntry],
-    audio_path: &Path,
-    cancel: &AtomicBool,
-    started: Instant,
-) -> Result<TranscriptionResult, String> {
-    let provider = cloud::provider(&settings.cloud_provider)
-        .unwrap_or_else(|| cloud::default_provider());
-    let api_key = cloud_api_key(storage, provider.key)?.ok_or_else(|| {
-        format!(
-            "no API key is set for {}; add one in Settings",
-            provider.display
-        )
-    })?;
-    let model = resolve_cloud_model(settings);
-    // The capture is routinely 48 kHz stereo; every recogniser here consumes
-    // 16 kHz mono, so converting first makes the upload several times
-    // smaller. The original file stays on disk untouched.
-    let (audio, file_name) = match crate::engine::compact_wav(audio_path) {
-        Ok(compact) => (compact, "loquara-16k-mono.wav".to_owned()),
-        Err(_) => {
-            let raw = std::fs::read(audio_path)
-                .map_err(|error| format!("could not read the recording: {error}"))?;
-            let name = audio_path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or("recording.wav")
-                .to_owned();
-            (raw, name)
-        }
-    };
-    let keyterms = keyterms_for(vocabulary);
-    let transcript = cloud::transcribe(cloud::Request {
-        provider: provider.key,
-        model: &model,
-        base_url: &settings.cloud_base_url,
-        api_key: &api_key,
-        language: &settings.cloud_language,
-        keyterms: &keyterms,
-        audio: &audio,
-        file_name: &file_name,
-        cancel: Some(cancel),
-    })
-    .map_err(|error| error.to_string())?;
-    Ok(TranscriptionResult {
-        text: transcript.text,
-        model: format!("{} · {}", provider.display, model),
-        language: transcript.language,
-        duration_ms: started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
-    })
-}
-
 /// Real completion consumer used by the desktop and lifecycle tests. Ownership
 /// is checked under the same gate as cancellation, including history and input.
 fn complete_take(state: &AppState, take: &FrozenTake, audio_path: &Path, result: &TranscriptionResult, windows: &mut impl WindowsApi) -> Result<Option<Result<(), platform::PlatformError>>, String> {
@@ -2282,10 +2092,9 @@ fn complete_take(state: &AppState, take: &FrozenTake, audio_path: &Path, result:
     if !take.owns(state) { return Ok(None); }
     if !matches!(state.machine.lock().map_err(|_| "coordinator lock poisoned")?.snapshot(),
         DictationState::Processing { recording_id: active, .. } if active == take.recording_id) { return Ok(None); }
-    // Silence is authoritative before mode decorations. A custom prefix or
-    // suffix must never invent a deliverable transcript from an empty final.
+    // Silence stays silence: nothing is delivered for an empty final.
     let transcript = if result.text.trim().is_empty() { String::new() }
-        else { postprocess_with_mode(&result.text, &take.vocabulary, take.mode.as_ref()) };
+        else { finish_transcript(&result.text, &VocabularyEntry::matcher(&take.vocabulary).protect(state.storage.everyday_words())) };
     let mut delivery = Ok(());
     complete_transcription_durably(&state.machine, state.storage.as_ref(), DurableTranscript {
         recording_id: &take.recording_id, audio_path: &audio_path.to_string_lossy(), transcript: &transcript,
@@ -2310,7 +2119,14 @@ fn complete_take(state: &AppState, take: &FrozenTake, audio_path: &Path, result:
         Ok(()) if take.settings.auto_paste && !transcript.trim().is_empty() => (OverlayNoticeKind::PasteRequested, Some(1600), None),
         Ok(()) => (OverlayNoticeKind::Copied, Some(1600), None),
     };
-    publish_overlay_notice(state, &take.recording_id, kind, duration, detail);
+    let mic_level = state.mic_levels.lock().ok().and_then(|mut levels| levels.remove(&take.recording_id));
+    // A warning about the microphone stays up long enough to be read.
+    let duration = if mic_level.is_some() && delivery.is_ok() { Some(5000) } else { duration };
+    let notice = publish_overlay_notice(state, &take.recording_id, kind, duration, detail);
+    if delivery.is_ok() && let Some(level) = mic_level && let Ok(mut feedback) = state.overlay_feedback.lock()
+        && let Some(current) = feedback.notice.as_mut() && current.key == notice.key {
+        current.mic_level = Some(level);
+    }
     Ok(Some(delivery))
 }
 
@@ -2339,28 +2155,6 @@ fn finish_success(app: &AppHandle, state: &AppState, _recording_id: &str, audio_
         Ok(None) => {}
         Err(error) => { let _ = app.emit("dictation://persistence_error", error); emit_state(app, state); }
     }
-}
-
-fn postprocess_with_mode(
-    text: &str,
-    vocabulary: &[VocabularyEntry],
-    mode: Option<&Mode>,
-) -> String {
-    mode.map_or_else(
-        || {
-            let fallback = Mode {
-                id: "clean".into(),
-                name: "Czysty".into(),
-                description: String::new(),
-                prompt: String::new(),
-                enabled: true,
-                is_default: true,
-                created_at: 0,
-            };
-            postprocess_for_mode(text, vocabulary, &fallback)
-        },
-        |selected| postprocess_for_mode(text, vocabulary, selected),
-    )
 }
 
 fn finish_failure(app: &AppHandle, state: &AppState, recording_id: &str, error: String, take: &FrozenTake) {
@@ -2405,8 +2199,24 @@ fn cancel_recording_locked(app: &AppHandle, state: &AppState) -> Result<AppSnaps
             audio_path,
         } => cancel_processing(app, state, recording_id, audio_path),
         DictationState::Cancelling { .. } => dismiss_undo(app, state),
+        DictationState::Failed { .. } => dismiss_failure(app, state),
         _ => Err(CoordinatorError::InvalidState.to_string()),
     }
+}
+
+/// Puts a failure pill away. The take stays Failed in History, retryable.
+fn dismiss_failure(app: &AppHandle, state: &AppState) -> Result<AppSnapshot, String> {
+    dismiss_failure_state(state)?;
+    hide_overlay_quietly(app, state);
+    emit_state(app, state);
+    state.snapshot()
+}
+
+fn dismiss_failure_state(state: &AppState) -> Result<(), String> {
+    state.end_media();
+    let mut machine = state.machine.lock().map_err(|_| "coordinator lock poisoned")?;
+    if !matches!(machine.snapshot(), DictationState::Failed { .. }) { return Err(CoordinatorError::InvalidState.to_string()); }
+    machine.cancel().map_err(|error| error.to_string())
 }
 
 /// Takes shorter than this are discarded immediately. Longer ones keep a 5s
@@ -2458,6 +2268,7 @@ fn cancel_live_recording(
     // Whatever was typed stays typed — there is no taking text back out of an
     // arbitrary application — but nothing more will be sent.
     abandon_live_session(state);
+    state.end_media();
     let cancelled = match state.audio.stop() {
         Ok(cancelled) => cancelled,
         Err(error) => {
@@ -2528,6 +2339,7 @@ fn cancel_processing(
 /// Caller holds lifecycle; desktop feedback is deliberately separate from the
 /// durable cancellation so unavailable-desktop cleanup does not depend on UI.
 fn cancel_processing_state(state: &AppState, recording_id: &str) -> Result<OverlayNotice, String> {
+    state.end_media();
     state.transcription_cancel.store(true, Ordering::SeqCst);
     abandon_live_session(state);
     let _ = state.storage.update_status(recording_id, RecordingStatus::Cancelled, None, None, None, None);
@@ -2535,6 +2347,7 @@ fn cancel_processing_state(state: &AppState, recording_id: &str) -> Result<Overl
 }
 
 fn dismiss_undo(app: &AppHandle, state: &AppState) -> Result<AppSnapshot, String> {
+    state.end_media();
     state.overlay_feedback.lock().map_err(|_| "feedback lock poisoned")?.notice = None;
     state
         .machine
@@ -2591,8 +2404,8 @@ pub fn cancel_press_for(state: &DictationState, key: RecorderKey) -> CancelPress
     match (state, key) {
         (
             DictationState::Recording { .. }
-            | DictationState::Processing { .. }
-            | DictationState::Cancelling { .. },
+            | DictationState::Cancelling { .. }
+            | DictationState::Failed { .. },
             RecorderKey::Escape,
         ) => CancelPress::Confirm,
         _ => CancelPress::Ignore,
@@ -2680,25 +2493,11 @@ pub fn retry_transcription(
             .read()
             .map_err(|_| "settings lock poisoned")?
             .clone();
-        match settings.transcription_source {
-            TranscriptionSource::Local => {
-                if !state.engine.is_installed(&settings.model) {
-                    return Err(format!(
-                        "The selected model is not ready. Download it before retrying: {}.",
-                        settings.model
-                    ));
-                }
-            }
-            TranscriptionSource::Cloud => {
-                let provider = cloud::provider(&settings.cloud_provider)
-                    .unwrap_or_else(|| cloud::default_provider());
-                if cloud_api_key(&state.storage, provider.key)?.is_none() {
-                    return Err(format!(
-                        "No API key is set for {}. Add one in Settings before retrying.",
-                        provider.display
-                    ));
-                }
-            }
+        if !state.engine.is_installed(&settings.model) {
+            return Err(format!(
+                "The selected model is not ready. Download it before retrying: {}.",
+                settings.model
+            ));
         }
         match state.storage.mark_retrying(&recording_id) {
             Ok(true) => {}
@@ -2711,9 +2510,12 @@ pub fn retry_transcription(
         if let Ok(previous) = state.active_take.lock() && let Some(previous) = previous.as_ref() {
             previous.cancel.store(true, Ordering::SeqCst); previous.preview_stop.store(true, Ordering::SeqCst);
         }
-        let target = state.target_window.lock().ok().and_then(|target| *target);
+        // A retry is started from History, long after the original window may
+        // be gone: deliver to the clipboard only and never type anywhere.
+        let mut settings = settings;
+        settings.auto_paste = false;
         begin_overlay_attempt(&state);
-        let take = FrozenTake::capture(&state, settings, target, recording_id.clone());
+        let take = FrozenTake::capture(&state, settings, None, recording_id.clone());
         *state.active_take.lock().map_err(|_| "take lock poisoned")? = Some(take.clone());
         *state.live_transcript.lock().map_err(|_| "draft lock poisoned")? = None;
         (audio_path, take)
@@ -2727,27 +2529,13 @@ pub fn retry_transcription(
     state.snapshot()
 }
 
-/// Whether a history row is still waiting for a transcript.
-///
-/// Failed and cancelled takes were never transcribed. A completed take whose
-/// transcript came back empty was transcribed into nothing, which reads as a
-/// missing transcript rather than a finished one. Anything else already has
-/// text worth keeping, so history does not offer to overwrite it.
-pub fn needs_transcript(recording: &Recording) -> bool {
-    match recording.status {
-        RecordingStatus::Failed | RecordingStatus::Cancelled => true,
-        RecordingStatus::Completed => recording
-            .text
-            .as_deref()
-            .is_none_or(|text| text.trim().is_empty()),
-        RecordingStatus::Recording | RecordingStatus::Processing => false,
-    }
-}
-
 fn retry_audio_path(recording: &Recording) -> Result<PathBuf, AppError> {
-    if !needs_transcript(recording) {
+    // A finished take may be run again (after a vocabulary change, say); the
+    // old text stays until the new one replaces it. Only a take still being
+    // recorded or processed is off limits.
+    if matches!(recording.status, RecordingStatus::Recording | RecordingStatus::Processing) {
         return Err(AppError::NotRetryable {
-            message: "the recording already has a transcript".into(),
+            message: "the recording is still in progress".into(),
         });
     }
     let audio_path =
@@ -2807,24 +2595,59 @@ pub fn paste_transcript_inner(recording_id: Option<&str>, state: &AppState) -> R
 pub async fn toggle_recording(app: AppHandle, state: AppState) -> Result<(), String> {
     let snapshot = state.snapshot()?;
     match snapshot.dictation {
-        DictationState::Idle => {
-            start_recording_inner(&app, &state)?;
+        // A failure or the Undo window of a cancel is finished work on screen;
+        // the start settles it first (see with_capture_start).
+        ref dictation if may_begin_take(dictation) => {
+            if let Err(error) = start_recording_inner(&app, &state) {
+                report_start_failure(&app, &state, &error);
+                return Err(error);
+            }
         }
-        DictationState::Recording { .. } | DictationState::Cancelling { .. } => {
+        DictationState::Recording { .. } => {
             stop_recording_inner(app, state).await?;
-        }
-        DictationState::Failed { .. } => {
-            state
-                .machine
-                .lock()
-                .map_err(|_| "coordinator lock poisoned")?
-                .cancel()
-                .map_err(|error| error.to_string())?;
-            start_recording_inner(&app, &state)?;
         }
         _ => {}
     }
     Ok(())
+}
+
+/// Whether the activation shortcut may begin a new take from this state.
+pub fn may_begin_take(state: &DictationState) -> bool {
+    matches!(state, DictationState::Idle | DictationState::Failed { .. } | DictationState::Cancelling { .. })
+}
+
+/// A new take supersedes finished work still on screen: a failure (its audio
+/// stays in History for retry) or the Undo window of a cancellation (its row
+/// stays Cancelled). Caller holds lifecycle.
+fn settle_finished_take(state: &AppState) -> Result<(), String> {
+    let mut machine = state.machine.lock().map_err(|_| "coordinator lock poisoned")?;
+    if !matches!(machine.snapshot(), DictationState::Failed { .. } | DictationState::Cancelling { .. }) { return Ok(()); }
+    machine.cancel().map_err(|error| error.to_string())?;
+    drop(machine);
+    state.end_media();
+    state.overlay_feedback.lock().map_err(|_| "feedback lock poisoned")?.notice = None;
+    Ok(())
+}
+
+/// Whether a start error is worth showing. Busy and invalid-state errors only
+/// mean another press or command won the race; the user sees that one.
+fn start_failure_is_reportable(error: &str) -> bool {
+    error != CoordinatorError::Busy.to_string() && error != CoordinatorError::InvalidState.to_string()
+}
+
+/// A start from the keyboard or tray has no caller to show its error, so the
+/// overlay says why nothing is recording (no model, no microphone, …).
+fn report_start_failure(app: &AppHandle, state: &AppState, error: &str) {
+    if !start_failure_is_reportable(error) { return; }
+    let Ok(_gate) = state.lifecycle.lock() else { return };
+    if !matches!(state.machine.lock().map(|machine| machine.snapshot()), Ok(DictationState::Recording { .. })) { state.end_media(); }
+    if !matches!(state.machine.lock().map(|machine| machine.snapshot()), Ok(DictationState::Idle)) { return; }
+    let notice = publish_overlay_notice(state, "", OverlayNoticeKind::StartFailed, Some(5000), Some(error.to_owned()));
+    if !state.show_overlay() || platform::show_overlay_without_focus(app, overlay_position(state)).is_err() {
+        let _ = app.emit("dictation://persistence_error", error.to_owned());
+    }
+    schedule_overlay_expiry(app, state, notice);
+    emit_state(app, state);
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -2984,12 +2807,8 @@ pub fn correct_transcript(
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "recording not found".to_owned())?;
     let previous = recording.text.unwrap_or_default();
-    let learned = learn_vocabulary(&previous, &text, |heard, replacement| {
-        state
-            .storage
-            .add_vocabulary(heard, replacement)
-            .map(|_| ())
-            .map_err(|error| error.to_string())
+    let learned = learn_vocabulary(&previous, &text, |term, aliases| {
+        state.storage.add_vocabulary(term, aliases).map(|_| ()).map_err(|error| error.to_string())
     })?;
     state
         .storage
@@ -2998,53 +2817,19 @@ pub fn correct_transcript(
     Ok(learned)
 }
 
+/// Stores each misrecognition the user fixed by hand as a term, with what
+/// the model wrote as its alias, so the next dictation comes out right.
 fn learn_vocabulary(
     previous: &str,
     corrected: &str,
-    mut add: impl FnMut(&str, &str) -> Result<(), String>,
+    mut add: impl FnMut(&str, &[String]) -> Result<(), String>,
 ) -> Result<usize, String> {
-    let previous_words = tokenize_words(previous);
-    let corrected_words = tokenize_words(corrected);
-    let mut learned = 0;
-    for corrected_word in &corrected_words {
-        let lower = corrected_word.to_lowercase();
-        if lower.chars().all(|c| c.is_ascii_alphanumeric()) && lower.len() > 2 {
-            let matches_previous = previous_words.iter().any(|previous_word| {
-                previous_word.to_lowercase() == lower
-                    || levenshtein_words(previous_word, corrected_word) <= 1
-            });
-            if !matches_previous {
-                add(&lower, corrected_word)?;
-                learned += 1;
-            }
-        }
+    let found = crate::vocabulary::corrections(previous, corrected);
+    for correction in &found {
+        let aliases: Vec<String> = correction.heard.iter().cloned().collect();
+        add(&correction.term, &aliases)?;
     }
-    Ok(learned)
-}
-
-fn tokenize_words(text: &str) -> Vec<String> {
-    text.split(|c: char| !c.is_alphanumeric())
-        .filter(|word| !word.is_empty())
-        .map(str::to_owned)
-        .collect()
-}
-
-fn levenshtein_words(left: &str, right: &str) -> usize {
-    let left = left.chars().collect::<Vec<_>>();
-    let right = right.chars().collect::<Vec<_>>();
-    let mut previous = (0..=right.len()).collect::<Vec<_>>();
-    let mut current = vec![0; right.len() + 1];
-    for (i, lc) in left.iter().enumerate() {
-        current[0] = i + 1;
-        for (j, rc) in right.iter().enumerate() {
-            let cost = if lc == rc { 0 } else { 1 };
-            current[j + 1] = (previous[j + 1] + 1)
-                .min(current[j] + 1)
-                .min(previous[j] + cost);
-        }
-        std::mem::swap(&mut previous, &mut current);
-    }
-    previous[right.len()]
+    Ok(found.len())
 }
 
 fn delete_history_safely(
@@ -3137,14 +2922,82 @@ pub fn list_vocabulary(state: State<'_, AppState>) -> Result<Vec<VocabularyEntry
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn add_vocabulary(
-    heard: String,
-    replacement: String,
+    term: String,
+    aliases: Vec<String>,
     state: State<'_, AppState>,
 ) -> Result<VocabularyEntry, String> {
+    if term.trim().is_empty() {
+        return Err("The word or phrase is empty.".into());
+    }
     state
         .storage
-        .add_vocabulary(&heard, &replacement)
+        .add_vocabulary(&term, &aliases)
         .map_err(|error| error.to_string())
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VocabularySuggestion {
+    pub term_id: i64,
+    pub term: String,
+    pub heard: String,
+    pub count: usize,
+    pub example: String,
+}
+
+/// Words from the history that sound like a term but were not replaced,
+/// most frequent first: candidates for an alias.
+#[tauri::command]
+pub async fn vocabulary_suggestions(state: State<'_, AppState>) -> Result<Vec<VocabularySuggestion>, String> {
+    let storage = state.storage.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let entries = storage.list_vocabulary().map_err(|error| error.to_string())?;
+        let texts = storage.recent_transcripts(1500).map_err(|error| error.to_string())?;
+        Ok(suggest_aliases(&entries, &texts, storage.everyday_words()))
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+fn suggest_aliases(
+    entries: &[VocabularyEntry],
+    texts: &[String],
+    everyday: Arc<std::collections::HashSet<String>>,
+) -> Vec<VocabularySuggestion> {
+    let vocabulary = VocabularyEntry::matcher(entries).protect(everyday);
+    if vocabulary.is_empty() {
+        return Vec::new();
+    }
+    let mut found: std::collections::HashMap<(usize, String), VocabularySuggestion> = Default::default();
+    for text in texts {
+        for (index, heard) in vocabulary.near_misses(text) {
+            let entry = &entries[index];
+            let suggestion = found.entry((index, heard.to_lowercase())).or_insert_with(|| VocabularySuggestion {
+                term_id: entry.id,
+                term: entry.term.clone(),
+                example: excerpt(text, &heard),
+                heard,
+                count: 0,
+            });
+            suggestion.count += 1;
+        }
+    }
+    // A single sighting is as likely a real word as a misrecognition.
+    let mut suggestions: Vec<_> = found.into_values().filter(|suggestion| suggestion.count >= 2).collect();
+    suggestions.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.heard.cmp(&b.heard)));
+    suggestions.truncate(20);
+    suggestions
+}
+
+/// A few words either side of `heard`, for recognising the context.
+fn excerpt(text: &str, heard: &str) -> String {
+    let start = text.find(heard).unwrap_or(0);
+    let before: Vec<&str> = text[..start].split_whitespace().collect();
+    let after: Vec<&str> = text[(start + heard.len()).min(text.len())..].split_whitespace().collect();
+    let (head, tail) = (&before[before.len().saturating_sub(5)..], &after[..after.len().min(5)]);
+    let open = if before.len() > 5 { "… " } else { "" };
+    let close = if after.len() > 5 { " …" } else { "" };
+    format!("{open}{} {heard} {}{close}", head.join(" "), tail.join(" ")).trim().to_owned()
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -3152,76 +3005,6 @@ pub fn delete_vocabulary(id: i64, state: State<'_, AppState>) -> Result<bool, St
     state
         .storage
         .delete_vocabulary(id)
-        .map_err(|error| error.to_string())
-}
-
-#[tauri::command]
-pub fn list_modes(state: State<'_, AppState>) -> Result<Vec<Mode>, String> {
-    state
-        .storage
-        .list_modes()
-        .map_err(|error| error.to_string())
-}
-
-fn validate_active_mode(storage: &Storage, id: &str) -> Result<Mode, String> {
-    match storage.get_mode(id).map_err(|error| error.to_string())? {
-        None => Err(format!("Tryb „{id}” nie istnieje.")),
-        Some(mode) if !mode.enabled => Err(format!("Mode \"{}\" is disabled.", mode.name)),
-        Some(mode) => Ok(mode),
-    }
-}
-
-fn validate_mode_upsert(active_mode: &str, mode: &Mode) -> Result<(), String> {
-    if mode.id == active_mode && !mode.enabled {
-        Err("Cannot disable the mode that is currently in use.".into())
-    } else {
-        Ok(())
-    }
-}
-
-fn validate_mode_delete(active_mode: &str, id: &str) -> Result<(), String> {
-    if id == active_mode {
-        Err("Cannot delete the mode that is currently in use.".into())
-    } else {
-        Ok(())
-    }
-}
-
-#[tauri::command(rename_all = "camelCase")]
-pub fn upsert_mode(mode: Mode, state: State<'_, AppState>) -> Result<(), String> {
-    let _update_guard = state
-        .settings_update
-        .lock()
-        .map_err(|_| "settings update lock poisoned")?;
-    let active_mode = state
-        .settings
-        .read()
-        .map_err(|_| "settings lock poisoned")?
-        .active_mode
-        .clone();
-    validate_mode_upsert(&active_mode, &mode)?;
-    state
-        .storage
-        .upsert_mode(&mode)
-        .map_err(|error| error.to_string())
-}
-
-#[tauri::command(rename_all = "camelCase")]
-pub fn delete_mode(id: String, state: State<'_, AppState>) -> Result<bool, String> {
-    let _update_guard = state
-        .settings_update
-        .lock()
-        .map_err(|_| "settings update lock poisoned")?;
-    let active_mode = state
-        .settings
-        .read()
-        .map_err(|_| "settings lock poisoned")?
-        .active_mode
-        .clone();
-    validate_mode_delete(&active_mode, &id)?;
-    state
-        .storage
-        .delete_mode(&id)
         .map_err(|error| error.to_string())
 }
 
@@ -3307,7 +3090,7 @@ pub fn list_models(state: State<'_, AppState>) -> Vec<ModelDescriptor> {
             let installed = state.engine.is_installed(spec.key);
             ModelDescriptor {
                 key: spec.key.to_owned(),
-                id: spec.repo.to_owned(),
+                id: spec.id.to_owned(),
                 provider: spec.provider.to_owned(),
                 source: "local".to_owned(),
                 revision: String::new(),
@@ -3556,13 +3339,13 @@ pub fn update_settings(
         }
         settings.input_device = preferences.selected_id.clone();
     }
-    validate_active_mode(&state.storage, &settings.active_mode)?;
     let mut live = state
         .settings
         .read()
         .map_err(|_| "settings lock poisoned")?
         .clone();
-    let mut shortcut_effect = TauriShortcutSettings { app: &app };
+    let suspended = state.hold.lock().map_err(|_| "hold lock poisoned")?.suspended;
+    let mut shortcut_effect = TauriShortcutSettings { app: &app, suspended };
     let mut autostart_effect = TauriAutostartSettings { app: &app };
     let mut storage_effect = PersistentSettings {
         storage: state.storage.as_ref(),
@@ -3570,7 +3353,6 @@ pub fn update_settings(
     };
     let old_activation = (live.activation_mode, live.shortcut.clone());
     let old_language = live.language.clone();
-    let old_source = live.transcription_source.clone();
     let result = apply_settings_change(
         &mut shortcut_effect,
         &mut autostart_effect,
@@ -3589,18 +3371,13 @@ pub fn update_settings(
             .clone();
         current != live.model
     };
-    let source_changed = live.transcription_source != old_source;
     *state
         .settings
         .write()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = live;
-    if model_changed || source_changed {
-        // The old model is of no further use, and holding two at once would
-        // double the memory for as long as the new one takes to load. The
-        // release waits behind any load already running, so it happens off
-        // the thread that draws the window.
-        let engine = state.engine.clone();
-        std::thread::spawn(move || engine.unload());
+    if model_changed {
+        // A new model replaces the old one inside the load itself, which drops
+        // the old model first.
         state.model_warm.forget();
         warm_up_model(&app, &state);
     }
@@ -3627,137 +3404,6 @@ pub fn update_setting_value(
         .storage
         .set_setting(&key, &value)
         .map_err(|error| error.to_string())
-}
-
-/// The providers the interface can offer, with their suggested models.
-#[tauri::command]
-pub fn list_cloud_providers() -> Vec<cloud::ProviderInfo> {
-    cloud::catalog()
-}
-
-/// Providers that already have a key, so the settings screen can tick them
-/// off without the key itself ever leaving the backend.
-#[tauri::command]
-pub fn list_cloud_keys(state: State<'_, AppState>) -> Vec<String> {
-    available_cloud_keys(&state.storage)
-}
-
-/// Stores one provider's key, encrypted.
-///
-/// An empty key removes it, which is how the interface clears one without a
-/// second command. The returned list is everything that now has a key, so a
-/// caller never has to guess what changed.
-#[tauri::command]
-pub fn set_cloud_api_key(
-    provider: String,
-    api_key: String,
-    app: AppHandle,
-    state: State<'_, AppState>,
-) -> Result<Vec<String>, String> {
-    let keys = write_cloud_api_key(&state.storage, &provider, &api_key)?;
-    // Whether the selected engine is ready now depends on this key, and the
-    // snapshot is where every screen reads that from.
-    emit_state(&app, &state);
-    Ok(keys)
-}
-
-#[tauri::command]
-pub fn clear_cloud_api_key(
-    provider: String,
-    app: AppHandle,
-    state: State<'_, AppState>,
-) -> Result<Vec<String>, String> {
-    let keys = write_cloud_api_key(&state.storage, &provider, "")?;
-    emit_state(&app, &state);
-    Ok(keys)
-}
-
-fn write_cloud_api_key(storage: &Storage, provider: &str, api_key: &str) -> Result<Vec<String>, String> {
-    if cloud::provider(provider).is_none() {
-        return Err(format!("Nieznany dostawca: {provider}."));
-    }
-    let mut keys = stored_cloud_keys(storage);
-    let api_key = api_key.trim();
-    if api_key.is_empty() {
-        keys.remove(provider);
-    } else {
-        keys.insert(provider.to_owned(), secret::protect(api_key)?);
-    }
-    storage
-        .set_setting("cloud_keys", &keys)
-        .map_err(|error| error.to_string())?;
-    Ok(available_cloud_keys(storage))
-}
-
-/// Sends a second of silence to the configured provider.
-///
-/// An empty transcript is still an answer: it proves the address, the key and
-/// the model were accepted. The time it took is reported too, because that is
-/// the part a user cannot see any other way.
-#[tauri::command]
-pub async fn test_cloud_transcription(state: State<'_, AppState>) -> Result<CloudCheck, String> {
-    let settings = state
-        .settings
-        .read()
-        .map_err(|_| "settings lock poisoned")?
-        .clone();
-    let storage = state.storage.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let provider = cloud::provider(&settings.cloud_provider)
-            .unwrap_or_else(|| cloud::default_provider());
-        let api_key = cloud_api_key(&storage, provider.key)?.ok_or_else(|| {
-            format!(
-                "no API key is set for {}; add one in Settings",
-                provider.display
-            )
-        })?;
-        let model = resolve_cloud_model(&settings);
-        let audio = cloud::silence_wav();
-        let started = Instant::now();
-        let transcript = cloud::transcribe(cloud::Request {
-            provider: provider.key,
-            model: &model,
-            base_url: &settings.cloud_base_url,
-            api_key: &api_key,
-            language: &settings.cloud_language,
-            keyterms: &[],
-            audio: &audio,
-            file_name: "loquara-check.wav",
-            cancel: None,
-        })
-        .map_err(|error| error.to_string())?;
-        Ok(CloudCheck {
-            text: transcript.text,
-            elapsed_ms: started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
-        })
-    })
-    .await
-    .map_err(|error| error.to_string())?
-}
-
-/// The provider's own list of models, for the settings screen to offer.
-#[tauri::command]
-pub async fn list_cloud_models(state: State<'_, AppState>) -> Result<Vec<String>, String> {
-    let settings = state
-        .settings
-        .read()
-        .map_err(|_| "settings lock poisoned")?
-        .clone();
-    let storage = state.storage.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let provider = cloud::provider(&settings.cloud_provider)
-            .unwrap_or_else(|| cloud::default_provider());
-        let api_key = cloud_api_key(&storage, provider.key)?.ok_or_else(|| {
-            format!(
-                "no API key is set for {}; add one in Settings",
-                provider.display
-            )
-        })?;
-        cloud::list_models(provider, &settings.cloud_base_url, &api_key)
-            .map_err(|error| error.to_string())
-    })
-    .await
-    .map_err(|error| error.to_string())?
 }
 
 #[cfg(test)]
@@ -3817,6 +3463,68 @@ mod tests {
         state.audio.cancel().unwrap();
     }
 
+    fn media_held(state: &AppState) -> bool {
+        state.media.lock().unwrap().is_some()
+    }
+
+    fn recording_state_with_media(samples: Vec<i16>) -> (tempfile::TempDir, AppState, std::sync::mpsc::Receiver<crate::audio::CaptureFault>) {
+        let temp = tempfile::tempdir().unwrap();
+        let recordings = temp.path().join("recordings");
+        let storage = Storage::open_in_memory(&recordings).unwrap();
+        let audio = AudioRecorder::with_backend(&recordings, Arc::new(crate::audio::FakeInputBackend::with_samples(vec![crate::audio::AudioSamples::I16(samples)])));
+        let state = AppState::new(audio, storage, temp.path());
+        let (sender, faults) = std::sync::mpsc::channel();
+        state.audio.set_fault_sender(sender);
+        let started = state.audio.start(Some("fake")).unwrap();
+        state.storage.insert_recording(&history_recording(&started.id, RecordingStatus::Recording, &started.path)).unwrap();
+        state.machine.lock().unwrap().started(&started.id, started.path.to_string_lossy()).unwrap();
+        state.begin_media(crate::media::MediaMode::Duck);
+        (temp, state, faults)
+    }
+
+    #[test]
+    fn media_is_restored_when_capture_stops_not_after_transcription() {
+        let (_temp, state, _started) = recording_state_with_media(vec![1, 2, 3]);
+        assert!(media_held(&state));
+        stop_capture_or_abandon(&state).unwrap();
+        assert!(matches!(state.snapshot().unwrap().dictation, DictationState::Processing { .. }));
+        assert!(!media_held(&state));
+    }
+
+    #[test]
+    fn media_is_restored_when_the_microphone_is_lost_and_on_dismiss() {
+        let (_temp, state, receiver) = recording_state_with_media(vec![1]);
+        state.audio.invalidate_endpoint("fake");
+        let fault = receiver.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(interrupt_microphone_capture(&state, &fault).unwrap());
+        assert!(!media_held(&state));
+        // Dismissing the failure is idempotent and stays restored.
+        state.begin_media(crate::media::MediaMode::Pause);
+        dismiss_failure_state(&state).unwrap();
+        assert!(!media_held(&state));
+    }
+
+    #[test]
+    fn media_off_holds_nothing() {
+        let (_temp, state, _started) = recording_state_with_media(vec![1]);
+        state.begin_media(crate::media::MediaMode::Off);
+        assert!(!media_held(&state));
+        state.audio.cancel().unwrap();
+    }
+
+    #[test]
+    fn media_setting_defaults_to_muffle_and_keeps_a_stored_duck() {
+        assert_eq!(AppSettings::default().media_during_dictation, crate::media::MediaMode::Muffle);
+        let mut value = serde_json::to_value(AppSettings::default()).unwrap();
+        assert_eq!(value["mediaDuringDictation"], "muffle");
+        value["mediaDuringDictation"] = "duck".into();
+        let stored: AppSettings = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(stored.media_during_dictation, crate::media::MediaMode::Duck);
+        value.as_object_mut().unwrap().remove("mediaDuringDictation");
+        let old: AppSettings = serde_json::from_value(value).unwrap();
+        assert_eq!(old.media_during_dictation, crate::media::MediaMode::Muffle);
+    }
+
     fn history_recording(id: &str, status: RecordingStatus, audio_path: &Path) -> Recording {
         Recording {
             id: id.to_owned(),
@@ -3850,9 +3558,9 @@ mod tests {
             audio_path: "r.wav".into(),
         };
 
-        assert!(holds_discardable_audio(&recording));
-        assert!(holds_discardable_audio(&cancelling));
-        assert!(holds_discardable_audio(&processing));
+        assert!(claims_escape(&recording, true));
+        assert!(claims_escape(&cancelling, true));
+        assert!(!claims_escape(&processing, true), "Escape after stop belongs to the user's editor");
     }
 
     #[test]
@@ -3864,16 +3572,15 @@ mod tests {
                 audio_path: "r.wav".into(),
                 transcript: "hello".into(),
             },
-            DictationState::Failed {
-                recovery: RecoveryRecording {
-                    recording_id: "r".into(),
-                    audio_path: "r.wav".into(),
-                },
-                error: "boom".into(),
-            },
         ] {
-            assert!(!holds_discardable_audio(&state), "{state:?}");
+            assert!(!claims_escape(&state, true), "{state:?}");
         }
+        let failed = DictationState::Failed {
+            recovery: RecoveryRecording { recording_id: "r".into(), audio_path: "r.wav".into() },
+            error: "boom".into(),
+        };
+        assert!(claims_escape(&failed, true), "Escape dismisses a failure pill on screen");
+        assert!(!claims_escape(&failed, false), "no pill, nothing for Escape to dismiss");
     }
 
     #[test]
@@ -3888,7 +3595,7 @@ mod tests {
         };
 
         assert_eq!(cancel_press_for(&recording, RecorderKey::Escape), CancelPress::Confirm);
-        assert_eq!(cancel_press_for(&processing, RecorderKey::Escape), CancelPress::Confirm);
+        assert_eq!(cancel_press_for(&processing, RecorderKey::Escape), CancelPress::Ignore);
         assert_eq!(cancel_press_for(&recording, RecorderKey::Enter), CancelPress::Ignore);
         assert!(offers_cancel_undo(8_000));
         assert!(!offers_cancel_undo(7_999));
@@ -3921,54 +3628,6 @@ mod tests {
             }
             assert!(!awaits_cancel_answer(&state));
         }
-    }
-
-    #[tokio::test]
-    async fn cancelling_processing_stops_a_live_session_already_moved_to_finish() {
-        use futures_util::{SinkExt, StreamExt};
-        use tokio_tungstenite::tungstenite::Message;
-
-        struct SilentSink;
-        impl streaming::TranscriptSink for SilentSink {
-            fn publish(&self, _: &str) -> Result<(), String> { Ok(()) }
-            fn failed(&self, _: &str) {}
-        }
-        let temp = tempfile::tempdir().unwrap();
-        let recordings = temp.path().join("recordings");
-        let state = AppState::new(
-            AudioRecorder::new(&recordings),
-            Storage::open_in_memory(&recordings).unwrap(),
-            temp.path().join("models"),
-        );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let (flushing_tx, flushing_rx) = tokio::sync::oneshot::channel();
-        let server = tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.unwrap();
-            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
-            socket.send(Message::text(r#"{"type":"transcript.created"}"#)).await.unwrap();
-            while let Some(Ok(message)) = socket.next().await {
-                if matches!(message, Message::Text(ref text) if text.contains("audio.done")) {
-                    let _ = flushing_tx.send(());
-                    break;
-                }
-            }
-            let _ = socket.next().await;
-        });
-        let (_audio_tx, audio_rx) = tokio::sync::mpsc::channel(1);
-        let session = streaming::spawn(
-            streaming::Config { url: format!("ws://127.0.0.1:{port}"), api_key: "test".into() },
-            Arc::new(SilentSink), audio_rx,
-        );
-        *state.streaming.lock().unwrap() = Some(ActiveLiveSession { recording_id: "old".into(), cancellation: Some(session.cancellation()), session: Some(session), pump: Arc::new(Mutex::new(None)), sender: None, failure: Arc::new(Mutex::new(None)) });
-        let session = state.streaming.lock().unwrap().as_mut().unwrap().session.take().unwrap();
-        let finishing = tokio::spawn(session.finish(Duration::from_secs(10)));
-        tokio::time::timeout(Duration::from_secs(2), flushing_rx).await.unwrap().unwrap();
-        abandon_live_session(&state);
-        assert!(tokio::time::timeout(Duration::from_secs(1), finishing).await.is_ok(),
-            "processing cancellation must still own a way to stop the live writer");
-        assert!(state.streaming.lock().unwrap().is_none());
-        server.abort();
     }
 
     #[test]
@@ -4091,32 +3750,7 @@ mod tests {
             retry_audio_path(&interrupted),
             Err(AppError::NotRetryable { .. })
         ));
-        assert!(matches!(
-            retry_audio_path(&transcribed),
-            Err(AppError::NotRetryable { message }) if message == "the recording already has a transcript"
-        ));
-    }
-
-    #[test]
-    fn a_completed_row_with_an_empty_transcript_still_needs_one() {
-        // The model can finish without hearing anything, which stores an empty
-        // transcript on a completed row. History has to keep offering to run
-        // it again instead of treating it as done.
-        let temp = tempfile::tempdir().unwrap();
-        let audio_path = temp.path().join("empty.wav");
-        let mut blank = history_recording("empty", RecordingStatus::Completed, &audio_path);
-        blank.text = Some(String::new());
-
-        assert!(needs_transcript(&blank));
-        assert!(!needs_transcript(&Recording {
-            text: Some("mamy tekst".into()),
-            ..blank
-        }));
-        assert!(!needs_transcript(&history_recording(
-            "active",
-            RecordingStatus::Processing,
-            &audio_path
-        )));
+        assert_eq!(retry_audio_path(&transcribed).unwrap(), final_audio);
     }
 
     #[test]
@@ -4311,19 +3945,13 @@ mod tests {
     }
 
     #[test]
-    fn cancelling_prompt_can_finalize_instead_of_cancelling() {
+    fn undo_window_has_no_capture_left_to_stop() {
         let mut machine = CoordinatorMachine::default();
         machine.started("one", "one.wav").unwrap();
         machine.request_cancel().unwrap();
 
-        machine.stopped().unwrap();
-        assert_eq!(
-            machine.snapshot(),
-            DictationState::Processing {
-                recording_id: "one".into(),
-                audio_path: "one.wav".into(),
-            }
-        );
+        assert_eq!(machine.stopped(), Err(CoordinatorError::InvalidState));
+        assert!(matches!(machine.snapshot(), DictationState::Cancelling { .. }));
     }
 
     #[test]
@@ -4416,21 +4044,18 @@ mod tests {
     }
 
     #[test]
-    fn settings_from_older_versions_default_to_clean_mode_and_opt_out_of_login() {
+    fn settings_from_older_versions_drop_the_mode_and_opt_out_of_login() {
         let settings: AppSettings = serde_json::from_value(serde_json::json!({
             "inputDevice": null,
             "shortcut": "Ctrl+Space",
             "autoPaste": true,
-            "retentionDays": 30
+            "retentionDays": 30,
+            "activeMode": "custom-123"
         }))
         .unwrap();
 
-        assert_eq!(settings.active_mode, "clean");
         assert!(!settings.launch_on_login);
-        assert_eq!(
-            serde_json::to_value(settings).unwrap()["activeMode"],
-            serde_json::json!("clean")
-        );
+        assert!(serde_json::to_value(settings).unwrap().get("activeMode").is_none());
     }
 
     #[test]
@@ -4466,170 +4091,41 @@ mod tests {
     }
 
     #[test]
-    fn settings_from_older_versions_default_to_the_local_engine() {
-        // An installation that predates the cloud option has no provider
-        // configured and must keep transcribing on this machine.
+    fn settings_saved_with_a_cloud_engine_still_load_and_run_locally() {
+        // Versions before 0.11 could transcribe in the cloud. Their saved
+        // settings still carry those fields; they are ignored and the take
+        // runs on the local model.
         let older: AppSettings = serde_json::from_value(serde_json::json!({
             "inputDevice": null,
             "shortcut": "Ctrl+Space",
             "autoPaste": true,
-            "retentionDays": 30
+            "retentionDays": 30,
+            "transcriptionSource": "cloud",
+            "cloudProvider": "xai",
+            "cloudModel": "grok-voice-transcribe-2.0",
+            "cloudBaseUrl": "",
+            "cloudLanguage": "pl",
+            "realtimeByEngine": { "cloud:xai": true }
         }))
         .unwrap();
 
-        assert_eq!(older.transcription_source, TranscriptionSource::Local);
-        assert_eq!(older.cloud_provider, cloud::default_provider().key);
-        assert!(older.cloud_model.is_empty());
-        assert!(older.cloud_base_url.is_empty());
-        assert!(older.cloud_language.is_empty());
-        assert_eq!(
-            serde_json::to_value(&older).unwrap()["transcriptionSource"],
-            serde_json::json!("local")
-        );
+        assert_eq!(older.model, crate::models::default_model());
+        assert!(streaming_wanted(&older));
+        let saved = serde_json::to_value(&older).unwrap();
+        assert!(saved.get("transcriptionSource").is_none());
+        assert!(saved.get("cloudProvider").is_none());
     }
 
     #[test]
-    fn a_cloud_model_falls_back_to_whatever_the_provider_calls_current() {
-        let mut settings = AppSettings {
-            cloud_provider: "xai".into(),
-            cloud_model: "   ".into(),
-            ..AppSettings::default()
-        };
+    fn suggestions_are_repeated_near_misses_with_context() {
+        let entries = vec![VocabularyEntry { id: 7, term: "Codex".into(), aliases: vec![] }];
+        let texts = ["Zobacz sesje kodeksa w folderze.", "Bo tak robił agent Kodeksa.", "kodeks karny"].map(String::from);
+        let suggestions = suggest_aliases(&entries, &texts, Default::default());
 
-        assert_eq!(resolve_cloud_model(&settings), "grok-voice-transcribe-2.0");
-
-        settings.cloud_model = "grok-voice-transcribe-1.0".into();
-        assert_eq!(resolve_cloud_model(&settings), "grok-voice-transcribe-1.0");
-
-        // A provider that no longer exists must not leave the app with no
-        // model at all.
-        settings.cloud_provider = "nope".into();
-        settings.cloud_model.clear();
-        assert_eq!(
-            resolve_cloud_model(&settings),
-            cloud::default_provider().default_model
-        );
-    }
-
-    #[test]
-    fn provider_keys_are_stored_encrypted_and_only_usable_ones_are_listed() {
-        let temp = tempfile::tempdir().unwrap();
-        let storage = Storage::open_in_memory(temp.path().join("recordings")).unwrap();
-
-        write_cloud_api_key(&storage, "xai", "xai-secret").unwrap();
-
-        assert_eq!(available_cloud_keys(&storage), vec!["xai"]);
-        let stored: std::collections::BTreeMap<String, String> = storage
-            .get_setting("cloud_keys")
-            .unwrap()
-            .unwrap();
-        assert_ne!(stored["xai"], "xai-secret", "the database holds ciphertext");
-        assert_eq!(
-            cloud_api_key(&storage, "xai").unwrap().as_deref(),
-            Some("xai-secret")
-        );
-
-        write_cloud_api_key(&storage, "xai", "").unwrap();
-
-        assert!(available_cloud_keys(&storage).is_empty());
-        assert!(cloud_api_key(&storage, "xai").unwrap().is_none());
-    }
-
-    #[test]
-    fn an_unknown_provider_key_is_refused_rather_than_stored() {
-        let temp = tempfile::tempdir().unwrap();
-        let storage = Storage::open_in_memory(temp.path().join("recordings")).unwrap();
-
-        assert!(write_cloud_api_key(&storage, "acme", "secret").is_err());
-        assert!(available_cloud_keys(&storage).is_empty());
-    }
-
-    #[test]
-    fn keyterms_are_the_spellings_the_user_wants_written() {
-        let vocabulary = vec![
-            VocabularyEntry { id: 1, heard: "parakit".into(), replacement: "Parakeet".into() },
-            VocabularyEntry { id: 2, heard: "loquara".into(), replacement: "Loquara".into() },
-        ];
-
-        assert_eq!(keyterms_for(&vocabulary), vec!["Parakeet", "Loquara"]);
-    }
-
-    #[test]
-    fn selected_mode_setting_controls_transcript_pipeline() {
-        let vocabulary = vec![VocabularyEntry {
-            id: 1,
-            heard: "parakit".into(),
-            replacement: "Parakeet".into(),
-        }];
-        let input = "pierwsza\n    parakit ;";
-        let mut settings = AppSettings::default();
-
-        let clean = Mode {
-            id: "clean".into(),
-            name: "Czysty".into(),
-            description: String::new(),
-            prompt: String::new(),
-            enabled: true,
-            is_default: true,
-            created_at: 0,
-        };
-        assert_eq!(
-            postprocess_with_mode(input, &vocabulary, Some(&clean)),
-            "pierwsza Parakeet;"
-        );
-        settings.active_mode = "code".into();
-        let code = Mode {
-            id: "code".into(),
-            name: "Kod".into(),
-            ..clean
-        };
-        assert_eq!(
-            postprocess_with_mode(input, &vocabulary, Some(&code)),
-            "pierwsza\n    Parakeet;"
-        );
-    }
-
-    #[test]
-    fn active_mode_must_exist_and_be_enabled() {
-        let temp = tempfile::tempdir().unwrap();
-        let storage = Storage::open_in_memory(temp.path().join("recordings")).unwrap();
-        let mut disabled = storage.get_mode("message").unwrap().unwrap();
-        disabled.enabled = false;
-        storage.upsert_mode(&disabled).unwrap();
-
-        assert!(
-            validate_active_mode(&storage, "missing")
-                .unwrap_err()
-                .contains("nie istnieje")
-        );
-        assert!(
-            validate_active_mode(&storage, "message")
-                .unwrap_err()
-                .contains("disabled")
-        );
-        assert_eq!(validate_active_mode(&storage, "clean").unwrap().id, "clean");
-    }
-
-    #[test]
-    fn active_custom_mode_cannot_be_disabled_or_deleted() {
-        let temp = tempfile::tempdir().unwrap();
-        let storage = Storage::open_in_memory(temp.path().join("recordings")).unwrap();
-        let custom = Mode {
-            id: "custom".into(),
-            name: "Własny".into(),
-            description: String::new(),
-            prompt: "prefix: TEST".into(),
-            enabled: true,
-            is_default: false,
-            created_at: 10,
-        };
-        storage.upsert_mode(&custom).unwrap();
-
-        let mut disabled = custom.clone();
-        disabled.enabled = false;
-        assert!(validate_mode_upsert("custom", &disabled).is_err());
-        assert!(validate_mode_delete("custom", "custom").is_err());
-        assert!(validate_mode_delete("clean", "custom").is_ok());
+        assert_eq!(suggestions.len(), 1);
+        let suggestion = &suggestions[0];
+        assert_eq!((suggestion.term_id, suggestion.heard.to_lowercase().as_str(), suggestion.count), (7, "kodeks", 3));
+        assert!(suggestion.example.contains(&suggestion.heard));
     }
 
     struct FailingHistory;
@@ -5034,37 +4530,23 @@ mod tests {
     }
 
     #[test]
-    fn learn_vocabulary_adds_only_new_words_as_replacements() {
-        let mut learned: Vec<(String, String)> = Vec::new();
+    fn learn_vocabulary_stores_fixes_with_what_was_heard() {
+        let mut learned: Vec<(String, Vec<String>)> = Vec::new();
         let count = learn_vocabulary(
-            "uruchom parakeet i zobacz wynik",
-            "uruchom Parakeet i zobacz rezultat",
-            |heard, replacement| {
-                learned.push((heard.to_owned(), replacement.to_owned()));
+            "zrób traje aga w kloadkode i idź do domu",
+            "zrób try again w Claude Code i idź do domu teraz",
+            |term, aliases| {
+                learned.push((term.to_owned(), aliases.to_vec()));
                 Ok(())
             },
         )
         .unwrap();
 
-        assert_eq!(count, 1);
-        assert_eq!(learned, vec![("rezultat".to_owned(), "rezultat".to_owned())]);
-    }
-
-    #[test]
-    fn learn_vocabulary_ignores_identical_and_short_words() {
-        let mut learned: Vec<(String, String)> = Vec::new();
-        let count = learn_vocabulary(
-            "idzmy do domu",
-            "idzmy do domu teraz",
-            |heard, replacement| {
-                learned.push((heard.to_owned(), replacement.to_owned()));
-                Ok(())
-            },
-        )
-        .unwrap();
-
-        assert_eq!(count, 1);
-        assert_eq!(learned, vec![("teraz".to_owned(), "teraz".to_owned())]);
+        assert_eq!(count, 2);
+        assert_eq!(learned, vec![
+            ("try again".to_owned(), vec!["traje aga".to_owned()]),
+            ("Claude Code".to_owned(), vec!["kloadkode".to_owned()]),
+        ]);
     }
 }
 
@@ -5343,8 +4825,8 @@ mod buffered_delivery_tests {
     fn ptt_unavailable_keys_complete_to_clipboard_with_delivery_error() {
         let (_dir, state, take) = fixture();
         let mut target = Target { unavailable_keys: true, ..Default::default() };
-        assert!(complete_take(&state, &take, Path::new("take.wav"), &final_result("safe result"), &mut target).unwrap().unwrap().is_err());
-        assert!(target.clipboard.contains("safe result"));
+        assert!(complete_take(&state, &take, Path::new("take.wav"), &final_result("Safe result"), &mut target).unwrap().unwrap().is_err());
+        assert!(target.clipboard.contains("Safe result"));
         assert_eq!(target.pastes, 0);
         assert_eq!(target.focused, None);
         assert_eq!(state.storage.get_recording("take").unwrap().unwrap().status, RecordingStatus::Completed);
@@ -5531,11 +5013,10 @@ mod buffered_delivery_tests {
         assert_eq!(target.clipboard, ""); assert_eq!(target.pastes, 0);
     }
     #[test]
-    fn silent_final_with_custom_prefix_suffix_stays_empty_and_never_pastes() {
+    fn silent_final_stays_empty_and_never_pastes() {
         for raw in ["", " \n\t "] {
             let (_dir, state, mut take) = fixture();
-            take.mode = Some(Mode { id: "custom".into(), name: "custom".into(), description: String::new(),
-                prompt: "prefix: NOTATKA\nsuffix: KONIEC".into(), enabled: true, is_default: false, created_at: 0 });
+            take.vocabulary = vec![VocabularyEntry { id: 1, term: "NOTATKA".into(), aliases: vec![String::new()] }];
             let mut target = Target { clipboard: "speculative words".into(), ..Default::default() };
             complete_take(&state, &take, Path::new("take.wav"), &final_result(raw), &mut target).unwrap();
             assert_eq!(target.clipboard, ""); assert_eq!(target.pastes, 0);
@@ -5581,41 +5062,34 @@ mod buffered_delivery_tests {
     }
 
     #[test]
-    fn draft_revisions_update_clipboard_and_snapshot_without_any_target_input() {
+    fn draft_revisions_update_snapshot_without_touching_clipboard_or_target() {
         let (_dir, state, take) = fixture();
         state.machine.lock().unwrap().state = DictationState::Recording { recording_id: "take".into(), audio_path: "take.wav".into() };
-        let mut target = Target::default();
-        assert!(publish_draft(&state, &take, "draft one", &mut target));
-        assert!(publish_draft(&state, &take, &"replacement ".repeat(500), &mut target));
-        assert_eq!(target.pastes, 0); assert_eq!(target.focused, None);
+        assert!(publish_draft(&state, &take, "draft one"));
+        assert!(!publish_draft(&state, &take, "draft one"));
+        assert!(publish_draft(&state, &take, &"replacement ".repeat(500)));
         let live = state.live_transcript.lock().unwrap().clone().unwrap();
         assert_eq!(live.recording_id, "take"); assert_eq!(live.revision, 2);
-        assert_eq!(live.text, target.clipboard); assert!(live.clipboard_ready);
         take.cancel.store(true, Ordering::SeqCst);
-        target.clipboard = "user copied this".into();
-        assert!(!publish_draft(&state, &take, "late", &mut target));
-        assert_eq!(target.clipboard, "user copied this");
+        assert!(!publish_draft(&state, &take, "late"));
     }
     #[test]
-    fn locked_draft_clipboard_is_retryable_without_disabling_final_delivery() {
+    fn drafts_never_reach_clipboard_only_final_is_delivered_once() {
         let (_dir, state, take) = fixture();
         state.machine.lock().unwrap().state = DictationState::Recording { recording_id: "take".into(), audio_path: "take.wav".into() };
-        let mut target = Target { fail_clipboard: true, ..Default::default() };
-        assert!(publish_draft(&state, &take, "draft", &mut target));
-        assert!(!state.live_transcript.lock().unwrap().as_ref().unwrap().clipboard_ready);
-        target.fail_clipboard = false;
-        assert!(publish_draft(&state, &take, "draft", &mut target));
-        assert_eq!(target.clipboard, "draft"); assert_eq!(target.pastes, 0);
+        let mut target = Target { clipboard: "user copy".into(), ..Default::default() };
+        for draft in ["Dobra", "Dobra, pomiar", "Dobra, pomiary ci zrobię"] { assert!(publish_draft(&state, &take, draft)); }
+        assert_eq!(target.clipboard, "user copy");
         state.machine.lock().unwrap().stopped().unwrap();
-        complete_take(&state, &take, Path::new("take.wav"), &final_result("final"), &mut target).unwrap();
-        assert_eq!(target.pastes, 1); assert!(target.clipboard.contains("final"));
+        complete_take(&state, &take, Path::new("take.wav"), &final_result("Final"), &mut target).unwrap();
+        assert_eq!(target.pastes, 1); assert!(target.clipboard.contains("Final"));
     }
     #[test]
     fn missing_target_keeps_final_in_clipboard_and_does_not_paste_elsewhere() {
         let (_dir, state, mut take) = fixture(); take.target = None;
         let mut target = Target::default();
-        let delivery = complete_take(&state, &take, Path::new("take.wav"), &final_result("retained"), &mut target).unwrap().unwrap();
-        assert!(target.clipboard.contains("retained"));
+        let delivery = complete_take(&state, &take, Path::new("take.wav"), &final_result("Retained"), &mut target).unwrap().unwrap();
+        assert!(target.clipboard.contains("Retained"));
         // Windows needs a remembered window before it can send Ctrl+V. On
         // macOS and X11 the overlay never takes focus, so the current window
         // is the right destination and the paste still goes through.
@@ -5631,58 +5105,121 @@ mod buffered_delivery_tests {
         }
     }
     #[test]
-    fn frozen_vocabulary_and_mode_apply_once_despite_mid_take_edits() {
+    fn frozen_vocabulary_applies_once_despite_mid_take_edits() {
         let (_dir, state, mut take) = fixture();
-        take.vocabulary = vec![VocabularyEntry { id: 1, heard: "alpha".into(), replacement: "beta".into() }, VocabularyEntry { id: 2, heard: "beta".into(), replacement: "gamma".into() }];
-        let expected = postprocess_with_mode("alpha", &take.vocabulary, take.mode.as_ref());
-        state.settings.write().unwrap().active_mode = "raw".into();
+        take.vocabulary = vec![VocabularyEntry { id: 1, term: "beta".into(), aliases: vec!["alpha".into()] }, VocabularyEntry { id: 2, term: "gamma".into(), aliases: vec!["beta".into()] }];
+        state.storage.add_vocabulary("delta", &["beta".to_owned()]).unwrap();
         let mut target = Target::default();
         complete_take(&state, &take, Path::new("take.wav"), &final_result("alpha"), &mut target).unwrap();
-        assert_eq!(target.clipboard, expected);
-        assert_eq!(state.storage.get_recording("take").unwrap().unwrap().text, Some(expected));
+        assert_eq!(target.clipboard, "Beta");
+        assert_eq!(state.storage.get_recording("take").unwrap().unwrap().text.as_deref(), Some("Beta"));
     }
     #[test]
-    fn cancellation_waits_for_inflight_draft_and_revokes_all_later_effects() {
+    fn draft_is_serialized_with_cancellation_and_revoked_after_it() {
         let (_dir, state, take) = fixture();
         state.machine.lock().unwrap().state = DictationState::Recording { recording_id: "take".into(), audio_path: "take.wav".into() };
-        struct BlockingTarget { entered: std::sync::mpsc::Sender<()>, release: std::sync::mpsc::Receiver<()>, copies: usize }
-        impl WindowsApi for BlockingTarget {
-            fn foreground_window(&mut self) -> Option<WindowTarget> { None }
-            fn restore_foreground(&mut self, _: WindowTarget) -> Result<(), PlatformError> { panic!("draft must not focus") }
-            fn write_clipboard(&mut self, _: &str) -> Result<(), PlatformError> { self.entered.send(()).unwrap(); self.release.recv().unwrap(); self.copies += 1; Ok(()) }
-            fn send_ctrl_v(&mut self) -> Result<(), PlatformError> { panic!("draft must not paste") }
+        {
+            let _gate = state.lifecycle.lock().unwrap();
+            assert!(!publish_draft(&state, &take, "while cancelling"));
+            abandon_live_session(&state);
         }
-        let (entered_tx, entered_rx) = std::sync::mpsc::channel(); let (release_tx, release_rx) = std::sync::mpsc::channel();
-        let worker_state = state.clone(); let worker_take = take.clone();
-        let worker = std::thread::spawn(move || {
-            let mut target = BlockingTarget { entered: entered_tx, release: release_rx, copies: 0 };
-            publish_draft(&worker_state, &worker_take, "in flight", &mut target);
-            target.copies
-        });
-        entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
-        let cancel_state = state.clone(); let (done_tx, done_rx) = std::sync::mpsc::channel();
-        let canceller = std::thread::spawn(move || {
-            let _gate = cancel_state.lifecycle.lock().unwrap(); abandon_live_session(&cancel_state); done_tx.send(()).unwrap();
-        });
-        assert!(done_rx.recv_timeout(Duration::from_millis(30)).is_err());
-        release_tx.send(()).unwrap(); done_rx.recv_timeout(Duration::from_secs(2)).unwrap();
-        canceller.join().unwrap(); assert_eq!(worker.join().unwrap(), 1);
-        let mut target = Target { clipboard: "later external copy".into(), ..Default::default() };
-        assert!(!publish_draft(&state, &take, "late", &mut target));
-        assert_eq!(target.clipboard, "later external copy");
+        take.cancel.store(true, Ordering::SeqCst);
+        assert!(!publish_draft(&state, &take, "late"));
+        assert!(state.live_transcript.lock().unwrap().as_ref().is_none_or(|live| live.text != "late"));
     }
     #[test]
-    fn independent_engine_preferences_migrate_and_gate_unsupported_cloud() {
+    fn the_live_preview_follows_the_local_engine_preference() {
         let mut settings: AppSettings = serde_json::from_value(serde_json::json!({ "inputDevice": null, "shortcut":"Ctrl+Space", "autoPaste":true, "retentionDays":30, "streaming":true })).unwrap();
         assert!(streaming_wanted(&settings));
         settings.realtime_by_engine.insert("local:parakeet".into(), false);
         assert!(!streaming_wanted(&settings));
-        settings.transcription_source = TranscriptionSource::Cloud; settings.cloud_provider = "xai".into();
-        assert!(streaming_wanted(&settings));
-        settings.realtime_by_engine.insert("cloud:xai".into(), false); assert!(!streaming_wanted(&settings));
-        settings.cloud_provider = "openai".into(); settings.realtime_by_engine.insert("cloud:openai".into(), true);
-        assert!(!streaming_wanted(&settings));
         assert_eq!(serde_json::from_value::<AppSettings>(serde_json::to_value(&settings).unwrap()).unwrap(), settings);
+    }
+
+    fn failed_state() -> DictationState {
+        DictationState::Failed { recovery: crate::domain::RecoveryRecording { recording_id: "take".into(), audio_path: "take.wav".into() }, error: "model missing".into() }
+    }
+
+    #[test]
+    fn a_failure_on_screen_never_blocks_the_next_push_to_talk_take() {
+        let (_dir, state, _take) = fixture();
+        state.settings.write().unwrap().activation_mode = ActivationMode::PushToTalk;
+        state.machine.lock().unwrap().state = failed_state();
+        assert!(may_begin_take(&state.machine.lock().unwrap().snapshot()));
+        let gesture = state.hold.lock().unwrap().press(true).unwrap();
+        assert!(hold_may_start(&state, &gesture), "Failed must not swallow the shortcut");
+        let mut opened = false;
+        with_capture_start(&state, Some(&gesture), || { opened = true; state.snapshot() }).unwrap();
+        assert!(opened);
+        assert_eq!(state.machine.lock().unwrap().snapshot(), DictationState::Idle, "the failure is settled before the new take starts");
+        assert_eq!(state.storage.get_recording("take").unwrap().unwrap().status, RecordingStatus::Processing, "history row is left alone");
+    }
+
+    #[test]
+    fn escape_and_the_overlay_x_dismiss_a_failure_to_idle() {
+        let (_dir, state, _take) = fixture();
+        assert_eq!(cancel_press_for(&failed_state(), RecorderKey::Escape), CancelPress::Confirm);
+        assert_eq!(cancel_press_for(&failed_state(), RecorderKey::Enter), CancelPress::Ignore);
+        state.machine.lock().unwrap().state = failed_state();
+        dismiss_failure_state(&state).unwrap();
+        assert_eq!(state.machine.lock().unwrap().snapshot(), DictationState::Idle);
+        assert_eq!(dismiss_failure_state(&state), Err(CoordinatorError::InvalidState.to_string()), "only a failure is dismissed");
+    }
+
+    #[test]
+    fn a_new_take_during_the_undo_window_finalizes_the_cancel_without_rewriting_history() {
+        let (_dir, state, _take) = fixture();
+        state.storage.update_status("take", RecordingStatus::Cancelled, None, None, Some(9_000), None).unwrap();
+        state.machine.lock().unwrap().state = DictationState::Cancelling { recording_id: "take".into(), audio_path: "take.wav".into() };
+        publish_overlay_notice(&state, "take", OverlayNoticeKind::Cancelled, Some(5000), None);
+        // Toggle used to route Cancelling to stop, whose NotRecording error
+        // overwrote this Cancelled row with Failed.
+        assert_eq!(stop_capture_or_abandon(&state).unwrap_err(), CoordinatorError::InvalidState.to_string());
+        assert_eq!(state.storage.get_recording("take").unwrap().unwrap().status, RecordingStatus::Cancelled);
+        assert!(may_begin_take(&state.machine.lock().unwrap().snapshot()));
+        let mut opened = false;
+        with_capture_start(&state, None, || { opened = true; state.snapshot() }).unwrap();
+        assert!(opened);
+        assert_eq!(state.machine.lock().unwrap().snapshot(), DictationState::Idle);
+        assert!(state.overlay_feedback.lock().unwrap().notice.is_none(), "the Undo chip goes with the cancel");
+        assert_eq!(state.storage.get_recording("take").unwrap().unwrap().status, RecordingStatus::Cancelled);
+    }
+
+    #[test]
+    fn start_errors_from_keyboard_or_tray_are_shown_unless_another_press_won() {
+        assert!(start_failure_is_reportable("Najpierw pobierz wybrany model."));
+        assert!(start_failure_is_reportable("no input device available"));
+        assert!(!start_failure_is_reportable(&CoordinatorError::Busy.to_string()));
+        assert!(!start_failure_is_reportable(&CoordinatorError::InvalidState.to_string()));
+        assert_eq!(serde_json::to_value(OverlayNoticeKind::StartFailed).unwrap(), "startFailed");
+    }
+
+    #[test]
+    fn keep_alive_never_unloads_the_model_while_a_take_needs_it() {
+        let long = Duration::from_secs(600);
+        assert!(keep_alive_expired(&DictationState::Idle, long, 60));
+        assert!(!keep_alive_expired(&DictationState::Idle, Duration::from_secs(59), 60));
+        assert!(!keep_alive_expired(&DictationState::Idle, long, 0), "0 means always keep");
+        for busy in [
+            DictationState::Recording { recording_id: "r".into(), audio_path: "r.wav".into() },
+            DictationState::Processing { recording_id: "r".into(), audio_path: "r.wav".into() },
+        ] {
+            assert!(!keep_alive_expired(&busy, long, 60), "{busy:?}");
+        }
+        let (_dir, state, _take) = fixture();
+        *state.engine_last_used.lock().unwrap() = Instant::now().checked_sub(long).unwrap_or_else(Instant::now);
+        touch_engine(&state);
+        assert!(state.engine_last_used.lock().unwrap().elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn startup_warnings_accumulate_and_ride_on_the_snapshot() {
+        let (_dir, state, _take) = fixture();
+        assert!(state.snapshot().unwrap().startup_warning.is_none());
+        state.add_startup_warning("shortcut taken");
+        state.add_startup_warning("autostart failed");
+        assert_eq!(state.snapshot().unwrap().startup_warning.as_deref(), Some("shortcut taken\nautostart failed"));
+        assert_eq!(serde_json::to_value(state.snapshot().unwrap()).unwrap()["startupWarning"], "shortcut taken\nautostart failed");
     }
 }
 #[cfg(test)]

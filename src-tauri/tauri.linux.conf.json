@@ -2,9 +2,6 @@
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "bundle": {
     "targets": ["deb", "appimage"],
-    "resources": {
-      "lib/*.so*": ""
-    },
     "linux": {
       "deb": {
         "depends": [

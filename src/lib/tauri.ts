@@ -3,18 +3,16 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   AppSettings,
   AppSnapshot,
-  CloudCheck,
-  CloudProviderInfo,
   HistoryQuery,
   InputDeviceInfo,
   InputDevicesChanged,
-  Mode,
   ModelDescriptor,
   ModelDownloadProgress,
   ModelStatus,
   Recording,
   SettingsUpdateResult,
   VocabularyEntry,
+  VocabularySuggestion,
 } from "./types";
 import { realtimeEnabled } from "./types";
 import { microphoneChoices, microphonePreferences, resolveMicrophone } from "./microphones";
@@ -47,11 +45,10 @@ export interface AppAdapter {
   openModelFolder(modelKey: string): Promise<void>;
   correctTranscript(recordingId: string, text: string): Promise<number>;
   listVocabulary(): Promise<VocabularyEntry[]>;
-  addVocabulary(heard: string, replacement: string): Promise<VocabularyEntry>;
+  /** Adding a term that already exists merges the aliases into it. */
+  addVocabulary(term: string, aliases: string[]): Promise<VocabularyEntry>;
   deleteVocabulary(id: number): Promise<boolean>;
-  listModes(): Promise<Mode[]>;
-  upsertMode(mode: Mode): Promise<void>;
-  deleteMode(id: string): Promise<boolean>;
+  vocabularySuggestions(): Promise<VocabularySuggestion[]>;
   getSettings(): Promise<AppSettings>;
   getModelStatus(): Promise<ModelStatus>;
   listModels(): Promise<ModelDescriptor[]>;
@@ -60,15 +57,6 @@ export interface AppAdapter {
   deleteModel(model: string): Promise<void>;
   updateSettings(settings: AppSettings): Promise<SettingsUpdateResult>;
   updateSettingValue(key: string, value: unknown): Promise<void>;
-  listCloudProviders(): Promise<CloudProviderInfo[]>;
-  /** Providers whose API key is stored, without the keys themselves. */
-  listCloudKeys(): Promise<string[]>;
-  /** Asks the provider which models it offers, through its own API. */
-  listCloudModels(): Promise<string[]>;
-  setCloudApiKey(provider: string, apiKey: string): Promise<string[]>;
-  clearCloudApiKey(provider: string): Promise<string[]>;
-  /** Sends a short silent clip and reports the provider's answer and time. */
-  testCloudTranscription(): Promise<CloudCheck>;
   onState(listener: Listener<AppSnapshot>): Promise<UnlistenFn>;
   onLevel(listener: Listener<number>): Promise<UnlistenFn>;
   onModelProgress(listener: Listener<ModelDownloadProgress>): Promise<UnlistenFn>;
@@ -122,12 +110,9 @@ const realAdapter: AppAdapter = {
     openModelFolder: (modelKey) => invoke("reveal_model_dir", { model: modelKey }),
     correctTranscript: (recordingId, text) => invoke("correct_transcript", { recordingId, text }),
   listVocabulary: () => invoke("list_vocabulary"),
-  addVocabulary: (heard, replacement) =>
-    invoke("add_vocabulary", { heard, replacement }),
+  addVocabulary: (term, aliases) => invoke("add_vocabulary", { term, aliases }),
   deleteVocabulary: (id) => invoke("delete_vocabulary", { id }),
-  listModes: () => invoke("list_modes"),
-  upsertMode: (mode) => invoke("upsert_mode", { mode }),
-  deleteMode: (id) => invoke("delete_mode", { id }),
+  vocabularySuggestions: () => invoke("vocabulary_suggestions"),
   getSettings: () => invoke("get_settings"),
   getModelStatus: () => invoke("get_model_status"),
   listModels: () => invoke("list_models"),
@@ -137,14 +122,6 @@ const realAdapter: AppAdapter = {
   updateSettings: (settings) => invoke("update_settings", { settings: { ...settings, overlaySize: "mini" } }),
   updateSettingValue: (key, value) =>
     invoke("update_setting_value", { key, value }),
-  listCloudProviders: () => invoke("list_cloud_providers"),
-  listCloudKeys: () => invoke("list_cloud_keys"),
-  listCloudModels: () => invoke("list_cloud_models"),
-  setCloudApiKey: (provider, apiKey) =>
-    invoke("set_cloud_api_key", { provider, apiKey }),
-  clearCloudApiKey: (provider) =>
-    invoke("clear_cloud_api_key", { provider }),
-  testCloudTranscription: () => invoke("test_cloud_transcription"),
   onState: (listener) =>
     listen<AppSnapshot>("dictation://state", (event) => listener(event.payload)),
   onLevel: (listener) =>
@@ -173,7 +150,6 @@ const initialSettings: AppSettings = {
   retentionDays: 30,
   launchOnLogin: false,
   startMinimized: false,
-  activeMode: "clean",
   showOverlay: true,
   overlaySize: "mini",
   model: "parakeet",
@@ -182,23 +158,9 @@ const initialSettings: AppSettings = {
   language: "system",
   modelKeepAliveSecs: 0,
   pasteMode: "auto",
-  transcriptionSource: "local",
-  cloudProvider: "xai",
-  cloudModel: "",
-  cloudBaseUrl: "",
-  cloudLanguage: "",
+  mediaDuringDictation: "muffle",
 };
 
-/** Provider catalogue for the browser demo, mirroring the backend's. */
-export const demoCloudProviders: CloudProviderInfo[] = [
-  { key: "xai", display: "xAI (Grok)", defaultModel: "grok-voice-transcribe-2.0", models: ["grok-voice-transcribe-2.0", "grok-voice-transcribe-1.0"], custom: false, streaming: true, listsModels: false },
-  { key: "openai", display: "OpenAI", defaultModel: "gpt-transcribe", models: ["gpt-transcribe", "gpt-4o-transcribe", "gpt-4o-mini-transcribe", "whisper-1"], custom: false, streaming: false, listsModels: true },
-  { key: "groq", display: "Groq", defaultModel: "whisper-large-v3-turbo", models: ["whisper-large-v3-turbo", "whisper-large-v3", "distil-whisper-large-v3-en"], custom: false, streaming: false, listsModels: true },
-  { key: "mistral", display: "Mistral", defaultModel: "voxtral-mini-latest", models: ["voxtral-mini-latest", "voxtral-small-latest"], custom: false, streaming: false, listsModels: true },
-  { key: "elevenlabs", display: "ElevenLabs", defaultModel: "scribe_v2", models: ["scribe_v2", "scribe_v2_medical"], custom: false, streaming: false, listsModels: false },
-  { key: "deepgram", display: "Deepgram", defaultModel: "nova-3", models: ["nova-3", "nova-2"], custom: false, streaming: false, listsModels: false },
-  { key: "custom", display: "Inny (OpenAI-compatible)", defaultModel: "", models: [], custom: true, streaming: false, listsModels: true },
-];
 /** A speech-shaped envelope, so the demo mode looks like real dictation. */
 const demoPeaks = (seed: number): number[] => {
   let value = seed * 2_654_435_761;
@@ -231,20 +193,6 @@ const demoHistory = (): Recording[] => [
   sourceApp: sourceApp as string | null,
   error: status === "failed" ? "Nie udało się uruchomić modelu." : null,
 }));
-const builtInModes = (): Mode[] =>
-  [
-    ["clean", "demo.mode.clean.name", "demo.mode.clean.description", "demo.mode.clean.prompt"],
-    ["message", "demo.mode.message.name", "demo.mode.message.description", "demo.mode.message.prompt"],
-    ["code", "demo.mode.code.name", "demo.mode.code.description", "demo.mode.code.prompt"],
-  ].map(([id, name, description, prompt], index) => ({
-    id,
-    name: translate(name as "demo.mode.clean.name"),
-    description: translate(description as "demo.mode.clean.description"),
-    prompt: translate(prompt as "demo.mode.clean.prompt"),
-    enabled: true,
-    isDefault: true,
-    createdAt: index,
-  }));
 export function createBrowserAdapter(): AppAdapter {
   let settings = { ...initialSettings };
   const devices: InputDeviceInfo[] = [
@@ -255,20 +203,17 @@ export function createBrowserAdapter(): AppAdapter {
   const deviceListeners = new Set<Listener<InputDevicesChanged>>();
   let deviceGeneration = 0;
   const modelSummary = () => {
-    const cloud = settings.transcriptionSource === "cloud";
-    const provider = demoCloudProviders.find((item) => item.key === settings.cloudProvider);
     const names: Record<string, string> = { parakeet: "Parakeet TDT 0.6B v3" };
-    return { key: cloud ? settings.cloudProvider : settings.model, display: cloud ? settings.cloudModel || provider?.defaultModel || settings.cloudProvider : names[settings.model] ?? settings.model,
-      provider: cloud ? provider?.display ?? settings.cloudProvider : "NVIDIA",
-      installed: cloud ? cloudKeys.has(settings.cloudProvider) : settings.model === "parakeet", totalBytes: cloud ? 0 : 670_478_772, source: settings.transcriptionSource };
+    return { key: settings.model, display: names[settings.model] ?? settings.model, provider: "NVIDIA",
+      installed: settings.model === "parakeet", totalBytes: 1_020_355_800 };
   };
-  const cloudKeys = new Set<string>();
   let snapshot: AppSnapshot = { dictation: { status: "idle" }, settings, modelLoading: false, model: modelSummary(), liveTranscript: null };
   let history = demoHistory();
   let vocabulary: VocabularyEntry[] = [
-    { id: 1, heard: "parakit", replacement: "Parakeet" },
+    { id: 1, term: "Parakeet", aliases: ["parakit"] },
+    { id: 2, term: "Loquara", aliases: [] },
+    { id: 3, term: "Claude Code", aliases: [] },
   ];
-  let modes = builtInModes();
   const stateListeners = new Set<Listener<AppSnapshot>>();
   const levelListeners = new Set<Listener<number>>();
   const emit = () => stateListeners.forEach((listener) => listener(snapshot));
@@ -297,7 +242,7 @@ export function createBrowserAdapter(): AppAdapter {
         : { status: demoState === "processing" ? "processing" : demoState === "cancelling" ? "cancelling" : "recording", ...take },
       liveTranscript: demoState === "draft" || demoState === "processing" || demoState === "fallback" ? { recordingId: take.recordingId,
         text: demoState === "fallback" ? "" : translate("demo.previewText"), revision: 2,
-        status: demoState === "processing" ? "finalizing" : demoState === "fallback" ? "fallback" : "draft", clipboardReady: demoState === "draft" } : null };
+        status: demoState === "processing" ? "finalizing" : demoState === "fallback" ? "fallback" : "draft" } : null };
   }
   if (demoState && ["copied", "pasteRequested", "cancelled", "deliveryerror"].includes(demoState)) {
     snapshot = { ...snapshot, dictation: { status: "idle" }, liveTranscript: null,
@@ -316,15 +261,14 @@ export function createBrowserAdapter(): AppAdapter {
       resolveMicrophone(microphonePreferences(settings, devices), devices);
       invalidate();
       const id = `demo-${Date.now()}-${generation}`;
-      const provider = demoCloudProviders.find((item) => item.key === settings.cloudProvider);
-      const preview = realtimeEnabled(settings, settings.transcriptionSource === "local" ? settings.model === "parakeet" : Boolean(provider?.streaming));
+      const preview = realtimeEnabled(settings, settings.model === "parakeet");
       snapshot = { dictation: { status: "recording", recordingId: id, audioPath: `${id}.wav` }, settings, modelLoading: false, model: modelSummary(), recordingStartedAt: Date.now(),
-        liveTranscript: preview ? { recordingId: id, text: "", revision: 0, status: "listening", clipboardReady: false } : null };
+        liveTranscript: preview ? { recordingId: id, text: "", revision: 0, status: "listening" } : null };
       emit();
       if (preview) [800, 1600, 2400].forEach((delay, index) => schedule(() => {
         if (snapshot.dictation.status !== "recording" || snapshot.dictation.recordingId !== id) return;
         const words = translate("demo.previewText").split(" ");
-        snapshot = { ...snapshot, liveTranscript: { recordingId: id, text: words.slice(0, Math.ceil(words.length * (index + 1) / 3)).join(" "), revision: index + 1, status: "draft", clipboardReady: false } };
+        snapshot = { ...snapshot, liveTranscript: { recordingId: id, text: words.slice(0, Math.ceil(words.length * (index + 1) / 3)).join(" "), revision: index + 1, status: "draft" } };
         // Synthetic browser drafts never claim to have written the OS clipboard.
         levelListeners.forEach((listener) => listener(.34 + index * .12)); emit();
       }, delay));
@@ -396,9 +340,12 @@ export function createBrowserAdapter(): AppAdapter {
     openModelFolder: async () => undefined,
     correctTranscript: async () => 0,
     listVocabulary: async () => [...vocabulary],
-    addVocabulary: async (heard, replacement) => {
-      const item = { id: Math.max(0, ...vocabulary.map(({ id }) => id)) + 1, heard, replacement };
-      vocabulary = [...vocabulary, item];
+    addVocabulary: async (term, aliases) => {
+      const existing = vocabulary.find((item) => item.term.toLocaleLowerCase() === term.toLocaleLowerCase());
+      const item = existing
+        ? { ...existing, aliases: [...existing.aliases, ...aliases.filter((alias) => !existing.aliases.some((known) => known.toLocaleLowerCase() === alias.toLocaleLowerCase()))] }
+        : { id: Math.max(0, ...vocabulary.map(({ id }) => id)) + 1, term, aliases };
+      vocabulary = existing ? vocabulary.map((entry) => entry.id === item.id ? item : entry) : [...vocabulary, item];
       return item;
     },
     deleteVocabulary: async (id) => {
@@ -406,16 +353,9 @@ export function createBrowserAdapter(): AppAdapter {
       vocabulary = vocabulary.filter((item) => item.id !== id);
       return before !== vocabulary.length;
     },
-    listModes: async () => [...modes],
-    upsertMode: async (mode) => {
-      modes = modes.some(({ id }) => id === mode.id)
-        ? modes.map((item) => item.id === mode.id ? mode : item)
-        : [...modes, mode];
-    },
-    deleteMode: async (id) => {
-      const before = modes.length;
-      modes = modes.filter((item) => item.id !== id || item.isDefault);
-      return before !== modes.length;
+    vocabularySuggestions: async () => {
+      const term = vocabulary.find((item) => item.term === "Loquara" && !item.aliases.includes("lokwara"));
+      return term ? [{ termId: term.id, term: term.term, heard: "lokwara", count: 3, example: "…wklej to do lokwara i sprawdź…" }] : [];
     },
     getSettings: async () => settings,
     getModelStatus: async () => ({
@@ -426,7 +366,7 @@ export function createBrowserAdapter(): AppAdapter {
       message: null,
     }),
     listModels: async () => ([
-      { key: "parakeet", id: "csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8", provider: "NVIDIA", source: "local", revision: "", display: "Parakeet TDT 0.6B v3", minVramGb: 0, minRamGb: 2, languages: "25 języków", estimatedSizeBytes: 670_478_772, status: "ready", installedSizeBytes: 670_478_772, message: null },
+      { key: "parakeet", id: "nvidia/parakeet-tdt-0.6b-v3 (8-bit, block 32)", provider: "NVIDIA", source: "local", revision: "", display: "Parakeet TDT 0.6B v3", minVramGb: 0, minRamGb: 2, languages: "25 języków", estimatedSizeBytes: 1_020_355_800, status: "ready", installedSizeBytes: 1_020_355_800, message: null },
     ]),
     downloadModel: async () => undefined,
     cancelDownload: async () => undefined,
@@ -442,28 +382,6 @@ export function createBrowserAdapter(): AppAdapter {
       return { settings, warning: null };
     },
     updateSettingValue: async () => undefined,
-    listCloudProviders: async () => demoCloudProviders.map((provider) => ({ ...provider, models: [...provider.models] })),
-    listCloudKeys: async () => [...cloudKeys],
-    listCloudModels: async () => {
-      const provider = demoCloudProviders.find((item) => item.key === settings.cloudProvider);
-      if (!provider?.listsModels) throw new Error("Ten dostawca nie udostępnia listy modeli.");
-      return [...provider.models];
-    },
-    setCloudApiKey: async (provider, apiKey) => {
-      if (apiKey.trim()) cloudKeys.add(provider);
-      else cloudKeys.delete(provider);
-      snapshot = { ...snapshot, model: modelSummary() }; emit();
-      return [...cloudKeys];
-    },
-    clearCloudApiKey: async (provider) => {
-      cloudKeys.delete(provider);
-      snapshot = { ...snapshot, model: modelSummary() }; emit();
-      return [...cloudKeys];
-    },
-    testCloudTranscription: async () => {
-      if (!cloudKeys.has(settings.cloudProvider)) throw new Error("Brak klucza API.");
-      return { text: "Dzień dobry, to jest test.", elapsedMs: 940 };
-    },
     onState: async (listener) => {
       stateListeners.add(listener);
       return () => stateListeners.delete(listener);

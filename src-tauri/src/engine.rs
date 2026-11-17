@@ -15,8 +15,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
+use parakeet_rs::{ExecutionConfig, ParakeetTDT, Transcriber};
 use rubato::{Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction};
-use sherpa_rs::transducer::{TransducerConfig, TransducerRecognizer};
 
 /// Every model Loquara ships is trained on 16 kHz mono audio.
 pub const TARGET_SAMPLE_RATE: u32 = 16_000;
@@ -24,57 +24,47 @@ pub const TARGET_SAMPLE_RATE: u32 = 16_000;
 /// Rubato's sinc interpolator allocates filters per input chunk. Passing the
 /// whole recording as one chunk (seven minutes of 48 kHz) exhausted memory
 /// and crashed retry. A few thousand frames is enough for quality.
-const RESAMPLE_INPUT_CHUNK: usize = 4_096;
+pub(crate) const RESAMPLE_INPUT_CHUNK: usize = 4_096;
 
 /// Parakeet/NeMo offline decode aborts the whole process (Windows `0xc0000409`)
 /// when given several minutes in one shot. Takes around 40s already succeed, so
-/// windows stay under that and hop with a little overlap so words on the cut
-/// are not dropped.
-const TRANSCRIBE_WINDOW_SAMPLES: usize = TARGET_SAMPLE_RATE as usize * 30;
-const TRANSCRIBE_HOP_SAMPLES: usize = TARGET_SAMPLE_RATE as usize * 29;
+/// windows stay under that.
+pub(crate) const TRANSCRIBE_WINDOW_SAMPLES: usize = TARGET_SAMPLE_RATE as usize * 30;
+/// Windows never end before this, so a long take is not chopped into
+/// needlessly short pieces that lose sentence context.
+pub(crate) const TRANSCRIBE_MIN_WINDOW_SAMPLES: usize = TARGET_SAMPLE_RATE as usize * 18;
+/// Energy is measured over 20 ms frames, then averaged over 200 ms, so a cut
+/// lands in a real pause rather than in the gap of a single plosive.
+pub(crate) const CUT_FRAME_SAMPLES: usize = TARGET_SAMPLE_RATE as usize / 50;
+const CUT_SMOOTH_FRAMES: usize = 10;
 
 /// Which processor actually ran the last model load.
 ///
-/// Reported to the interface so the user can see whether their graphics card
-/// is being used, without the app having to ask them what hardware they own.
+/// Reported to the interface so the user can see where the model runs. The
+/// engine is CPU-only: DirectML on an RTX 5080 measured only 15-25% faster
+/// than four CPU threads, while costing an 18 MB library, a slower load and
+/// more memory. `Gpu` stays so the value the interface understands does not
+/// change shape if an accelerator returns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Accelerator {
-    /// A DirectX 12 graphics card: NVIDIA, AMD or Intel alike.
+    #[allow(dead_code)]
     Gpu,
     Cpu,
 }
 
-/// Providers to try, best first.
-///
-/// Loquara does not inspect the hardware. Detecting graphics cards means
-/// keeping a list of what counts, which is wrong on the day a new card ships;
-/// asking the provider to start and seeing whether it does is the same answer
-/// with none of the guesswork. DirectML covers every DirectX 12 card, so one
-/// attempt serves NVIDIA, AMD and Intel, and the CPU below it always works.
-#[cfg(windows)]
-const PROVIDERS: &[(&str, Accelerator)] = &[("directml", Accelerator::Gpu), ("cpu", Accelerator::Cpu)];
-
-/// macOS and Linux run on the processor.
-///
-/// The prebuilt sherpa-onnx libraries those platforms ship with are the CPU
-/// build: DirectML is a Windows API, and CoreML is not compiled into the
-/// universal macOS library. Asking for a provider the library does not have
-/// only produces a failed load, so the list is honest about what exists.
-#[cfg(not(windows))]
-const PROVIDERS: &[(&str, Accelerator)] = &[("cpu", Accelerator::Cpu)];
-
 /// Threads to give ONNX Runtime.
 ///
-/// Measured on this workload, four threads reach the same speed as eight and
-/// sixteen are markedly *slower* — the graph is small enough that scheduling
-/// overhead outweighs the extra parallelism. Machines with fewer cores use
-/// what they have.
-fn decode_threads() -> i32 {
-    let cores = std::thread::available_parallelism()
+/// Measured on the 8-bit Parakeet encoder, eight threads beat four by about
+/// 15% on a 24-thread desktop, and more than eight bring nothing but
+/// scheduling overhead. Half the logical processors approximates the physical
+/// cores, so hyper-threads do not fight over the same core; small machines
+/// still get at least four (or every processor they have).
+fn decode_threads() -> usize {
+    let logical = std::thread::available_parallelism()
         .map(|count| count.get())
         .unwrap_or(4);
-    cores.clamp(1, 4) as i32
+    (logical / 2).clamp(4, 8).min(logical)
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -92,8 +82,7 @@ pub enum EngineError {
 /// The recogniser for one model, plus which model it is.
 struct Loaded {
     key: String,
-    recogniser: TransducerRecognizer,
-    accelerator: Accelerator,
+    recogniser: ParakeetTDT,
 }
 
 /// Holds at most one loaded model.
@@ -136,9 +125,7 @@ impl Engine {
 
     /// Whether every file a model needs is present.
     pub fn is_installed(&self, key: &str) -> bool {
-        required_files(&self.model_dir(key))
-            .iter()
-            .all(|path| path.is_file())
+        is_complete(&self.model_dir(key))
     }
 
     /// The model currently held in memory, if any.
@@ -180,8 +167,7 @@ impl Engine {
             return Ok(());
         }
         let directory = self.model_dir(key);
-        let files = required_files(&directory);
-        if !files.iter().all(|path| path.is_file()) {
+        if !is_complete(&directory) {
             self.set_status(Status::default());
             return Err(EngineError::ModelIncomplete {
                 model: key.to_owned(),
@@ -192,39 +178,21 @@ impl Engine {
         // sit in memory at the same time.
         *guard = None;
 
-        let mut last_error = String::from("no provider was tried");
-        for (provider, accelerator) in PROVIDERS {
-            let config = TransducerConfig {
-                encoder: files[0].to_string_lossy().into_owned(),
-                decoder: files[1].to_string_lossy().into_owned(),
-                joiner: files[2].to_string_lossy().into_owned(),
-                tokens: files[3].to_string_lossy().into_owned(),
-                model_type: "nemo_transducer".into(),
-                num_threads: decode_threads(),
-                decoding_method: "greedy_search".into(),
-                provider: Some((*provider).to_owned()),
-                debug: false,
-                ..Default::default()
-            };
-            match TransducerRecognizer::new(config) {
-                Ok(recogniser) => {
-                    *guard = Some(Loaded {
-                        key: key.to_owned(),
-                        recogniser,
-                        accelerator: *accelerator,
-                    });
-                    self.set_status(Status {
-                        key: Some(key.to_owned()),
-                        accelerator: Some(*accelerator),
-                        loading: false,
-                    });
-                    return Ok(());
-                }
-                Err(error) => last_error = error.to_string(),
+        match load_recogniser(&directory) {
+            Ok(recogniser) => {
+                *guard = Some(Loaded { key: key.to_owned(), recogniser });
+                self.set_status(Status {
+                    key: Some(key.to_owned()),
+                    accelerator: Some(Accelerator::Cpu),
+                    loading: false,
+                });
+                Ok(())
+            }
+            Err(error) => {
+                self.set_status(Status::default());
+                Err(error)
             }
         }
-        self.set_status(Status::default());
-        Err(EngineError::Load(last_error))
     }
 
     /// Bounded local preview through the same resident native runtime as final
@@ -240,6 +208,49 @@ impl Engine {
         let text = transcribe_samples(&mut loaded.recogniser, samples, Some(cancel))?;
         if cancel.load(Ordering::SeqCst) { return Err(EngineError::Decode("preview cancelled".into())); }
         Ok(text)
+    }
+
+    /// Decodes one window of a take that is still being recorded, for
+    /// [`crate::progressive`]. Returns `None`, without waiting for the model,
+    /// once `stop` is set: whatever is left is decoded by the final pass.
+    pub fn transcribe_window(&self, key: &str, window: &[f32], stop: &AtomicBool) -> Result<Option<String>, EngineError> {
+        if window.len() > TRANSCRIBE_WINDOW_SAMPLES {
+            return Err(EngineError::Decode("window exceeds thirty seconds".into()));
+        }
+        if !has_speech(window) {
+            return Ok(Some(String::new()));
+        }
+        if stop.load(Ordering::SeqCst) { return Ok(None); }
+        self.ensure_loaded(key)?;
+        if stop.load(Ordering::SeqCst) { return Ok(None); }
+        let mut guard = self.loaded.lock().map_err(|_| EngineError::Decode("engine lock poisoned".into()))?;
+        let loaded = guard.as_mut().ok_or_else(|| EngineError::Decode("model unloaded".into()))?;
+        window_text(window, |window| decode_window(&mut loaded.recogniser, window)).map(Some)
+    }
+
+    /// The final pass over a take already converted to 16 kHz mono, reusing
+    /// windows decoded while it was recorded. Identical to [`Self::transcribe`]
+    /// on the same audio; the model lock is taken only if something is left
+    /// to decode.
+    pub fn transcribe_prepared(
+        &self,
+        key: &str,
+        samples: &[f32],
+        cache: &WindowCache,
+        cancel: Option<&AtomicBool>,
+    ) -> Result<String, EngineError> {
+        let mut guard = None;
+        final_text(samples, cache, cancel, |window| {
+            if guard.is_none() {
+                self.ensure_loaded(key)?;
+                guard = Some(self.loaded.lock().map_err(|_| EngineError::Decode("engine lock poisoned".into()))?);
+            }
+            let loaded = guard
+                .as_mut()
+                .and_then(|guard| guard.as_mut())
+                .ok_or_else(|| EngineError::Decode("model was unloaded mid-transcription".into()))?;
+            decode_window(&mut loaded.recogniser, window)
+        })
     }
 
     /// Transcribes a recording, loading the model first if necessary.
@@ -265,14 +276,75 @@ impl Engine {
     }
 }
 
-/// The files a transducer model is made of, in the order the config wants.
-fn required_files(directory: &Path) -> [PathBuf; 4] {
-    [
-        directory.join("encoder.int8.onnx"),
-        directory.join("decoder.int8.onnx"),
-        directory.join("joiner.int8.onnx"),
-        directory.join("tokens.txt"),
-    ]
+/// The files a Parakeet TDT model is made of, under the names parakeet-rs
+/// looks for.
+pub const MODEL_FILES: [&str; 3] = ["encoder-model.onnx", "decoder_joint-model.onnx", "vocab.txt"];
+
+/// The encoder's weights, stored beside its graph.
+///
+/// Weights inside the `.onnx` protobuf are copied into private memory when
+/// the session is built. Kept in a separate, 64 KiB-aligned file, ONNX Runtime
+/// memory-maps them instead: the pages are backed by the file, so the system
+/// can drop them under pressure without writing them to the page file.
+/// Measured on the 8-bit encoder, private memory after a dictation fell from
+/// 1376 MB to 749 MB (together with the arena below), at the same speed and
+/// the same words.
+pub const ENCODER_DATA_FILE: &str = "encoder-model.onnx.data";
+
+/// An encoder graph whose weights live in [`ENCODER_DATA_FILE`] is under a
+/// megabyte; one this large carries its weights inside. That is the layout
+/// of the first 8-bit release, which installations downloaded before the
+/// split and which still loads (only without the memory mapping).
+const SELF_CONTAINED_ENCODER_MIN_BYTES: u64 = 100_000_000;
+
+/// Whether `directory` holds a loadable model, in either layout.
+fn is_complete(directory: &Path) -> bool {
+    if !MODEL_FILES.iter().all(|name| directory.join(name).is_file()) {
+        return false;
+    }
+    directory.join(ENCODER_DATA_FILE).is_file()
+        || std::fs::metadata(directory.join(MODEL_FILES[0]))
+            .is_ok_and(|meta| meta.len() >= SELF_CONTAINED_ENCODER_MIN_BYTES)
+}
+
+/// ONNX Runtime allows a single environment per process, so it is built once
+/// and shared by every load (a model reloaded after unload or a model switch).
+fn ort_environment() -> Result<parakeet_rs::ort::environment::Environment, EngineError> {
+    static ENVIRONMENT: std::sync::OnceLock<Result<parakeet_rs::ort::environment::Environment, String>> = std::sync::OnceLock::new();
+    ENVIRONMENT
+        .get_or_init(|| parakeet_rs::ort::init().with_name("loquara").build().map_err(|error| error.to_string()))
+        .clone()
+        .map_err(EngineError::Load)
+}
+
+/// Builds the recogniser on the CPU, then runs it once.
+///
+/// The CPU memory arena is off: it kept the largest activations of the
+/// longest window reserved after every dictation (about 240 MB more after a
+/// 30 s window), and turning it off measured no slower.
+///
+/// The warm-up decode touches every memory-mapped weight page and every
+/// kernel once, so the first real dictation does not pay for it (measured:
+/// 241 ms instead of 52 ms for a short take straight after load).
+fn load_recogniser(directory: &Path) -> Result<ParakeetTDT, EngineError> {
+    let config = ExecutionConfig::new()
+        .with_environment(ort_environment()?)
+        .with_intra_threads(decode_threads())
+        .with_custom_configure(|builder| {
+            Ok(builder.with_execution_providers([parakeet_rs::ort::ep::CPU::default().with_arena_allocator(false).build()])?)
+        });
+    let mut recogniser =
+        ParakeetTDT::from_pretrained(directory, Some(config)).map_err(|error| EngineError::Load(error.to_string()))?;
+    warm_up(&mut recogniser);
+    Ok(recogniser)
+}
+
+/// One second of a quiet tone, decoded and thrown away.
+fn warm_up(recogniser: &mut ParakeetTDT) {
+    let tone: Vec<f32> = (0..TARGET_SAMPLE_RATE as usize)
+        .map(|index| 0.02 * (index as f32 * 0.07).sin())
+        .collect();
+    let _ = recogniser.transcribe_samples(tone, TARGET_SAMPLE_RATE, 1, None);
 }
 
 /// Encodes 16 kHz mono samples as a WAV, in memory.
@@ -335,7 +407,7 @@ pub fn read_as_target_rate(path: &Path) -> Result<Vec<f32>, EngineError> {
 
 /// Averages channels into one. Speech is centred in both, so a mean keeps it
 /// and cancels a little of whatever is only on one side.
-fn downmix(interleaved: &[f32], channels: u16) -> Vec<f32> {
+pub(crate) fn downmix(interleaved: &[f32], channels: u16) -> Vec<f32> {
     if channels <= 1 {
         return interleaved.to_vec();
     }
@@ -355,16 +427,8 @@ fn resample(samples: Vec<f32>, from_rate: u32) -> Result<Vec<f32>, EngineError> 
     if from_rate == TARGET_SAMPLE_RATE || samples.is_empty() {
         return Ok(samples);
     }
-    let parameters = SincInterpolationParameters {
-        sinc_len: 128,
-        f_cutoff: 0.95,
-        interpolation: SincInterpolationType::Linear,
-        oversampling_factor: 128,
-        window: WindowFunction::BlackmanHarris2,
-    };
     let ratio = TARGET_SAMPLE_RATE as f64 / from_rate as f64;
-    let mut resampler = SincFixedIn::<f32>::new(ratio, 1.0, parameters, RESAMPLE_INPUT_CHUNK, 1)
-        .map_err(|error| EngineError::Audio(error.to_string()))?;
+    let mut resampler = target_rate_resampler(from_rate)?;
     let mut output = Vec::with_capacity(
         ((samples.len() as f64 * ratio).ceil() as usize).saturating_add(RESAMPLE_INPUT_CHUNK),
     );
@@ -396,27 +460,179 @@ fn resample(samples: Vec<f32>, from_rate: u32) -> Result<Vec<f32>, EngineError> 
     Ok(output)
 }
 
-fn transcription_windows(sample_count: usize) -> Vec<(usize, usize)> {
+/// The resampler [`resample`] uses, fed [`RESAMPLE_INPUT_CHUNK`] frames at a
+/// time. Progressive decoding builds the same one, so feeding it the capture
+/// as it arrives gives exactly the samples reading the finished WAV would.
+pub(crate) fn target_rate_resampler(from_rate: u32) -> Result<SincFixedIn<f32>, EngineError> {
+    let parameters = SincInterpolationParameters {
+        sinc_len: 128,
+        f_cutoff: 0.95,
+        interpolation: SincInterpolationType::Linear,
+        oversampling_factor: 128,
+        window: WindowFunction::BlackmanHarris2,
+    };
+    let ratio = TARGET_SAMPLE_RATE as f64 / from_rate as f64;
+    SincFixedIn::<f32>::new(ratio, 1.0, parameters, RESAMPLE_INPUT_CHUNK, 1)
+        .map_err(|error| EngineError::Audio(error.to_string()))
+}
+
+/// Splits a take into contiguous, non-overlapping windows the encoder can
+/// handle, cutting each one in the quietest stretch between 18 and 30 s.
+///
+/// Windows used to be fixed 30 s slices hopping by 29 s. The second window
+/// then started in the middle of whatever word was being spoken at 29 s, and
+/// the overlap was joined back without being removed, so every long take got
+/// a duplicated, half-cut phrase at each boundary ("coś poszło nie tak. Zło
+/// nie tak."). Cutting in a pause, with no overlap, means no word is ever
+/// split and nothing is transcribed twice.
+pub(crate) fn transcription_windows(samples: &[f32]) -> Vec<(usize, usize)> {
+    let sample_count = samples.len();
     if sample_count == 0 {
         return Vec::new();
     }
-    if sample_count <= TRANSCRIBE_WINDOW_SAMPLES {
-        return vec![(0, sample_count)];
-    }
     let mut windows = Vec::new();
     let mut start = 0;
-    loop {
-        let end = (start + TRANSCRIBE_WINDOW_SAMPLES).min(sample_count);
+    while sample_count - start > TRANSCRIBE_WINDOW_SAMPLES {
+        let end = quietest_cut(
+            samples,
+            start + TRANSCRIBE_MIN_WINDOW_SAMPLES,
+            start + TRANSCRIBE_WINDOW_SAMPLES,
+        );
         windows.push((start, end));
-        if end == sample_count {
-            break;
-        }
-        start += TRANSCRIBE_HOP_SAMPLES;
-        if start >= sample_count {
-            break;
+        start = end;
+    }
+    windows.push((start, sample_count));
+    windows
+}
+
+/// The centre of the quietest ~200 ms stretch within `from..to`.
+///
+/// Ties go to the latest candidate, so steady silence (or a synthetic take of
+/// constant level) still produces windows as long as allowed.
+pub(crate) fn quietest_cut(samples: &[f32], from: usize, to: usize) -> usize {
+    let to = to.min(samples.len());
+    let frames: Vec<f32> = samples[from..to]
+        .chunks(CUT_FRAME_SAMPLES)
+        .map(|frame| {
+            frame
+                .iter()
+                .filter(|sample| sample.is_finite())
+                .map(|sample| sample * sample)
+                .sum::<f32>()
+                / frame.len() as f32
+        })
+        .collect();
+    if frames.len() <= CUT_SMOOTH_FRAMES {
+        return to;
+    }
+    let mut best = (f32::INFINITY, frames.len() - CUT_SMOOTH_FRAMES);
+    for (first, run) in frames.windows(CUT_SMOOTH_FRAMES).enumerate() {
+        let energy: f32 = run.iter().sum();
+        if energy <= best.0 {
+            best = (energy, first);
         }
     }
-    windows
+    let centre_frame = best.1 + CUT_SMOOTH_FRAMES / 2;
+    (from + centre_frame * CUT_FRAME_SAMPLES).min(to)
+}
+
+/// Frames quieter than this (about -66 dBFS) are digital silence: what a
+/// noise gate or Windows voice processing leaves between phrases. A real room
+/// is louder than this even when nobody speaks, so ordinary pauses are kept.
+const DIGITAL_SILENCE_RMS: f32 = 0.0005;
+/// Silent runs longer than 2 s are shortened...
+const MAX_SILENCE_FRAMES: usize = 100;
+/// ...to 0.8 s at each end, so the pause still reads as a pause.
+const KEPT_SILENCE_FRAMES: usize = 40;
+
+/// Shortens long stretches of gated, near-zero silence to 1.6 s.
+///
+/// Measured on real takes from a gated USB microphone: when a window started
+/// with 3-5 s of digital silence, Parakeet dropped the first words after it
+/// ("Nowy zrzut ekranu nagrywania" came back as "Nrywania"), and long takes
+/// lost whole sentences. Such silence is unlike anything the model was trained
+/// on, so recognition sees at most 1.6 s of it. The WAV on disk is not touched.
+///
+/// The cap used to be 0.4 s for any run over 0.6 s. That squeezed ordinary
+/// thinking pauses too, and Parakeet, which reads the whole window at once,
+/// then lost its sentence boundaries: a take opening "A próbowałeś…" came
+/// back as "a próbowałeś…", words merged across the splice ("żeby" → "żebyśś")
+/// and silent takes produced "Okay." from nothing. Over 80 of the user's takes
+/// the 2 s / 1.6 s setting kept every word the 0.4 s cap recovered in long
+/// takes, while short takes come out as they would from the untouched audio.
+fn shorten_digital_silence(samples: &[f32]) -> Vec<f32> {
+    shorten_digital_silence_tracked(samples).samples
+}
+
+/// [`shorten_digital_silence`] applied to audio that is still growing.
+pub(crate) struct Shortened {
+    pub samples: Vec<f32>,
+    /// How many leading output samples no later audio can change: everything
+    /// before a trailing silent run (which may still grow past 2 s and lose
+    /// its middle) and before a trailing, still-partial frame. The first
+    /// 0.8 s of that run is kept whatever its final length, so it counts.
+    pub stable: usize,
+    /// Where silence was dropped: (output index, input samples removed).
+    pub removed: Vec<(usize, usize)>,
+}
+
+impl Shortened {
+    /// The input index an output index came from.
+    pub fn source_index(&self, output_index: usize) -> usize {
+        output_index
+            + self
+                .removed
+                .iter()
+                .filter(|(at, _)| *at <= output_index)
+                .map(|(_, removed)| removed)
+                .sum::<usize>()
+    }
+}
+
+pub(crate) fn shorten_digital_silence_tracked(samples: &[f32]) -> Shortened {
+    let frames: Vec<&[f32]> = samples.chunks(CUT_FRAME_SAMPLES).collect();
+    let silent = |frame: &[f32]| {
+        frame.len() == CUT_FRAME_SAMPLES
+            && frame.iter().map(|sample| if sample.is_finite() { sample * sample } else { 0.0 }).sum::<f32>()
+                / (frame.len() as f32)
+                < DIGITAL_SILENCE_RMS * DIGITAL_SILENCE_RMS
+    };
+    let mut output = Vec::with_capacity(samples.len());
+    let mut removed = Vec::new();
+    let mut open_run_stable = None;
+    let mut index = 0;
+    while index < frames.len() {
+        if !silent(frames[index]) {
+            output.extend_from_slice(frames[index]);
+            index += 1;
+            continue;
+        }
+        let run_start = index;
+        while index < frames.len() && silent(frames[index]) {
+            index += 1;
+        }
+        let run = &frames[run_start..index];
+        // Followed by nothing, or only by a frame still being filled: more
+        // audio may extend this run.
+        if frames[index..].iter().all(|frame| frame.len() < CUT_FRAME_SAMPLES) {
+            open_run_stable = Some(output.len() + run.len().min(KEPT_SILENCE_FRAMES) * CUT_FRAME_SAMPLES);
+        }
+        if run.len() > MAX_SILENCE_FRAMES {
+            for frame in &run[..KEPT_SILENCE_FRAMES] {
+                output.extend_from_slice(frame);
+            }
+            removed.push((output.len(), (run.len() - 2 * KEPT_SILENCE_FRAMES) * CUT_FRAME_SAMPLES));
+            for frame in &run[run.len() - KEPT_SILENCE_FRAMES..] {
+                output.extend_from_slice(frame);
+            }
+        } else {
+            for frame in run {
+                output.extend_from_slice(frame);
+            }
+        }
+    }
+    let stable = open_run_stable.unwrap_or(output.len() - samples.len() % CUT_FRAME_SAMPLES);
+    Shortened { samples: output, stable, removed }
 }
 
 fn join_window_transcripts(parts: &[String]) -> String {
@@ -428,20 +644,105 @@ fn join_window_transcripts(parts: &[String]) -> String {
         .join(" ")
 }
 
+/// A 20 ms frame at or above this level (-40 dBFS) counts as possible speech.
+const SPEECH_FRAME_RMS: f32 = 0.01;
+/// How much possible speech a window needs before it is worth decoding.
+const MIN_SPEECH_FRAMES: usize = 5;
+
+/// Whether `samples` contain anything louder than a silent room.
+///
+/// Parakeet invents a word for silence: the user's empty takes, whose loudest
+/// 20 ms frame stays between -51 and -40 dBFS, came back as "Okay.", "Yeah."
+/// or "Mm.". Across all 267 of the user's recordings, the quietest take with
+/// real speech peaked at -23 dBFS and held over a second above -50 dBFS, so
+/// asking for 100 ms at -40 dBFS or louder leaves a 17 dB margin on the speech
+/// side while every silent take falls below it.
+pub(crate) fn has_speech(samples: &[f32]) -> bool {
+    samples
+        .chunks(CUT_FRAME_SAMPLES)
+        .filter(|frame| {
+            let energy = frame
+                .iter()
+                .map(|sample| if sample.is_finite() { sample * sample } else { 0.0 })
+                .sum::<f32>()
+                / frame.len() as f32;
+            energy >= SPEECH_FRAME_RMS * SPEECH_FRAME_RMS
+        })
+        .nth(MIN_SPEECH_FRAMES - 1)
+        .is_some()
+}
+
 fn transcribe_samples(
-    recogniser: &mut TransducerRecognizer,
+    recogniser: &mut ParakeetTDT,
     samples: &[f32],
     cancel: Option<&AtomicBool>,
 ) -> Result<String, EngineError> {
+    final_text(samples, &WindowCache::new(), cancel, |window| decode_window(recogniser, window))
+}
+
+fn decode_window(recogniser: &mut ParakeetTDT, window: &[f32]) -> Result<String, EngineError> {
+    recogniser
+        .transcribe_samples(window.to_vec(), TARGET_SAMPLE_RATE, 1, None)
+        .map(|result| result.text)
+        .map_err(|error| EngineError::Decode(error.to_string()))
+}
+
+/// Text already decoded for a window, keyed by where the window lies in the
+/// silence-shortened take and a hash of its samples.
+pub type WindowCache = std::collections::HashMap<WindowKey, String>;
+pub type WindowKey = (usize, usize, u64);
+
+/// FNV-1a over the samples' bits: a window is reused only if every sample
+/// matches what the final pass would decode.
+pub(crate) fn window_hash(window: &[f32]) -> u64 {
+    window.iter().fold(0xcbf2_9ce4_8422_2325_u64, |hash, sample| {
+        sample
+            .to_bits()
+            .to_le_bytes()
+            .iter()
+            .fold(hash, |hash, byte| (hash ^ u64::from(*byte)).wrapping_mul(0x0100_0000_01b3))
+    })
+}
+
+/// What one window contributes to the transcript: nothing without speech,
+/// otherwise the model's trimmed text.
+pub(crate) fn window_text(
+    window: &[f32],
+    decode: impl FnOnce(&[f32]) -> Result<String, EngineError>,
+) -> Result<String, EngineError> {
+    if !has_speech(window) {
+        return Ok(String::new());
+    }
+    Ok(decode(window)?.trim().to_owned())
+}
+
+/// The final transcript of a whole take (16 kHz mono): shorten gated
+/// silence, cut into windows, decode each, join.
+///
+/// The one definition of the final pass. A window found in `cache` under the
+/// same position and sample hash is not decoded again; progressive decoding
+/// fills the cache while the take is still being recorded, so at stop only the
+/// windows it has not seen are decoded. An empty cache is the batch pass.
+pub(crate) fn final_text(
+    samples: &[f32],
+    cache: &WindowCache,
+    cancel: Option<&AtomicBool>,
+    mut decode: impl FnMut(&[f32]) -> Result<String, EngineError>,
+) -> Result<String, EngineError> {
+    let samples = &shorten_digital_silence(samples);
     let mut parts = Vec::new();
-    for (start, end) in transcription_windows(samples.len()) {
+    for (start, end) in transcription_windows(samples) {
         if cancel.is_some_and(|flag| flag.load(Ordering::SeqCst)) {
             return Err(EngineError::Decode("transcription cancelled".into()));
         }
-        let text = recogniser.transcribe(TARGET_SAMPLE_RATE, &samples[start..end]);
-        let trimmed = text.trim();
-        if !trimmed.is_empty() {
-            parts.push(trimmed.to_owned());
+        let window = &samples[start..end];
+        let cached = if cache.is_empty() { None } else { cache.get(&(start, end, window_hash(window))) };
+        let text = match cached {
+            Some(text) => text.clone(),
+            None => window_text(window, &mut decode)?,
+        };
+        if !text.is_empty() {
+            parts.push(text);
         }
     }
     Ok(join_window_transcripts(&parts))
@@ -571,35 +872,105 @@ mod tests {
 
     #[test]
     fn a_short_take_is_a_single_transcription_window() {
-        assert_eq!(transcription_windows(16_000), vec![(0, 16_000)]);
-        assert!(transcription_windows(0).is_empty());
+        assert_eq!(transcription_windows(&vec![0.1; 16_000]), vec![(0, 16_000)]);
+        assert!(transcription_windows(&[]).is_empty());
         assert_eq!(
-            transcription_windows(TRANSCRIBE_WINDOW_SAMPLES),
+            transcription_windows(&vec![0.1; TRANSCRIBE_WINDOW_SAMPLES]),
             vec![(0, TRANSCRIBE_WINDOW_SAMPLES)]
         );
+    }
+
+    /// Steady "speech" with a 300 ms pause at `pause_at` seconds.
+    fn speech_with_pause(seconds: usize, pause_at: f32) -> Vec<f32> {
+        let rate = TARGET_SAMPLE_RATE as usize;
+        let mut samples: Vec<f32> = (0..seconds * rate)
+            .map(|index| 0.3 * ((index as f32) * 0.07).sin())
+            .collect();
+        let pause = (pause_at * rate as f32) as usize;
+        samples[pause..pause + rate * 3 / 10].fill(0.0);
+        samples
     }
 
     #[test]
     fn a_seven_minute_take_is_split_into_encoder_sized_windows() {
         // This is the 6:49 recording: one-shot decode aborted the process
-        // (Windows 0xc0000409). Windows must cover every sample and never
-        // exceed the length that already transcribes successfully.
-        let samples = TARGET_SAMPLE_RATE as usize * 409;
-        let windows = transcription_windows(samples);
+        // (Windows 0xc0000409). Windows must cover every sample exactly once
+        // and never exceed the length that already transcribes successfully.
+        let samples = vec![0.2_f32; TARGET_SAMPLE_RATE as usize * 409];
+        let windows = transcription_windows(&samples);
 
         assert!(windows.len() > 1);
-        assert_eq!(windows[0], (0, TRANSCRIBE_WINDOW_SAMPLES));
-        assert_eq!(windows.last().map(|(_, end)| *end), Some(samples));
-        assert!(
-            windows
-                .iter()
-                .all(|(start, end)| end.saturating_sub(*start) <= TRANSCRIBE_WINDOW_SAMPLES)
-        );
-        let mut covered = vec![false; samples];
-        for (start, end) in &windows {
-            covered[*start..*end].fill(true);
-        }
-        assert!(covered.iter().all(|sample| *sample));
+        assert_eq!(windows[0].0, 0);
+        assert_eq!(windows.last().map(|(_, end)| *end), Some(samples.len()));
+        assert!(windows.iter().all(|(start, end)| end - start <= TRANSCRIBE_WINDOW_SAMPLES));
+        assert!(windows.windows(2).all(|pair| pair[0].1 == pair[1].0), "{windows:?}");
+    }
+
+    #[test]
+    fn long_takes_are_cut_in_a_pause_not_in_the_middle_of_a_word() {
+        // Regression: fixed 30 s windows hopping by 29 s split the word
+        // spoken at 29-30 s and transcribed that second twice, so the user's
+        // 48 s take came back as "coś poszło nie tak. Zło nie tak.".
+        let rate = TARGET_SAMPLE_RATE as usize;
+        let samples = speech_with_pause(48, 23.5);
+
+        let windows = transcription_windows(&samples);
+
+        assert_eq!(windows.len(), 2, "{windows:?}");
+        let cut = windows[0].1;
+        let pause = (23.5 * rate as f32) as usize..(23.8 * rate as f32) as usize;
+        assert!(pause.contains(&cut), "cut at {cut} missed the pause {pause:?}");
+        assert_eq!(windows[1], (cut, samples.len()), "windows must not overlap");
+    }
+
+    #[test]
+    fn long_gated_silence_is_shortened_but_speech_and_short_pauses_are_kept() {
+        let rate = TARGET_SAMPLE_RATE as usize;
+        let speech: Vec<f32> = (0..rate).map(|index| 0.2 * ((index as f32) * 0.05).sin()).collect();
+        let short_pause = vec![0.0_f32; rate / 2];
+        let gated = vec![0.00001_f32; rate * 5];
+        let input = [gated.clone(), speech.clone(), short_pause.clone(), speech.clone(), gated, speech.clone()].concat();
+
+        let output = shorten_digital_silence(&input);
+
+        let kept = 2 * KEPT_SILENCE_FRAMES * CUT_FRAME_SAMPLES;
+        assert_eq!(output.len(), 3 * speech.len() + short_pause.len() + 2 * kept);
+        // Speech survives sample for sample.
+        assert_eq!(&output[kept..kept + speech.len()], speech.as_slice());
+        assert_eq!(&output[output.len() - speech.len()..], speech.as_slice());
+    }
+
+    #[test]
+    fn a_gated_thinking_pause_is_left_intact() {
+        // Regression: a 1.5 s pause was squeezed to 0.4 s, which made
+        // Parakeet open the real take "A próbowałeś…" in lower case.
+        let rate = TARGET_SAMPLE_RATE as usize;
+        let speech: Vec<f32> = (0..rate).map(|index| 0.2 * ((index as f32) * 0.05).sin()).collect();
+        let pause = vec![0.00001_f32; rate * 3 / 2];
+        let input = [speech.clone(), pause, speech].concat();
+
+        assert_eq!(shorten_digital_silence(&input), input);
+    }
+
+    #[test]
+    fn room_noise_is_not_mistaken_for_digital_silence() {
+        // -54 dBFS hiss: an ungated microphone in a quiet room.
+        let hiss: Vec<f32> = (0..TARGET_SAMPLE_RATE as usize * 5)
+            .map(|index| if index % 2 == 0 { 0.002 } else { -0.002 })
+            .collect();
+
+        assert_eq!(shorten_digital_silence(&hiss).len(), hiss.len());
+    }
+
+    #[test]
+    fn a_pause_before_the_minimum_window_is_not_used_as_a_cut() {
+        // A pause at 5 s would make a needlessly short first window.
+        let samples = speech_with_pause(40, 5.0);
+
+        let windows = transcription_windows(&samples);
+
+        assert!(windows[0].1 >= TRANSCRIBE_MIN_WINDOW_SAMPLES, "{windows:?}");
+        assert!(windows[0].1 <= TRANSCRIBE_WINDOW_SAMPLES, "{windows:?}");
     }
 
     #[test]
@@ -614,24 +985,14 @@ mod tests {
         );
     }
 
-    #[cfg(windows)]
     #[test]
-    fn the_graphics_card_is_tried_before_the_processor() {
-        assert_eq!(PROVIDERS.first().map(|(_, kind)| *kind), Some(Accelerator::Gpu));
-    }
-
-    #[test]
-    fn the_processor_is_always_the_last_resort() {
-        // Whatever the machine has, one entry in this list cannot fail to
-        // start, or a user without a supported card would be left with an app
-        // that refuses to load anything.
-        assert_eq!(PROVIDERS.last().map(|(name, kind)| (*name, *kind)), Some(("cpu", Accelerator::Cpu)));
-    }
-
-    #[test]
-    fn decode_threads_never_exceed_the_measured_sweet_spot() {
-        // Sixteen threads measured slower than four on this workload.
-        assert!((1..=4).contains(&decode_threads()));
+    fn decode_threads_stay_in_the_measured_range() {
+        // More than eight only added scheduling overhead; fewer than four
+        // happens only on machines that have fewer processors than that.
+        let threads = decode_threads();
+        let logical = std::thread::available_parallelism().map(|count| count.get()).unwrap_or(4);
+        assert!(threads <= 8 && threads >= 1, "{threads}");
+        assert!(threads >= 4.min(logical), "{threads}");
     }
 
     #[test]
@@ -640,14 +1001,106 @@ mod tests {
         let engine = Engine::new(temp.path());
         let directory = engine.model_dir("parakeet");
         std::fs::create_dir_all(&directory).unwrap();
-        for name in ["encoder.int8.onnx", "decoder.int8.onnx", "joiner.int8.onnx"] {
+        for name in ["encoder-model.onnx", ENCODER_DATA_FILE, "decoder_joint-model.onnx"] {
             std::fs::write(directory.join(name), b"x").unwrap();
         }
 
-        assert!(!engine.is_installed("parakeet"), "tokens.txt is missing");
+        assert!(!engine.is_installed("parakeet"), "vocab.txt is missing");
 
-        std::fs::write(directory.join("tokens.txt"), b"x").unwrap();
+        std::fs::write(directory.join("vocab.txt"), b"x").unwrap();
         assert!(engine.is_installed("parakeet"));
+    }
+
+    #[test]
+    fn a_split_encoder_without_its_weights_is_not_installed() {
+        // A download interrupted between the graph and its data file.
+        let temp = tempfile::tempdir().unwrap();
+        let engine = Engine::new(temp.path());
+        let directory = engine.model_dir("parakeet");
+        std::fs::create_dir_all(&directory).unwrap();
+        for name in MODEL_FILES {
+            std::fs::write(directory.join(name), b"x").unwrap();
+        }
+
+        assert!(!engine.is_installed("parakeet"));
+    }
+
+    #[test]
+    fn the_first_releases_self_contained_encoder_still_counts_as_installed() {
+        // Installations from before the split keep their 945 MB encoder and
+        // load it as they always did, without downloading anything again.
+        let temp = tempfile::tempdir().unwrap();
+        let engine = Engine::new(temp.path());
+        let directory = engine.model_dir("parakeet");
+        std::fs::create_dir_all(&directory).unwrap();
+        for name in MODEL_FILES {
+            std::fs::write(directory.join(name), b"x").unwrap();
+        }
+        std::fs::File::options()
+            .write(true)
+            .open(directory.join(MODEL_FILES[0]))
+            .unwrap()
+            .set_len(SELF_CONTAINED_ENCODER_MIN_BYTES)
+            .unwrap();
+
+        assert!(engine.is_installed("parakeet"));
+    }
+
+    #[test]
+    fn the_old_sherpa_model_does_not_count_as_installed() {
+        // Users upgrading from the sherpa-onnx engine still have its int8
+        // files; the new engine cannot read them, so the app must offer the
+        // download instead of failing on the first dictation.
+        let temp = tempfile::tempdir().unwrap();
+        let engine = Engine::new(temp.path());
+        let directory = engine.model_dir("parakeet");
+        std::fs::create_dir_all(&directory).unwrap();
+        for name in ["encoder.int8.onnx", "decoder.int8.onnx", "joiner.int8.onnx", "tokens.txt"] {
+            std::fs::write(directory.join(name), b"x").unwrap();
+        }
+
+        assert!(!engine.is_installed("parakeet"));
+    }
+
+    /// Low-level noise shaped like the user's empty takes: a floor around
+    /// -60 dBFS with a few clicks up to -41 dBFS.
+    fn silent_take(seconds: usize) -> Vec<f32> {
+        let rate = TARGET_SAMPLE_RATE as usize;
+        let mut samples: Vec<f32> = (0..seconds * rate)
+            .map(|index| if index % 2 == 0 { 0.001 } else { -0.001 })
+            .collect();
+        for click in [rate / 2, rate, rate * 3 / 2] {
+            samples[click..click + CUT_FRAME_SAMPLES].iter_mut().enumerate().for_each(|(index, sample)| {
+                *sample = if index % 2 == 0 { 0.009 } else { -0.009 };
+            });
+        }
+        samples
+    }
+
+    #[test]
+    fn a_take_without_speech_is_not_decoded() {
+        assert!(!has_speech(&silent_take(4)));
+        assert!(!has_speech(&[]));
+        assert!(!has_speech(&vec![0.0; TARGET_SAMPLE_RATE as usize * 3]));
+    }
+
+    #[test]
+    fn quiet_speech_is_still_decoded() {
+        // A quarter of a second of speech at -32 dBFS (RMS), well below the
+        // quietest real take (-23 dBFS peak), inside an otherwise silent take.
+        let rate = TARGET_SAMPLE_RATE as usize;
+        let mut samples = silent_take(3);
+        for (index, sample) in samples[rate..rate + rate / 4].iter_mut().enumerate() {
+            *sample = 0.035 * ((index as f32) * 0.05).sin();
+        }
+        assert!(has_speech(&samples));
+    }
+
+    #[test]
+    fn a_single_loud_click_is_not_speech() {
+        let mut samples = silent_take(2);
+        samples[1000..1000 + CUT_FRAME_SAMPLES].fill(0.5);
+        assert!(!has_speech(&samples));
     }
 
     /// End-to-end check against a real model and a real recording.
@@ -681,6 +1134,31 @@ mod tests {
         assert!(!text.is_empty());
         assert_eq!(text, again);
         assert!(second < first, "the model should not be reloaded");
+    }
+
+    /// ONNX Runtime permits one environment per process: a reload after an
+    /// unload (keep-alive) or from a second engine must reuse it, not fail.
+    #[test]
+    #[ignore = "needs a downloaded model"]
+    fn the_model_reloads_after_unload_in_the_same_process() {
+        let models = std::env::var("LOQUARA_TEST_MODELS").expect("LOQUARA_TEST_MODELS");
+        let engine = Engine::new(models.clone());
+        engine.ensure_loaded("parakeet").unwrap();
+        engine.unload();
+        engine.ensure_loaded("parakeet").unwrap();
+        Engine::new(models).ensure_loaded("parakeet").unwrap();
+    }
+
+    /// A real take with no speech in it must come back empty rather than as
+    /// "Okay." Set `LOQUARA_TEST_SILENT_WAV` alongside `LOQUARA_TEST_MODELS`.
+    #[test]
+    #[ignore = "needs a downloaded model"]
+    fn a_real_silent_take_transcribes_to_nothing() {
+        let models = std::env::var("LOQUARA_TEST_MODELS").expect("LOQUARA_TEST_MODELS");
+        let wav = std::env::var("LOQUARA_TEST_SILENT_WAV").expect("LOQUARA_TEST_SILENT_WAV");
+        let engine = Engine::new(models);
+
+        assert_eq!(engine.transcribe("parakeet", Path::new(&wav), None).unwrap(), "");
     }
 
     #[test]

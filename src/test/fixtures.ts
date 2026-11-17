@@ -1,8 +1,7 @@
-import { demoCloudProviders, type AppAdapter } from "../lib/tauri";
+import type { AppAdapter } from "../lib/tauri";
 import type {
   AppSettings,
   AppSnapshot,
-  Mode,
   Recording,
   VocabularyEntry,
 } from "../lib/types";
@@ -53,7 +52,6 @@ export const settings: AppSettings = {
   retentionDays: 30,
   launchOnLogin: true,
   startMinimized: false,
-  activeMode: "clean",
   showOverlay: true,
   overlaySize: "mini",
   model: "parakeet",
@@ -62,31 +60,16 @@ export const settings: AppSettings = {
   language: "system",
   modelKeepAliveSecs: 0,
   pasteMode: "auto",
-  transcriptionSource: "local",
-  cloudProvider: "xai",
-  cloudModel: "",
-  cloudBaseUrl: "",
-  cloudLanguage: "",
+  mediaDuringDictation: "muffle",
 };
 export const snapshot: AppSnapshot = {
   dictation: { status: "idle" },
   settings,
-  model: { key: "parakeet", display: "Parakeet TDT 0.6B v3", provider: "NVIDIA", installed: true, totalBytes: 670_478_772, source: "local" },
+  model: { key: "parakeet", display: "Parakeet TDT 0.6B v3", provider: "NVIDIA", installed: true, totalBytes: 670_478_772 },
   modelLoading: false,
 };
 export function adapterStub(overrides: Partial<AppAdapter> = {}): AppAdapter {
   const vocabulary: VocabularyEntry[] = [];
-  const modes: Mode[] = [
-    {
-      id: "clean",
-      name: "Czysty",
-      description: "Naturalny tekst bez wypełniaczy.",
-      prompt: "Usuń wypełniacze.",
-      enabled: true,
-      isDefault: true,
-      createdAt: 1,
-    },
-  ];
   let currentSettings = { ...settings };
   return {
     getAppSnapshot: async () => snapshot,
@@ -115,9 +98,13 @@ export function adapterStub(overrides: Partial<AppAdapter> = {}): AppAdapter {
     openModelFolder: async () => undefined,
     correctTranscript: async () => 0,
     listVocabulary: async () => vocabulary,
-    addVocabulary: async (heard, replacement) => {
-      const item = { id: vocabulary.length + 1, heard, replacement };
-      vocabulary.push(item);
+    addVocabulary: async (term, aliases) => {
+      const index = vocabulary.findIndex((item) => item.term.toLowerCase() === term.toLowerCase());
+      const item = index >= 0
+        ? { ...vocabulary[index], aliases: [...new Set([...vocabulary[index].aliases, ...aliases])] }
+        : { id: Math.max(0, ...vocabulary.map(({ id }) => id)) + 1, term, aliases };
+      if (index >= 0) vocabulary[index] = item;
+      else vocabulary.push(item);
       return item;
     },
     deleteVocabulary: async (id) => {
@@ -125,17 +112,7 @@ export function adapterStub(overrides: Partial<AppAdapter> = {}): AppAdapter {
       if (index >= 0) vocabulary.splice(index, 1);
       return index >= 0;
     },
-    listModes: async () => modes,
-    upsertMode: async (mode) => {
-      const index = modes.findIndex((item) => item.id === mode.id);
-      if (index >= 0) modes[index] = mode;
-      else modes.push(mode);
-    },
-    deleteMode: async (id) => {
-      const index = modes.findIndex((item) => item.id === id);
-      if (index >= 0) modes.splice(index, 1);
-      return index >= 0;
-    },
+    vocabularySuggestions: async () => [],
     getSettings: async () => currentSettings,
     getModelStatus: async () => ({
       state: "ready",
@@ -145,7 +122,7 @@ export function adapterStub(overrides: Partial<AppAdapter> = {}): AppAdapter {
       message: null,
     }),
     listModels: async () => [
-      { key: "parakeet", id: "csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8", provider: "NVIDIA", source: "local", revision: "", display: "Parakeet TDT 0.6B v3", minVramGb: 0, minRamGb: 2, languages: "25 języków", estimatedSizeBytes: 670_478_772, status: "ready", installedSizeBytes: 670_478_772, message: null },
+      { key: "parakeet", id: "nvidia/parakeet-tdt-0.6b-v3 (8-bit, block 32)", provider: "NVIDIA", source: "local", revision: "", display: "Parakeet TDT 0.6B v3", minVramGb: 0, minRamGb: 2, languages: "25 języków", estimatedSizeBytes: 670_478_772, status: "ready", installedSizeBytes: 670_478_772, message: null },
     ],
     downloadModel: async () => undefined,
     cancelDownload: async () => undefined,
@@ -155,12 +132,6 @@ export function adapterStub(overrides: Partial<AppAdapter> = {}): AppAdapter {
       return { settings: currentSettings, warning: null };
     },
     updateSettingValue: async () => undefined,
-    listCloudProviders: async () => demoCloudProviders,
-    listCloudKeys: async () => [],
-    listCloudModels: async () => [],
-    setCloudApiKey: async () => [],
-    clearCloudApiKey: async () => [],
-    testCloudTranscription: async () => ({ text: "", elapsedMs: 0 }),
     onState: async () => () => undefined,
     onLevel: async () => () => undefined,
     onModelProgress: async () => () => undefined,

@@ -17,4 +17,3 @@ recordings/
 
 *.tsbuildinfo
 src-tauri/gen/
-src-tauri/.sherpa-directml/

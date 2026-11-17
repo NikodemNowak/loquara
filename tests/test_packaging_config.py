@@ -66,7 +66,9 @@ class PackagingConfigTests(unittest.TestCase):
         self.assertNotIn("createDesktopShortcut", nsis)
         self.assertNotIn("createStartMenuShortcut", nsis)
 
-    def test_windows_resources_are_confined_to_the_windows_config(self):
+    def test_no_engine_libraries_are_bundled(self):
+        # ONNX Runtime is linked statically into the binary, so no platform
+        # config copies engine libraries into the bundle any more.
         repository = Path(__file__).resolve().parent.parent
         base = json.loads(
             (repository / "src-tauri" / "tauri.conf.json").read_text(
@@ -80,10 +82,11 @@ class PackagingConfigTests(unittest.TestCase):
         )
 
         self.assertNotIn("resources", base["bundle"])
-        self.assertEqual(windows["bundle"]["resources"], {"lib/*.dll": "./"})
+        self.assertNotIn("resources", windows["bundle"])
         self.assertEqual(set(windows["bundle"]["targets"]), {"nsis", "msi"})
+        self.assertEqual(base["build"]["beforeBuildCommand"], "pnpm build")
 
-    def test_linux_bundle_ships_shared_libraries_and_xdotool(self):
+    def test_linux_bundle_depends_on_xdotool(self):
         repository = Path(__file__).resolve().parent.parent
         linux = json.loads(
             (repository / "src-tauri" / "tauri.linux.conf.json").read_text(
@@ -91,11 +94,11 @@ class PackagingConfigTests(unittest.TestCase):
             )
         )
 
-        self.assertEqual(linux["bundle"]["resources"], {"lib/*.so*": ""})
+        self.assertNotIn("resources", linux["bundle"])
         self.assertEqual(set(linux["bundle"]["targets"]), {"deb", "appimage"})
         self.assertIn("xdotool", linux["bundle"]["linux"]["deb"]["depends"])
 
-    def test_macos_bundle_carries_microphone_permission_and_engine_frameworks(self):
+    def test_macos_bundle_carries_microphone_permission(self):
         repository = Path(__file__).resolve().parent.parent
         macos = json.loads(
             (repository / "src-tauri" / "tauri.macos.conf.json").read_text(
@@ -107,13 +110,8 @@ class PackagingConfigTests(unittest.TestCase):
             encoding="utf-8"
         )
 
-        self.assertIn(
-            "sign-macos-dylibs", macos["build"]["beforeBundleCommand"]
-        )
-        files = macos["bundle"]["macOS"]["files"]
-        self.assertTrue(files)
-        self.assertTrue(all(target.startswith("Frameworks/") for target in files))
-        self.assertIn("lib/libonnxruntime.1.17.1.dylib", files.values())
+        self.assertNotIn("build", macos)
+        self.assertNotIn("files", macos["bundle"]["macOS"])
         self.assertEqual(
             macos["bundle"]["macOS"]["entitlements"], "entitlements.plist"
         )
