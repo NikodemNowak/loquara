@@ -234,8 +234,10 @@ pub trait WindowsApi {
     }
     /// Process name of the app that will receive the text, for app profiles.
     fn target_app(&mut self, _target: Option<WindowTarget>) -> Option<String> { None }
-    /// Presses Enter in the focused window (a "wyślij" command or a profile).
-    fn send_enter(&mut self) -> Result<(), PlatformError> { Ok(()) }
+    /// Presses Enter for a "wyślij" command or a profile, but only while the
+    /// window that got the text is still in front: `target` on Windows, the
+    /// app named `app` elsewhere. Returns `Ok(false)` when focus moved.
+    fn send_enter(&mut self, _target: Option<WindowTarget>, _app: Option<&str>) -> Result<bool, PlatformError> { Ok(false) }
     fn send_paste(&mut self, target: Option<WindowTarget>, mode: PasteMode) -> Result<(), PlatformError> {
         let _ = target;
         match mode {
@@ -1323,25 +1325,33 @@ impl WindowsApi for SystemWindows {
         }
     }
 
-    fn send_enter(&mut self) -> Result<(), PlatformError> {
-        // Let the target take in the pasted text before the key arrives.
-        std::thread::sleep(std::time::Duration::from_millis(120));
+    fn send_enter(&mut self, target: Option<WindowTarget>, app: Option<&str>) -> Result<bool, PlatformError> {
         #[cfg(windows)]
         {
             use windows_sys::Win32::UI::Input::KeyboardAndMouse::{KEYEVENTF_KEYUP, VK_RETURN};
-            send_inputs_with_hold(&[key_input(VK_RETURN, 0)], &[key_input(VK_RETURN, KEYEVENTF_KEYUP)])
+            use windows_sys::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+            let _ = app;
+            let Some(target) = target.filter(|target| target.0 != 0) else { return Ok(false) };
+            if unsafe { GetForegroundWindow() } as isize != target.0 {
+                return Ok(false);
+            }
+            send_inputs_with_hold(&[key_input(VK_RETURN, 0)], &[key_input(VK_RETURN, KEYEVENTF_KEYUP)]).map(|()| true)
         }
-        #[cfg(target_os = "macos")]
+        #[cfg(not(windows))]
         {
-            macos_keystroke(r#"tell application "System Events" to key code 36"#)
-        }
-        #[cfg(all(unix, not(target_os = "macos")))]
-        {
-            xdotool_key("Return")
-        }
-        #[cfg(not(any(windows, target_os = "macos", all(unix, not(target_os = "macos")))))]
-        {
-            Ok(())
+            let _ = target;
+            // Without a window id, the frontmost app must still be the one
+            // the text was pasted into.
+            let Some(expected) = app else { return Ok(false) };
+            if self.target_app(None).as_deref() != Some(expected) {
+                return Ok(false);
+            }
+            #[cfg(target_os = "macos")]
+            { macos_keystroke(r#"tell application "System Events" to key code 36"#).map(|()| true) }
+            #[cfg(all(unix, not(target_os = "macos")))]
+            { xdotool_key("Return").map(|()| true) }
+            #[cfg(not(any(target_os = "macos", all(unix, not(target_os = "macos")))))]
+            { Ok(false) }
         }
     }
 

@@ -2116,7 +2116,11 @@ fn complete_take(state: &AppState, take: &FrozenTake, audio_path: &Path, result:
         else { finish_transcript(&result.text, &VocabularyEntry::matcher(&take.vocabulary).protect(state.storage.everyday_words())) };
     // Fillers, spoken commands, snippets and the target app's profile. The
     // app is only looked up when a profile could use it.
-    let app = if take.settings.app_profiles.is_empty() { None } else { windows.target_app(take.target) };
+    // The target app is looked up only when something needs it: a profile,
+    // or a send command whose Enter must land in that same app.
+    let wants_app = !take.settings.app_profiles.is_empty()
+        || (take.settings.voice_commands && crate::textops::ends_with_send(&transcript));
+    let app = if wants_app { windows.target_app(take.target) } else { None };
     let polished = crate::textops::polish(&transcript, &crate::textops::Options {
         fillers: take.settings.filler_removal,
         commands: take.settings.voice_commands,
@@ -2134,7 +2138,13 @@ fn complete_take(state: &AppState, take: &FrozenTake, audio_path: &Path, result:
                 Ok(()) => {
                     if let Ok(mut until) = state.suppress_shortcut_until.lock() { *until = Some(Instant::now() + Duration::from_secs(2)); }
                     let mut result = platform::copy_and_paste_cancellable(windows, take.target, &transcript, take.settings.paste_mode, shortcut.as_ref(), || !take.owns(state));
-                    if result.is_ok() && polished.press_enter && take.owns(state) { result = windows.send_enter(); }
+                    if result.is_ok() && polished.press_enter {
+                        // Let the target take in the pasted text, then press
+                        // Enter only if this take is still current and the
+                        // same window is still in front.
+                        std::thread::sleep(Duration::from_millis(120));
+                        if take.owns(state) { result = windows.send_enter(take.target, app.as_deref()).map(|_| ()); }
+                    }
                     if let Ok(mut until) = state.suppress_shortcut_until.lock() { *until = Some(Instant::now() + Duration::from_millis(250)); }
                     result
                 }

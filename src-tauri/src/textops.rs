@@ -282,6 +282,11 @@ static SEND: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)[,.;:]?\s*\b(?:wyślij|wyślij to|wyślij wiadomość|enter|send it|send|press enter)[.,!?]*\s*$").expect("valid")
 });
 
+/// Whether the take ends with a send command ("wyślij", "send it").
+pub fn ends_with_send(text: &str) -> bool {
+    SEND.is_match(text)
+}
+
 /// Applies the spoken commands. Returns the text and whether the take ended
 /// with a send command.
 pub fn apply_commands(text: &str) -> (String, bool) {
