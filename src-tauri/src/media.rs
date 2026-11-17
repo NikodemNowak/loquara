@@ -613,11 +613,21 @@ struct Journal {
 mod journal {
     use super::*;
 
-    /// Per-user location: the runtime dir on Linux (`/tmp` is shared),
-    /// the per-user temp dir elsewhere.
-    fn path() -> PathBuf {
-        let runtime = if cfg!(target_os = "linux") { std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from) } else { None };
-        runtime.unwrap_or_else(std::env::temp_dir).join("loquara-media-ducking.json")
+    /// The app's own per-user data directory (the one Tauri uses), never a
+    /// shared temp directory another user could plant a file in. `None`
+    /// turns journaling off rather than falling back to `/tmp`.
+    fn path() -> Option<PathBuf> {
+        let var = |name: &str| std::env::var_os(name).filter(|value| !value.is_empty()).map(PathBuf::from);
+        let base = if cfg!(windows) {
+            var("APPDATA")
+        } else if cfg!(target_os = "macos") {
+            var("HOME").map(|home| home.join("Library/Application Support"))
+        } else {
+            var("XDG_DATA_HOME").or_else(|| var("HOME").map(|home| home.join(".local/share")))
+        }?;
+        let directory = base.join("io.loquara.desktop");
+        std::fs::create_dir_all(&directory).ok()?;
+        Some(directory.join("media-ducking.json"))
     }
 
     pub(super) fn save(groups: &[&[Target]]) {
@@ -633,15 +643,18 @@ mod journal {
             return;
         }
         let journal = Journal { pid: std::process::id(), entries };
-        if let Ok(text) = serde_json::to_string(&journal)
-            && let Err(error) = std::fs::write(path(), text)
+        if let Some(path) = path()
+            && let Ok(text) = serde_json::to_string(&journal)
+            && let Err(error) = std::fs::write(path, text)
         {
             eprintln!("Loquara media: cannot write ducking journal: {error}");
         }
     }
 
     pub(super) fn clear() {
-        let _ = std::fs::remove_file(path());
+        if let Some(path) = path() {
+            let _ = std::fs::remove_file(path);
+        }
     }
 
     pub(super) fn recover() {
@@ -650,11 +663,12 @@ mod journal {
         if let Some(_thread) = platform::init_thread() {
             platform::recover_muffle();
         }
-        let Ok(text) = std::fs::read_to_string(path()) else { return };
-        let Ok(journal) = serde_json::from_str::<Journal>(&text) else {
+        let Some(text) = path().and_then(|path| std::fs::read_to_string(path).ok()) else { return };
+        let Ok(mut journal) = serde_json::from_str::<Journal>(&text) else {
             clear();
             return;
         };
+        journal.entries = sanitize(journal.entries);
         // Written by this very process: a live worker owns it.
         if journal.pid == std::process::id() {
             return;
@@ -667,6 +681,24 @@ mod journal {
         }
         clear();
     }
+}
+
+/// A journal is read back after a crash, so treat it as untrusted: keep a
+/// bounded number of entries and only finite volumes, clamped to 0..=1.5
+/// (the PulseAudio mixer's own boost limit; other platforms stop at 1).
+fn sanitize(entries: Vec<JournalEntry>) -> Vec<JournalEntry> {
+    let volumes = |values: &[f32]| -> Option<Vec<f32>> {
+        (!values.is_empty() && values.len() <= 32 && values.iter().all(|value| value.is_finite()))
+            .then(|| values.iter().map(|value| value.clamp(0.0, 1.5)).collect())
+    };
+    entries
+        .into_iter()
+        .filter(|entry| !entry.key.is_empty() && entry.key.len() <= 512)
+        .filter_map(|entry| {
+            Some(JournalEntry { original: volumes(&entry.original)?, applied: volumes(&entry.applied)?, key: entry.key })
+        })
+        .take(64)
+        .collect()
 }
 
 /// Builds recovery targets: `applied` comes from the journal, so restore
@@ -684,6 +716,20 @@ pub(crate) fn recovered_target(entry: &JournalEntry) -> Target {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_tampered_journal_keeps_only_sane_volumes() {
+        let entry = |key: &str, original: Vec<f32>| JournalEntry { key: key.into(), original, applied: vec![0.2] };
+        let kept = sanitize(vec![
+            entry("spotify", vec![0.8, 7.0, -1.0]),
+            entry("nan", vec![f32::NAN]),
+            entry("", vec![0.5]),
+            entry("empty", vec![]),
+        ]);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].original, vec![0.8, 1.5, 0.0]);
+        assert_eq!(sanitize((0..100).map(|i| entry(&i.to_string(), vec![0.5])).collect()).len(), 64);
+    }
 
     #[test]
     fn mode_parsing_is_lenient() {

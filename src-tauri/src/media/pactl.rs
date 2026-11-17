@@ -90,7 +90,12 @@ pub(crate) fn to_normalized(raw: &[u32]) -> Vec<f32> {
 }
 
 pub(crate) fn to_raw(volume: &[f32]) -> Vec<u32> {
-    volume.iter().map(|value| (value.max(0.0) * VOLUME_NORM).round() as u32).collect()
+    // PulseAudio allows boosting a stream to 150% from its own mixer, so an
+    // original volume up to that is restored as it was; never beyond.
+    volume
+        .iter()
+        .map(|value| if value.is_finite() { (value.clamp(0.0, 1.5) * VOLUME_NORM).round() as u32 } else { 0 })
+        .collect()
 }
 
 /// Name of the null sink muffled streams are parked on.
