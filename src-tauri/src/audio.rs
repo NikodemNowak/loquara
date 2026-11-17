@@ -439,6 +439,30 @@ pub fn downsample_peaks(source: &[f32]) -> Vec<f32> {
         .collect()
 }
 
+/// What the take's envelope says about the microphone's input level.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum MicLevel {
+    /// The signal hit full scale often enough to distort words.
+    Clipping,
+    /// Nothing loud enough for speech reached the microphone.
+    Quiet,
+}
+
+/// Judges an envelope from `downsample_peaks`. A single full-scale click is
+/// forgiven; distortion across several moments of speech is not.
+pub fn assess_level(peaks: &[f32]) -> Option<MicLevel> {
+    if peaks.len() < 10 {
+        return None;
+    }
+    let clipped = peaks.iter().filter(|peak| **peak >= 0.985).count();
+    if clipped >= 3.max(peaks.len() / 50) {
+        return Some(MicLevel::Clipping);
+    }
+    let loudest = peaks.iter().copied().fold(0.0_f32, f32::max);
+    (loudest < 0.02).then_some(MicLevel::Quiet)
+}
+
 /// Maps one peak into `0.0..=1.0`, treating non-finite input as silence.
 fn sanitize_peak(peak: f32) -> f32 {
     if peak.is_finite() { peak.clamp(0.0, 1.0) } else { 0.0 }
@@ -1172,4 +1196,19 @@ mod tests {
     fn quantising_spans_the_full_byte_range() {
         assert_eq!(quantize_peaks(&[0.0, 0.5, 1.0, 1.4, -0.3]), vec![0, 128, 255, 255, 0]);
     }
+
+    #[test]
+    fn level_flags_distortion_and_silence_but_not_one_click() {
+        let speech: Vec<f32> = (0..200).map(|i| if i % 7 == 0 { 0.6 } else { 0.2 }).collect();
+        assert_eq!(assess_level(&speech), None);
+        let mut click = speech.clone();
+        click[50] = 1.0;
+        assert_eq!(assess_level(&click), None);
+        let mut loud = speech.clone();
+        for i in [10, 40, 80, 120, 160] { loud[i] = 1.0; }
+        assert_eq!(assess_level(&loud), Some(MicLevel::Clipping));
+        assert_eq!(assess_level(&vec![0.005; 200]), Some(MicLevel::Quiet));
+        assert_eq!(assess_level(&[0.0; 4]), None);
+    }
+
 }

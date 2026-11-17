@@ -252,6 +252,8 @@ export function RecorderOverlay({ adapter }: { adapter: AppAdapter }) {
       <button type="button" className="overlay-text-button" disabled={pending} title={state.error}
         aria-label={t("overlay.failed.retryAria")}
         onClick={() => void action(() => adapter.retryTranscription(state.recovery.recordingId))}>{t("overlay.failed.compact")}</button>
+      <button type="button" className="overlay-icon-button" disabled={pending} aria-label={t("overlay.failed.dismiss")}
+        title={t("overlay.failed.dismiss")} onClick={() => void action(() => adapter.cancelRecording())}><X size={14} /></button>
       <span className="overlay-sr-only" role="alert">{state.error}</span></div>;
     if (state.status === "idle" && notice) {
       if (notice.kind === "deliveryFailed") return <div className="overlay-main overlay-main--interactive" role="alert">
@@ -262,6 +264,20 @@ export function RecorderOverlay({ adapter }: { adapter: AppAdapter }) {
           <button className="overlay-icon-button" type="button" aria-label={t("overlay.dismiss")} title={t("overlay.dismiss")}
             onClick={() => void action(() => adapter.dismissOverlayNotice(notice.key, notice.generation))}><X size={14} /></button>
         </div></div>;
+      if (notice.kind === "startFailed") return <div className="overlay-main overlay-main--interactive" role="alert">
+        <div className="overlay-reading"><ErrorCircleRegular className="overlay-failure-icon" aria-hidden="true" />
+          <span className="overlay-label overlay-label--error" title={notice.detail ?? undefined}>{t("overlay.startFailed")}</span>
+          {notice.detail ? <span className="overlay-sr-only">{notice.detail}</span> : null}</div>
+        <div className="overlay-actions">
+          <button className="overlay-icon-button" type="button" aria-label={t("overlay.dismiss")} title={t("overlay.dismiss")}
+            onClick={() => void action(() => adapter.dismissOverlayNotice(notice.key, notice.generation))}><X size={14} /></button>
+        </div></div>;
+      if (notice.micLevel && (notice.kind === "pasteRequested" || notice.kind === "copied")) {
+        const detail = t(notice.micLevel === "clipping" ? "overlay.mic.clippingDetail" : "overlay.mic.quietDetail");
+        return <div className="overlay-main" role="status" aria-label={detail} title={detail}>
+          <Check size={16} className="overlay-success" />
+          <span className="overlay-label">{t(notice.micLevel === "clipping" ? "overlay.mic.clipping" : "overlay.mic.quiet")}</span></div>;
+      }
       const label = t(notice.kind === "copied" ? "overlay.copied" : notice.kind === "cancelled" ? "overlay.cancelled" : "overlay.ready");
       const detail = notice.kind === "pasteRequested" ? t("overlay.pasteRequestedDetail") : label;
       return <div className="overlay-main" role="status" aria-label={detail} title={detail}>

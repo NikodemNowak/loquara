@@ -232,6 +232,12 @@ pub trait WindowsApi {
     fn send_shift_insert(&mut self) -> Result<(), PlatformError> {
         self.send_ctrl_v()
     }
+    /// Process name of the app that will receive the text, for app profiles.
+    fn target_app(&mut self, _target: Option<WindowTarget>) -> Option<String> { None }
+    /// Presses Enter for a "wyślij" command or a profile, but only while the
+    /// window that got the text is still in front: `target` on Windows, the
+    /// app named `app` elsewhere. Returns `Ok(false)` when focus moved.
+    fn send_enter(&mut self, _target: Option<WindowTarget>, _app: Option<&str>) -> Result<bool, PlatformError> { Ok(false) }
     fn send_paste(&mut self, target: Option<WindowTarget>, mode: PasteMode) -> Result<(), PlatformError> {
         let _ = target;
         match mode {
@@ -618,17 +624,80 @@ pub fn replace_toggle_shortcut<R: Runtime>(
     manager
         .register(new.as_str())
         .map_err(|error| PlatformError::ShortcutRegistration(error.to_string()))?;
-    if let Err(error) = manager.unregister(old.as_str()) {
+    // The old combination may already be gone (a failed startup registration,
+    // or an earlier partial change); only one that is held needs releasing.
+    if manager.is_registered(old.as_str()) && let Err(error) = manager.unregister(old.as_str()) {
         let _ = manager.unregister(new.as_str());
         return Err(PlatformError::ShortcutRegistration(error.to_string()));
     }
     Ok(())
 }
 
+/// Where the main window was when it last closed, so reopening it from the
+/// tray puts it back rather than at the configured default. Held for the
+/// life of the process, which is as long as a hidden window used to keep it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct MainGeometry {
+    position: PhysicalPosition<i32>,
+    size: tauri::PhysicalSize<u32>,
+    maximized: bool,
+}
+
+static MAIN_GEOMETRY: std::sync::Mutex<Option<MainGeometry>> = std::sync::Mutex::new(None);
+
+/// Remembers the main window's place before it is destroyed.
+pub fn remember_main_geometry<R: Runtime>(window: &tauri::Window<R>) {
+    let maximized = window.is_maximized().unwrap_or(false);
+    let (Ok(position), Ok(size)) = (window.outer_position(), window.inner_size()) else { return };
+    // A minimised window reports a parking position far off screen.
+    if window.is_minimized().unwrap_or(false) {
+        return;
+    }
+    if let Ok(mut slot) = MAIN_GEOMETRY.lock() {
+        *slot = Some(MainGeometry { position, size, maximized });
+    }
+}
+
+/// The main window, built from its `tauri.conf.json` entry if it is not open.
+///
+/// Closing the main window destroys it instead of hiding it: a hidden
+/// webview keeps its whole renderer process (about 300 MB measured) for as
+/// long as the app sits in the tray. Everything the window shows is read
+/// back from the backend when the page mounts.
+fn main_window<R: Runtime>(app: &AppHandle<R>) -> Result<tauri::WebviewWindow<R>, PlatformError> {
+    if let Some(window) = app.get_webview_window("main") {
+        return Ok(window);
+    }
+    let config = app
+        .config()
+        .app
+        .windows
+        .iter()
+        .find(|window| window.label == "main")
+        .cloned()
+        .ok_or_else(|| PlatformError::Other("main window is not configured".into()))?;
+    let mut builder = tauri::WebviewWindowBuilder::from_config(app, &config)
+        .map_err(|error| PlatformError::Other(error.to_string()))?
+        .visible(false);
+    if let Some(icon) = app.default_window_icon() {
+        builder = builder
+            .icon(icon.clone())
+            .map_err(|error| PlatformError::Other(error.to_string()))?;
+    }
+    let window = builder.build().map_err(|error| PlatformError::Other(error.to_string()))?;
+    let remembered = MAIN_GEOMETRY.lock().ok().and_then(|slot| *slot);
+    if let Some(geometry) = remembered {
+        let _ = window.set_size(geometry.size);
+        let _ = window.set_position(geometry.position);
+        if geometry.maximized {
+            let _ = window.maximize();
+        }
+    }
+    Ok(window)
+}
+
 pub fn show_main<R: Runtime>(app: &AppHandle<R>) -> Result<(), PlatformError> {
-    let window = app
-        .get_webview_window("main")
-        .ok_or_else(|| PlatformError::Other("main window is missing".into()))?;
+    let window = main_window(app)?;
     // Showing the window is the part that must work; the rest is manners.
     // Windows refuses to hand focus to a process that is not the foreground
     // one, which is ordinary rather than exceptional — and chaining it made
@@ -1052,6 +1121,35 @@ pub fn detect_terminal_paste_type(hwnd: windows_sys::Win32::Foundation::HWND) ->
     TerminalPasteType::None
 }
 
+/// File name of the process that owns `hwnd` ("Code.exe").
+#[cfg(windows)]
+fn window_exe_name(hwnd: windows_sys::Win32::Foundation::HWND) -> Option<String> {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION};
+    use windows_sys::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
+    if hwnd.is_null() {
+        return None;
+    }
+    let mut pid = 0u32;
+    unsafe { GetWindowThreadProcessId(hwnd, &mut pid) };
+    if pid == 0 {
+        return None;
+    }
+    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if process.is_null() {
+        return None;
+    }
+    let mut buffer = [0u16; 1024];
+    let mut size = buffer.len() as u32;
+    let ok = unsafe { QueryFullProcessImageNameW(process, 0, buffer.as_mut_ptr(), &mut size) };
+    unsafe { CloseHandle(process) };
+    if ok == 0 || size == 0 {
+        return None;
+    }
+    let path = String::from_utf16_lossy(&buffer[..size as usize]);
+    path.rsplit('\\').next().map(str::to_owned)
+}
+
 #[cfg(all(unix, not(target_os = "macos")))]
 fn xdotool_key(chord: &str) -> Result<(), PlatformError> {
     let output = std::process::Command::new("xdotool")
@@ -1196,6 +1294,67 @@ fn key_input(key: u16, flags: u32) -> windows_sys::Win32::UI::Input::KeyboardAnd
 pub struct SystemWindows;
 
 impl WindowsApi for SystemWindows {
+    fn target_app(&mut self, target: Option<WindowTarget>) -> Option<String> {
+        #[cfg(windows)]
+        {
+            use windows_sys::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+            let hwnd = match target {
+                Some(target) if target.0 != 0 => target.0 as windows_sys::Win32::Foundation::HWND,
+                _ => unsafe { GetForegroundWindow() },
+            };
+            window_exe_name(hwnd)
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let _ = target;
+            // The overlay never takes focus, so the frontmost app is the target.
+            let output = std::process::Command::new("osascript")
+                .args(["-e", r#"tell application "System Events" to get name of first application process whose frontmost is true"#])
+                .output()
+                .ok()?;
+            let name = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+            (output.status.success() && !name.is_empty()).then_some(name)
+        }
+        #[cfg(all(unix, not(target_os = "macos")))]
+        {
+            let _ = target;
+            let output = std::process::Command::new("xdotool").args(["getactivewindow", "getwindowpid"]).output().ok()?;
+            let pid: u32 = String::from_utf8_lossy(&output.stdout).trim().parse().ok()?;
+            let name = std::fs::read_to_string(format!("/proc/{pid}/comm")).ok()?;
+            Some(name.trim().to_owned()).filter(|name| !name.is_empty())
+        }
+    }
+
+    fn send_enter(&mut self, target: Option<WindowTarget>, app: Option<&str>) -> Result<bool, PlatformError> {
+        #[cfg(windows)]
+        {
+            use windows_sys::Win32::UI::Input::KeyboardAndMouse::{KEYEVENTF_KEYUP, VK_RETURN};
+            use windows_sys::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+            let _ = app;
+            let Some(target) = target.filter(|target| target.0 != 0) else { return Ok(false) };
+            if unsafe { GetForegroundWindow() } as isize != target.0 {
+                return Ok(false);
+            }
+            send_inputs_with_hold(&[key_input(VK_RETURN, 0)], &[key_input(VK_RETURN, KEYEVENTF_KEYUP)]).map(|()| true)
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = target;
+            // Without a window id, the frontmost app must still be the one
+            // the text was pasted into.
+            let Some(expected) = app else { return Ok(false) };
+            if self.target_app(None).as_deref() != Some(expected) {
+                return Ok(false);
+            }
+            #[cfg(target_os = "macos")]
+            { macos_keystroke(r#"tell application "System Events" to key code 36"#).map(|()| true) }
+            #[cfg(all(unix, not(target_os = "macos")))]
+            { xdotool_key("Return").map(|()| true) }
+            #[cfg(not(any(target_os = "macos", all(unix, not(target_os = "macos")))))]
+            { Ok(false) }
+        }
+    }
+
     fn paste_keys_released(&mut self, shortcut: Option<&Shortcut>) -> Result<bool, PlatformError> {
         if !self.modifiers_released()? { return Ok(false); }
         match shortcut { Some(shortcut) => Ok(!shortcut.key_state()?.main_down), None => Ok(true) }

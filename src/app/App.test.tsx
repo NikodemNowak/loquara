@@ -69,9 +69,8 @@ describe("główna nawigacja", () => {
     expect(await screen.findByRole("heading", { name: "Ustawienia" })).toBeVisible();
     await user.click(screen.getByRole("button", { name: "Słownik" }));
     expect(await screen.findByRole("heading", { name: "Słownik" })).toBeVisible();
-    expect(await screen.findByRole("button", { name: "Dodaj zamianę" })).toBeVisible();
-    await user.click(screen.getByRole("button", { name: "Tryby" }));
-    expect(await screen.findByRole("heading", { name: "Tryby" })).toBeVisible();
+    expect(await screen.findByRole("button", { name: "Dodaj" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Tryby" })).toBeNull();
   });
 
   test("błąd dostarczenia zostaje widoczny przy zmianie strony i jest zamykany przez właściciela", async () => {
@@ -85,6 +84,32 @@ describe("główna nawigacja", () => {
     await user.click(within(alert).getByRole("button"));
     expect(dismissOverlayNotice).toHaveBeenCalledWith("notice-key", 7);
     await waitFor(() => expect(screen.queryByText("Schowek jest zajęty.")).not.toBeInTheDocument());
+  });
+
+  test("błąd wklejenia jest zlokalizowany i nie dubluje się w powiadomieniu", async () => {
+    let emitError!: (message: string) => void;
+    let emitState!: (value: AppSnapshot) => void;
+    const raw = "could not restore target focus: target unavailable; final text is in the clipboard";
+    renderApp(adapterStub({
+      onError: async (listener) => { emitError = listener; return () => undefined; },
+      onState: async (listener) => { emitState = listener; return () => undefined; },
+    }));
+    await screen.findByRole("button", { name: /Silnik: Parakeet/ });
+    // The paste error event lands just before the state that raises the banner.
+    await act(async () => emitError("Nie udało się wkleić — okno docelowe jest niedostępne. Tekst jest w schowku."));
+    await act(async () => emitState({ ...snapshot, overlayNotice: { key: "k", generation: 1, recordingId: "r", kind: "deliveryFailed", detail: raw } }));
+    const alerts = screen.getAllByRole("alert");
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0]).toHaveTextContent("Nie wklejono");
+    expect(alerts[0]).toHaveTextContent("okno docelowe jest niedostępne");
+    expect(within(alerts[0]).getByText(raw)).not.toBeVisible();
+    await act(async () => emitError("Nie udało się wkleić — okno docelowe jest niedostępne. Tekst jest w schowku."));
+    expect(screen.getAllByRole("alert")).toHaveLength(1);
+  });
+
+  test("problem przy starcie aplikacji (np. zajęty skrót) jest pokazany w głównym oknie", async () => {
+    renderApp(adapterStub({ getAppSnapshot: async () => ({ ...snapshot, startupWarning: "The shortcut Ctrl+Space could not be registered" }) }));
+    expect(await screen.findByText(/Problem przy uruchamianiu: The shortcut Ctrl\+Space could not be registered/)).toBeInTheDocument();
   });
 
   test("spóźnione zamknięcie powiadomienia nie nadpisuje nowego nagrania", async () => {

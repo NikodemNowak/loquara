@@ -1,20 +1,11 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
-  "build": {
-    "beforeBundleCommand": "node scripts/sign-macos-dylibs.mjs"
-  },
   "bundle": {
     "targets": ["app", "dmg"],
     "macOS": {
       "minimumSystemVersion": "11.0",
       "signingIdentity": "-",
-      "entitlements": "entitlements.plist",
-      "files": {
-        "Frameworks/libsherpa-onnx-c-api.dylib": "lib/libsherpa-onnx-c-api.dylib",
-        "Frameworks/libsherpa-onnx-cxx-api.dylib": "lib/libsherpa-onnx-cxx-api.dylib",
-        "Frameworks/libonnxruntime.1.17.1.dylib": "lib/libonnxruntime.1.17.1.dylib",
-        "Frameworks/libonnxruntime.dylib": "lib/libonnxruntime.dylib"
-      }
+      "entitlements": "entitlements.plist"
     }
   }
 }

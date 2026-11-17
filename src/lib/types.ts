@@ -23,30 +23,6 @@ export type DictationEvent =
 
 export type PasteMode = "auto" | "ctrl_v" | "ctrl_shift_v" | "shift_insert";
 
-/** Where the words come from: this machine, or a provider's API. */
-export type TranscriptionSource = "local" | "cloud";
-
-/** One provider the cloud engine can talk to. */
-export interface CloudProviderInfo {
-  key: string;
-  display: string;
-  defaultModel: string;
-  models: string[];
-  /** True for the provider whose address the user supplies themselves. */
-  custom: boolean;
-  /** The provider can transcribe while the user speaks. */
-  streaming: boolean;
-  /** The interface may offer to fetch the provider's model list. */
-  listsModels: boolean;
-}
-
-/** What a connection check found. */
-export interface CloudCheck {
-  /** Empty for silence, which is still a pass. */
-  text: string;
-  elapsedMs: number;
-}
-
 /** Legacy persisted preference. The UI always uses the fixed compact pill. */
 export type OverlaySize = "mini" | "large";
 
@@ -60,7 +36,6 @@ export interface AppSettings {
   retentionDays: 1 | 7 | 30 | null;
   launchOnLogin: boolean;
   startMinimized: boolean;
-  activeMode: string;
   showOverlay: boolean;
   overlaySize: OverlaySize;
   model: string;
@@ -70,14 +45,30 @@ export interface AppSettings {
   language: LanguageChoice;
   modelKeepAliveSecs: number;
   pasteMode: PasteMode;
-  transcriptionSource: TranscriptionSource;
-  cloudProvider: string;
-  /** Empty means the provider's own default model. */
-  cloudModel: string;
-  /** Empty means the provider's own address; only custom providers set it. */
-  cloudBaseUrl: string;
-  /** ISO-639-1 code; empty lets the model detect the language. */
-  cloudLanguage: string;
+  /** Background music/video while recording; calls are never touched. */
+  mediaDuringDictation: MediaDuringDictation;
+  /** How much hesitation ("yyy", "to to") is taken out of the text. */
+  fillerRemoval: FillerRemoval;
+  /** "nowa linia", "nowy akapit", "skasuj to", "wyślij" act instead of being typed. */
+  voiceCommands: boolean;
+  snippets: Snippet[];
+  appProfiles: AppProfile[];
+}
+
+export type MediaDuringDictation = "muffle" | "duck" | "pause" | "off";
+export type FillerRemoval = "off" | "light" | "strong";
+
+export interface Snippet {
+  trigger: string;
+  text: string;
+}
+
+export interface AppProfile {
+  /** Process name without ".exe", e.g. "slack", "code", "windowsterminal". */
+  app: string;
+  noTrailingPeriod: boolean;
+  lowercaseStart: boolean;
+  pressEnter: boolean;
 }
 
 export interface ModelStatus {
@@ -99,7 +90,7 @@ export interface ModelDescriptor {
   key: string;
   id: string;
   provider: string;
-  source: "local" | "cloud";
+  source: "local";
   revision: string;
   display: string;
   minVramGb: number;
@@ -121,11 +112,10 @@ export interface ModelSummary {
   key: string;
   display: string;
   provider: string;
-  /** Ready to run: the model files are here, or the cloud key is set. */
+  /** Ready to run: the model files are here. */
   installed: boolean;
   /** What fetching it will cost, so the size can be shown before asking. */
   totalBytes: number;
-  source: TranscriptionSource;
 }
 
 /** A model transfer in flight, owned by the backend so any screen can show it. */
@@ -140,7 +130,6 @@ export interface LiveTranscript {
   text: string;
   revision: number;
   status: "connecting" | "listening" | "draft" | "finalizing" | "fallback";
-  clipboardReady: boolean;
 }
 
 /** Only the current take may contribute a draft to a visible surface. */
@@ -150,21 +139,23 @@ export function matchingLiveTranscript(snapshot: AppSnapshot | undefined): LiveT
 }
 
 export function realtimeEngineKey(settings: AppSettings): string {
-  return settings.transcriptionSource === "cloud" ? `cloud:${settings.cloudProvider}` : `local:${settings.model}`;
+  return `local:${settings.model}`;
 }
 
 export function realtimeEnabled(settings: AppSettings, supported: boolean): boolean {
   if (!supported) return false;
-  return settings.realtimeByEngine?.[realtimeEngineKey(settings)] ?? (settings.transcriptionSource === "cloud" ? settings.streaming : settings.model === "parakeet");
+  return settings.realtimeByEngine?.[realtimeEngineKey(settings)] ?? settings.model === "parakeet";
 }
 
 export interface OverlayNotice {
   key: string;
   generation: number;
   recordingId: string;
-  kind: "pasteRequested" | "copied" | "cancelled" | "deliveryFailed";
+  kind: "pasteRequested" | "copied" | "cancelled" | "deliveryFailed" | "startFailed";
   expiresAt?: number | null;
   detail?: string | null;
+  /** A delivered take whose microphone input was distorted or near silent. */
+  micLevel?: "clipping" | "quiet" | null;
 }
 
 export interface AppSnapshot {
@@ -177,6 +168,8 @@ export interface AppSnapshot {
   modelLoading: boolean;
   recordingStartedAt?: number | null;
   liveTranscript?: LiveTranscript | null;
+  /** A setup step that failed without stopping the app, e.g. a taken shortcut. */
+  startupWarning?: string | null;
 }
 
 export interface SettingsUpdateResult {
@@ -231,19 +224,18 @@ export interface HistoryQuery {
 
 export interface VocabularyEntry {
   id: number;
+  term: string;
+  /** Other spellings the engine produced for this term. */
+  aliases: string[];
+}
+
+/** A word from history that sounds like a term but was left uncorrected. */
+export interface VocabularySuggestion {
+  termId: number;
+  term: string;
   heard: string;
-  replacement: string;
+  count: number;
+  example: string;
 }
-
-export interface Mode {
-  id: string;
-  name: string;
-  description: string;
-  prompt: string;
-  enabled: boolean;
-  isDefault: boolean;
-  createdAt: number;
-}
-
 
 export type LanguageChoice = "system" | "pl" | "en";

@@ -100,16 +100,6 @@ pub fn transition(state: DictationState, event: DictationEvent) -> DictationStat
         (DictationState::Cancelling { .. }, DictationEvent::CancelRequest) => DictationState::Idle,
         (DictationState::Cancelling { .. }, DictationEvent::Cancel) => DictationState::Idle,
         (
-            DictationState::Cancelling {
-                recording_id,
-                audio_path,
-            },
-            DictationEvent::Stop,
-        ) => DictationState::Processing {
-            recording_id,
-            audio_path,
-        },
-        (
             DictationState::Processing {
                 recording_id,
                 audio_path,
@@ -293,7 +283,7 @@ mod tests {
     }
 
     #[test]
-    fn cancelling_can_confirm_to_idle_or_finalize_to_processing() {
+    fn cancelling_confirms_to_idle_and_ignores_stop_because_capture_already_ended() {
         let recovery = recording();
         let cancelling_state = DictationState::Cancelling {
             recording_id: recovery.recording_id.clone(),
@@ -304,13 +294,7 @@ mod tests {
             transition(cancelling_state.clone(), DictationEvent::Cancel),
             DictationState::Idle
         );
-        assert_eq!(
-            transition(cancelling_state, DictationEvent::Stop),
-            DictationState::Processing {
-                recording_id: recovery.recording_id,
-                audio_path: recovery.audio_path,
-            }
-        );
+        assert_eq!(transition(cancelling_state.clone(), DictationEvent::Stop), cancelling_state);
     }
 
     #[test]

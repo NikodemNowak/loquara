@@ -8,10 +8,10 @@ import { Waveform } from "../../components/Waveform";
 import { Select } from "../../components/Select";
 import type { AppAdapter } from "../../lib/tauri";
 import type { Recording, RecordingStatus } from "../../lib/types";
-import type { ToastKind } from "../../components/Toast";
+import { ErrorNote, type ToastKind } from "../../components/Toast";
 import { useAsyncAction } from "../../lib/useAsyncAction";
 import { dateLocale, useI18n } from "../../lib/i18n";
-import { normalizeError } from "../../lib/errors";
+import { errorDetail, normalizeError } from "../../lib/errors";
 
 const formatDuration = (ms: number) =>
   `${String(Math.floor(ms / 60_000)).padStart(2, "0")}:${String(Math.floor(ms / 1000) % 60).padStart(2, "0")}`;
@@ -38,6 +38,7 @@ export function HistoryPage({
     return initial?.text ?? "";
   });
   const [pendingClear, setPendingClear] = useState(false);
+  const [pendingDelete, setPendingDelete] = useState<string>();
   const [inspectorReady, setInspectorReady] = useState(false);
   const selectedRowRef = useRef<HTMLButtonElement>(null);
   const { busy, pendingKey, run } = useAsyncAction(onToast);
@@ -55,6 +56,7 @@ export function HistoryPage({
     item.status === "completed" && !item.text?.trim();
   const awaitsTranscript = (item: Recording) =>
     item.status === "failed" || item.status === "cancelled" || missingTranscript(item);
+  const inProgress = (item: Recording) => item.status === "recording" || item.status === "processing";
   const rowLabel = (item: Recording) =>
     item.text?.trim()
       ? item.text
@@ -211,7 +213,7 @@ export function HistoryPage({
               <p className="inspector-facts"><span>{labels[selected.status]}</span></p>
             )}
 
-            {selected.error && <p className="error-note">{normalizeError(selected.error)}</p>}
+            {selected.error && <ErrorNote message={normalizeError(selected.error)} detail={errorDetail(selected.error)} />}
 
             {selected.audioPath && inspectorReady && (
               <AudioPlayer
@@ -254,17 +256,21 @@ export function HistoryPage({
                   {t("history.action.copyPath")}
                 </button>
               )}
-              {awaitsTranscript(selected) && (
-                selected.audioPath
-                  ? <button className="text-button" disabled={busy} onClick={() => void action("retry", () => adapter.retryTranscription(selected.id))}>
-                      <RotateCcw size={14} />{pendingKey === "retry" ? t("history.action.retrying") : t("common.retry")}
-                    </button>
-                  : <span className="retry-unavailable">{t("history.action.retryUnavailable")}</span>
+              {selected.audioPath && !inProgress(selected) && (
+                <button className="text-button" disabled={busy} onClick={() => void action("retry", () => adapter.retryTranscription(selected.id))}>
+                  <RotateCcw size={14} />
+                  {pendingKey === "retry"
+                    ? t("history.action.retrying")
+                    : awaitsTranscript(selected) ? t("common.retry") : t("history.action.reprocess")}
+                </button>
+              )}
+              {!selected.audioPath && awaitsTranscript(selected) && (
+                <span className="retry-unavailable">{t("history.action.retryUnavailable")}</span>
               )}
               <button
                 className="danger-button"
-                disabled={["recording", "processing"].includes(selected.status) || busy}
-                onClick={() => void action("delete", () => adapter.deleteHistory(selected.id))}
+                disabled={inProgress(selected) || busy}
+                onClick={() => setPendingDelete(selected.id)}
               >
                 <Trash2 size={15} />{pendingKey === "delete" ? t("common.deleting") : t("history.action.delete")}
               </button>
@@ -273,6 +279,21 @@ export function HistoryPage({
         </aside>
       </div>
 
+      <ConfirmDialog
+        open={pendingDelete !== undefined}
+        title={t("history.action.deleteConfirm")}
+        message={t("history.action.deleteMessage")}
+        confirmLabel={t("history.action.delete")}
+        cancelLabel={t("common.cancel")}
+        danger
+        busy={pendingKey === "delete"}
+        onCancel={() => setPendingDelete(undefined)}
+        onConfirm={() => {
+          const id = pendingDelete;
+          setPendingDelete(undefined);
+          if (id) void action("delete", () => adapter.deleteHistory(id));
+        }}
+      />
       <ConfirmDialog
         open={pendingClear}
         title={t("history.action.clearFailedConfirm")}

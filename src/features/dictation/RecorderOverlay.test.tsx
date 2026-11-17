@@ -102,6 +102,25 @@ describe("fixed compact pill", () => {
     fireEvent.click(retry);
     expect(retryTranscription).toHaveBeenCalledWith("take");
   });
+  test("failure can be dismissed back to idle without retrying", async () => {
+    const view = overlay({ status: "failed", recovery: take, error: "Full failure details" });
+    const cancelRecording = vi.fn(async () => snapshotFor({ status: "idle" }));
+    const retryTranscription = vi.fn();
+    Object.assign(view.adapter, { cancelRecording, retryTranscription });
+    fireEvent.click(await screen.findByRole("button", { name: t("overlay.failed.dismiss") }));
+    expect(cancelRecording).toHaveBeenCalledTimes(1);
+    expect(retryTranscription).not.toHaveBeenCalled();
+  });
+  test("a start that failed from the keyboard says why and can be dismissed", async () => {
+    const current = snapshotFor({ status: "idle" });
+    current.overlayNotice = { key: "start", generation: 3, recordingId: "", kind: "startFailed", detail: "No microphone found" };
+    const dismissOverlayNotice = vi.fn(async () => snapshotFor({ status: "idle" }));
+    renderWithI18n(<RecorderOverlay adapter={adapterStub({ getAppSnapshot: async () => current, dismissOverlayNotice })} />);
+    expect(await screen.findByText(t("overlay.startFailed"))).toHaveAttribute("title", "No microphone found");
+    expect(screen.getByRole("alert")).toHaveTextContent("No microphone found");
+    fireEvent.click(screen.getByRole("button", { name: t("overlay.dismiss") }));
+    expect(dismissOverlayNotice).toHaveBeenCalledWith("start", 3);
+  });
   test("draft clipboard error preserves meter and transport", async () => {
     const view = overlay({ status: "recording", ...take });
     await screen.findByLabelText(t("overlay.micLevel"));
@@ -137,6 +156,13 @@ describe("fixed compact pill", () => {
     expect(openOverlayDetails).toHaveBeenCalledWith("failure", 7);
     fireEvent.click(screen.getByRole("button", { name: t("overlay.dismiss") }));
     expect(dismissOverlayNotice).toHaveBeenCalledWith("failure", 7);
+  });
+  test("a delivered take with a clipping microphone says so", async () => {
+    const current = snapshotFor({ status: "idle" });
+    current.overlayNotice = { key: "loud", generation: 1, recordingId: "take", kind: "pasteRequested", micLevel: "clipping" };
+    renderWithI18n(<RecorderOverlay adapter={adapterStub({ getAppSnapshot: async () => current })} />);
+    expect(await screen.findByText(t("overlay.mic.clipping"))).toBeVisible();
+    expect(screen.getByRole("status")).toHaveAttribute("aria-label", t("overlay.mic.clippingDetail"));
   });
   test("legacy context menu cannot change geometry", async () => {
     overlay({ status: "recording", ...take }, "large");

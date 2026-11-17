@@ -1,6 +1,6 @@
 [package]
 name = "loquara"
-version = "0.10.0"
+version = "0.11.0"
 description = "Lokalna aplikacja do dyktowania"
 edition = "2024"
 rust-version = "1.95"
@@ -13,34 +13,35 @@ crate-type = ["lib", "cdylib", "staticlib"]
 [dependencies]
 arboard = "3"
 cpal = "=0.18.2"
-futures-util = "0.3"
 hound = "3.5"
 regex = "1.11"
 rubato = "0.16"
+# Local speech engine: Parakeet TDT through ONNX Runtime, linked statically
+# from the `ort` prebuilt binaries on every platform. Exact versions, because
+# `ort` is still a release candidate whose API changes between candidates.
+parakeet-rs = { version = "=0.4.4", default-features = false, features = ["cpu", "ort-defaults", "api-28"] }
+ort = { version = "=2.0.0-rc.15", default-features = false }
+ort-sys = { version = "=2.0.0-rc.15", default-features = false }
 rusqlite = { version = "0.37", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "=0.10.9"
 tauri = { version = "2.11.5", features = ["tray-icon", "protocol-asset", "macos-private-api"] }
 tauri-plugin-autostart = "2"
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-single-instance = "2"
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "sync", "time"] }
-tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "handshake", "rustls-tls-webpki-roots"] }
 ureq = { version = "2", features = ["tls"] }
 
 [target.'cfg(windows)'.dependencies]
-# DirectML lets any DirectX 12 card run the model, but it has to be compiled
-# into sherpa-onnx, which is why Windows builds the engine from source.
-sherpa-rs = { version = "0.6", default-features = false, features = ["directml"] }
-windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Media_Audio", "Win32_System_Com"] }
+windows = { version = "0.62.2", features = ["Media_Control", "Win32_Foundation", "Win32_Media_Audio", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Variant"] }
 windows-core = "0.62.2"
 windows-sys = { version = "0.60", features = [
     "Win32_Foundation",
     "Win32_Globalization",
     "Win32_Graphics_Gdi",
     "Win32_Media_Audio",
-    "Win32_Security_Cryptography",
     "Win32_System_DataExchange",
     "Win32_System_Memory",
     "Win32_System_Ole",
@@ -51,22 +52,18 @@ windows-sys = { version = "0.60", features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 
-# macOS and Linux use the publisher's prebuilt CPU engine. Downloading it is
-# both faster than compiling ONNX Runtime and the only configuration the
-# universal macOS archive offers.
-[target.'cfg(not(windows))'.dependencies]
-sherpa-rs = { version = "0.6", default-features = false, features = ["download-binaries"] }
+# Core Audio process taps for muffling background media. The same crates
+# (and versions) cpal already uses for its loopback support.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-core-audio = { version = "0.3", default-features = false, features = ["std", "AudioHardware", "objc2", "objc2-foundation", "objc2-core-audio-types"] }
+objc2-core-audio-types = { version = "0.3", default-features = false, features = ["std", "CoreAudioBaseTypes"] }
+objc2-core-foundation = { version = "0.3.1", default-features = false, features = ["std", "CFArray", "CFDictionary", "CFString"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSString", "NSUUID", "NSValue"] }
 
 [dev-dependencies]
 tempfile = "3"
-tokio = { version = "1", features = ["macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
 
 [build-dependencies]
 tauri-build = "2.6.3"
-
-# Patch only the upstream diagnostics script. Windows 11 24H2 and Windows
-# Server 2025 no longer ship wmic, and sherpa-onnx's show-info.cmake treats
-# the resulting empty output as a fatal error even though it is only printing
-# the OS name. The rest of the crate is byte-for-byte the published 0.6.8.
-[patch.crates-io]
-sherpa-rs-sys = { path = "vendor/sherpa-rs-sys" }

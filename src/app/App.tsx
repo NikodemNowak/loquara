@@ -1,29 +1,27 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
-import { Minus, Settings, WindowMaximize, X, ArrowRight } from "../components/Icons";
+import { Minus, Settings, WindowMaximize, X } from "../components/Icons";
 import { Logo } from "../components/Logo";
 import { StartupScreen } from "../components/StartupScreen";
-import { ToastRegion, type ToastKind, type ToastMessage } from "../components/Toast";
+import { NoticeDetails, NoticeIcon, ToastRegion, type ToastKind, type ToastMessage } from "../components/Toast";
 import { DictatePage } from "../features/dictate/DictatePage";
 import { HistoryPage } from "../features/history/HistoryPage";
 import { SettingsPage } from "../features/settings/SettingsPage";
-import { ModesPage } from "../features/modes/ModesPage";
 import { VocabularyPage } from "../features/vocabulary/VocabularyPage";
 import { getAdapter, type AppAdapter } from "../lib/tauri";
 import { useI18n, type TranslationKey } from "../lib/i18n";
 import { useAppModel } from "./useAppModel";
-import { normalizeError } from "../lib/errors";
+import { errorDetail, normalizeError } from "../lib/errors";
 
-type PageId = "dictate" | "history" | "modes" | "vocabulary" | "settings";
+type PageId = "dictate" | "history" | "vocabulary" | "settings";
 
-const navigation = ["dictate", "history", "modes", "vocabulary", "settings"] as const;
+const navigation = ["dictate", "history", "vocabulary", "settings"] as const;
 
 const navLabels: Record<PageId, TranslationKey> = {
   dictate: "nav.dictate",
   history: "nav.history",
   vocabulary: "vocab.title",
-  modes: "modes.title",
   settings: "nav.settings",
 };
 
@@ -41,20 +39,16 @@ export function App({ adapter: adapterProp }: { adapter?: AppAdapter }) {
     setPage("history");
   }, []);
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
-  const toast = useCallback((text: string, kind: ToastKind = "error") => {
+  // The delivery banner already explains a failed paste; a toast saying the
+  // same thing again is noise. Keyed by the localized text both surfaces show.
+  const bannerText = useRef<string | null>(null);
+  const toast = useCallback((text: string, kind: ToastKind = "error", detail?: string) => {
+    if (kind === "error" && text === bannerText.current) return;
     const id = Date.now() + Math.random();
-    setToasts((items) => [...items, { id, text, kind }].slice(-3));
-    window.setTimeout(() => setToasts((items) => items.filter((item) => item.id !== id)), 5000);
+    setToasts((items) => [...items.filter((item) => item.text !== text), { id, text, kind, detail }].slice(-3));
   }, []);
+  const dismissToast = useCallback((id: number) => setToasts((items) => items.filter((item) => item.id !== id)), []);
   const { snapshot, setSnapshot, history, refreshHistory, loading } = useAppModel(adapter, toast);
-  const [activeModeName, setActiveModeName] = useState("");
-  useEffect(() => {
-    let active = true;
-    void adapter.listModes().then((items) => {
-      if (active) setActiveModeName(items.find((item) => item.id === snapshot.settings.activeMode)?.name ?? "");
-    }).catch(() => { if (active) setActiveModeName(""); });
-    return () => { active = false; };
-  }, [adapter, page, snapshot.settings.activeMode]);
   // Name, maker and readiness all ride on the snapshot, which is broadcast on
   // every state change. Asking for them separately meant a query that missed
   // once — before the window was ready — left the panel insisting there was
@@ -110,9 +104,7 @@ export function App({ adapter: adapterProp }: { adapter?: AppAdapter }) {
           ? { state: "checking", label: "engine.checking" }
           : installed === "ready"
             ? { state: "ready", label: "engine.ready" }
-            : model?.source === "cloud"
-              ? { state: "missing", label: "engine.noKey" }
-              : { state: "missing", label: "engine.missing" };
+            : { state: "missing", label: "engine.missing" };
   useEffect(() => {
     if (isTauriWindow()) void getCurrentWindow().setTheme("dark");
   }, []);
@@ -131,13 +123,19 @@ export function App({ adapter: adapterProp }: { adapter?: AppAdapter }) {
   }, []);
 
   const deliveryNotice = snapshot.overlayNotice?.kind === "deliveryFailed" ? snapshot.overlayNotice : null;
+  const deliveryMessage = deliveryNotice?.detail ? normalizeError(deliveryNotice.detail) : null;
+  const deliveryDetail = deliveryNotice?.detail ? errorDetail(deliveryNotice.detail) : undefined;
+  bannerText.current = deliveryMessage;
+  useEffect(() => {
+    // The paste error event can land just before the state that raises the
+    // banner, so drop a toast that turns out to repeat it.
+    if (deliveryMessage) setToasts((items) => items.filter((item) => item.text !== deliveryMessage));
+  }, [deliveryMessage]);
   let content;
   if (page === "dictate") {
-    content = <DictatePage adapter={adapter} snapshot={snapshot} recordings={history} modelReady={installed === "ready"} onSnapshot={setSnapshot} onHistory={openHistory} onSettings={() => setPage("settings")} onToast={toast} />;
+    content = <DictatePage adapter={adapter} snapshot={snapshot} recordings={history} modelReady={installed === "ready"} onSnapshot={setSnapshot} onHistory={openHistory} onToast={toast} />;
   } else if (page === "history") {
     content = <HistoryPage adapter={adapter} recordings={history} initialSelectedId={historySelectedId} onRefresh={refreshHistory} onToast={toast} />;
-  } else if (page === "modes") {
-    content = <ModesPage adapter={adapter} settings={snapshot.settings} onSettingsChange={(settings) => setSnapshot((current) => ({ ...current, settings }))} onToast={toast} />;
   } else if (page === "vocabulary") {
     content = <VocabularyPage adapter={adapter} onToast={toast} />;
   } else {
@@ -179,12 +177,16 @@ export function App({ adapter: adapterProp }: { adapter?: AppAdapter }) {
           </nav>
         <div className="app-content">
           {deliveryNotice && <div className="delivery-notice" role="alert">
-            <div><strong>{t("overlay.deliveryFailed")}</strong>{deliveryNotice.detail && <p>{deliveryNotice.detail}</p>}</div>
-            <button className="icon-button" aria-label={t("overlay.dismiss")} title={t("overlay.dismiss")} onClick={() => {
+            <NoticeIcon kind="error" />
+            <div className="delivery-notice__body">
+              <p className="delivery-notice__text"><strong>{t("overlay.deliveryFailed")}</strong>{deliveryMessage && <span>{deliveryMessage}</span>}</p>
+              <NoticeDetails detail={deliveryDetail} />
+            </div>
+            <button className="icon-button notice-dismiss" aria-label={t("overlay.dismiss")} title={t("overlay.dismiss")} onClick={() => {
               void adapter.dismissOverlayNotice(deliveryNotice.key, deliveryNotice.generation).then((next) => setSnapshot((current) =>
                 current.overlayNotice?.key === deliveryNotice.key && current.overlayNotice.generation === deliveryNotice.generation ? next : current,
-              )).catch((error) => toast(normalizeError(error), "error"));
-            }}><X size={16} /></button>
+              )).catch((error) => toast(normalizeError(error), "error", errorDetail(error)));
+            }}><X size={14} /></button>
           </div>}
           <div className="app-scroll">{content}</div>
         </div>
@@ -201,13 +203,10 @@ export function App({ adapter: adapterProp }: { adapter?: AppAdapter }) {
                 {engine.state === "downloading" ? t("engine.downloading", { percent: transferPercent }) : t(engine.label)}
               </span>}
           </button>
-          <button className="mode-shortcut" onClick={() => setPage("modes")} aria-label={t("modes.change")}>
-            {activeModeName ? t("dictate.modeLabel", { mode: activeModeName }) : t("modes.title")}<ArrowRight size={13} />
-          </button>
         </footer>
       </div>
       </StartupScreen>
-      <ToastRegion items={toasts} onDismiss={(id) => setToasts((items) => items.filter((item) => item.id !== id))} />
+      <ToastRegion items={toasts} onDismiss={dismissToast} />
     </main>
   );
 }

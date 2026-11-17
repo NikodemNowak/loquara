@@ -1,11 +1,13 @@
 use crate::audio::part_path_for;
+use crate::vocabulary::Vocabulary;
 use regex::Regex;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use thiserror::Error;
 
 pub const INTERRUPTED_ERROR: &str = "Previous dictation was interrupted before completion.";
@@ -91,20 +93,17 @@ pub struct HistoryQuery {
 #[serde(rename_all = "camelCase")]
 pub struct VocabularyEntry {
     pub id: i64,
-    pub heard: String,
-    pub replacement: String,
+    /// The spelling the user wants: "Claude Code", "try again".
+    pub term: String,
+    /// Exact renderings the recogniser produces for it ("parakit").
+    #[serde(default)]
+    pub aliases: Vec<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Mode {
-    pub id: String,
-    pub name: String,
-    pub description: String,
-    pub prompt: String,
-    pub enabled: bool,
-    pub is_default: bool,
-    pub created_at: i64,
+impl VocabularyEntry {
+    pub fn matcher(entries: &[Self]) -> Vocabulary {
+        Vocabulary::new(entries.iter().map(|entry| (entry.term.as_str(), entry.aliases.as_slice())))
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -117,11 +116,15 @@ pub enum Retention {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub struct CleanupReport {
     pub deleted_audio: usize,
+    /// Expired files that could not be deleted this pass; their rows keep the path.
+    pub skipped_audio: usize,
 }
 
 pub struct Storage {
     connection: Mutex<Connection>,
     recordings_dir: PathBuf,
+    /// The user's everyday words and how many transcripts they came from.
+    everyday: Mutex<Option<(i64, Arc<HashSet<String>>)>>,
 }
 
 struct RetentionReservation {
@@ -151,6 +154,7 @@ impl Storage {
         let storage = Self {
             connection: Mutex::new(connection),
             recordings_dir,
+            everyday: Mutex::new(None),
         };
         storage.migrate()?;
         storage.reconcile_interrupted()?;
@@ -190,42 +194,13 @@ impl Storage {
              CREATE INDEX IF NOT EXISTS history_status ON history(status);
              CREATE TABLE IF NOT EXISTS vocabulary (
                id INTEGER PRIMARY KEY AUTOINCREMENT,
-               heard TEXT NOT NULL COLLATE NOCASE UNIQUE,
-               replacement TEXT NOT NULL
-             );
-             CREATE TABLE IF NOT EXISTS modes (
-               id TEXT PRIMARY KEY,
-               config_json TEXT NOT NULL
+               term TEXT NOT NULL COLLATE NOCASE UNIQUE,
+               aliases_json TEXT NOT NULL DEFAULT '[]'
              );",
         )?;
         let version: i64 =
             self.connection()?
                 .query_row("SELECT version FROM schema_version", [], |row| row.get(0))?;
-        if version < 2 {
-            let columns: Vec<String> = self
-                .connection()?
-                .prepare("PRAGMA table_info(modes)")?
-                .query_map([], |row| row.get::<_, String>(1))?
-                .collect::<Result<_, _>>()?;
-            let mut migrations = String::new();
-            for (column, definition) in [
-                ("name", "TEXT NOT NULL DEFAULT ''"),
-                ("description", "TEXT NOT NULL DEFAULT ''"),
-                ("prompt", "TEXT NOT NULL DEFAULT ''"),
-                ("enabled", "INTEGER NOT NULL DEFAULT 1"),
-                ("is_default", "INTEGER NOT NULL DEFAULT 0"),
-                ("created_at", "INTEGER NOT NULL DEFAULT 0"),
-            ] {
-                if !columns.iter().any(|existing| existing == column) {
-                    migrations.push_str(&format!(
-                        "ALTER TABLE modes ADD COLUMN {column} {definition};"
-                    ));
-                }
-            }
-            if !migrations.is_empty() {
-                self.connection()?.execute_batch(&migrations)?;
-            }
-        }
         if version < 3 {
             // Recordings captured before this column existed keep a NULL
             // envelope; the interface renders those rows without a waveform
@@ -240,15 +215,63 @@ impl Storage {
                     .execute_batch("ALTER TABLE history ADD COLUMN peaks BLOB;")?;
             }
         }
-        self.connection()?.execute_batch(
-            "INSERT OR IGNORE INTO modes
-               (id,config_json,name,description,prompt,enabled,is_default,created_at)
-             VALUES
-               ('clean','{}','Clean','Light text normalization','',1,1,0),
-               ('message','{}','Message','Natural message style','',1,0,1),
-               ('code','{}','Code','Dictating technical terms','',1,0,2);
-             UPDATE schema_version SET version = 3 WHERE version < 3;",
-        )?;
+        if version < 4 {
+            self.migrate_vocabulary_to_terms()?;
+        }
+        // Cloud engines are gone; the API keys they stored are not kept
+        // around. Idempotent, so it needs no version of its own.
+        self.connection()?
+            .execute("DELETE FROM settings WHERE key='cloud_keys'", [])?;
+        Ok(())
+    }
+
+    /// Version 4: modes are gone, and a vocabulary entry is a term with
+    /// aliases. Every old `heard -> replacement` pair keeps working as an
+    /// alias of its replacement; pairs sharing a replacement become one term.
+    fn migrate_vocabulary_to_terms(&self) -> Result<(), StorageError> {
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction()?;
+        let columns: Vec<String> = transaction
+            .prepare("PRAGMA table_info(vocabulary)")?
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<Result<_, _>>()?;
+        if columns.iter().any(|column| column == "heard") {
+            let pairs: Vec<(String, String)> = transaction
+                .prepare("SELECT heard,replacement FROM vocabulary ORDER BY id")?
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<Result<_, _>>()?;
+            let mut terms: Vec<(String, Vec<String>)> = Vec::new();
+            for (heard, replacement) in pairs {
+                let (heard, replacement) = (heard.trim().to_owned(), replacement.trim().to_owned());
+                if replacement.is_empty() {
+                    continue;
+                }
+                let index = match terms.iter().position(|(term, _)| term.to_lowercase() == replacement.to_lowercase()) {
+                    Some(index) => index,
+                    None => {
+                        terms.push((replacement.clone(), Vec::new()));
+                        terms.len() - 1
+                    }
+                };
+                merge_aliases(&mut terms[index].1, &replacement, [heard]);
+            }
+            transaction.execute_batch(
+                "DROP TABLE vocabulary;
+                 CREATE TABLE vocabulary (
+                   id INTEGER PRIMARY KEY AUTOINCREMENT,
+                   term TEXT NOT NULL COLLATE NOCASE UNIQUE,
+                   aliases_json TEXT NOT NULL DEFAULT '[]'
+                 );",
+            )?;
+            for (term, aliases) in terms {
+                transaction.execute(
+                    "INSERT INTO vocabulary(term,aliases_json) VALUES (?1,?2)",
+                    params![term, serde_json::to_string(&aliases)?],
+                )?;
+            }
+        }
+        transaction.execute_batch("DROP TABLE IF EXISTS modes; UPDATE schema_version SET version = 4;")?;
+        transaction.commit()?;
         Ok(())
     }
 
@@ -429,36 +452,32 @@ impl Storage {
             .collect()
     }
 
-    pub fn add_vocabulary(
-        &self,
-        heard: &str,
-        replacement: &str,
-    ) -> Result<VocabularyEntry, StorageError> {
-        let connection = self.connection()?;
-        connection.execute(
-            "INSERT INTO vocabulary(heard,replacement) VALUES (?1,?2)",
-            params![heard.trim(), replacement.trim()],
-        )?;
-        Ok(VocabularyEntry {
-            id: connection.last_insert_rowid(),
-            heard: heard.trim().to_owned(),
-            replacement: replacement.trim().to_owned(),
-        })
+    /// Adds a term, or merges the aliases into the term already saved under
+    /// the same spelling (case-insensitively), and returns the saved entry.
+    pub fn add_vocabulary(&self, term: &str, aliases: &[String]) -> Result<VocabularyEntry, StorageError> {
+        let term = term.trim();
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction()?;
+        let existing = transaction
+            .query_row("SELECT id,term,aliases_json FROM vocabulary WHERE term=?1", [term], vocabulary_from_row)
+            .optional()?;
+        let mut entry = existing.unwrap_or(VocabularyEntry { id: 0, term: term.to_owned(), aliases: Vec::new() });
+        merge_aliases(&mut entry.aliases, &entry.term, aliases.iter().cloned());
+        let aliases_json = serde_json::to_string(&entry.aliases)?;
+        if entry.id == 0 {
+            transaction.execute("INSERT INTO vocabulary(term,aliases_json) VALUES (?1,?2)", params![entry.term, aliases_json])?;
+            entry.id = transaction.last_insert_rowid();
+        } else {
+            transaction.execute("UPDATE vocabulary SET aliases_json=?2 WHERE id=?1", params![entry.id, aliases_json])?;
+        }
+        transaction.commit()?;
+        Ok(entry)
     }
 
     pub fn list_vocabulary(&self) -> Result<Vec<VocabularyEntry>, StorageError> {
         let connection = self.connection()?;
-        let mut statement =
-            connection.prepare("SELECT id,heard,replacement FROM vocabulary ORDER BY id")?;
-        Ok(statement
-            .query_map([], |row| {
-                Ok(VocabularyEntry {
-                    id: row.get(0)?,
-                    heard: row.get(1)?,
-                    replacement: row.get(2)?,
-                })
-            })?
-            .collect::<Result<Vec<_>, _>>()?)
+        let mut statement = connection.prepare("SELECT id,term,aliases_json FROM vocabulary ORDER BY id")?;
+        Ok(statement.query_map([], vocabulary_from_row)?.collect::<Result<Vec<_>, _>>()?)
     }
 
     pub fn delete_vocabulary(&self, id: i64) -> Result<bool, StorageError> {
@@ -468,65 +487,37 @@ impl Storage {
             > 0)
     }
 
-    pub fn list_modes(&self) -> Result<Vec<Mode>, StorageError> {
+    /// The newest completed transcripts, for learning how the user speaks.
+    pub fn recent_transcripts(&self, limit: usize) -> Result<Vec<String>, StorageError> {
         let connection = self.connection()?;
         let mut statement = connection.prepare(
-            "SELECT id,name,description,prompt,enabled,is_default,created_at
-             FROM modes ORDER BY created_at,id",
+            "SELECT text FROM history WHERE status='completed' AND text IS NOT NULL
+             ORDER BY created_at DESC LIMIT ?1",
         )?;
-        Ok(statement
-            .query_map([], mode_from_row)?
-            .collect::<Result<Vec<_>, _>>()?)
+        Ok(statement.query_map([limit as i64], |row| row.get(0))?.collect::<Result<Vec<_>, _>>()?)
     }
 
-    pub fn get_mode(&self, id: &str) -> Result<Option<Mode>, StorageError> {
-        self.connection()?
-            .query_row(
-                "SELECT id,name,description,prompt,enabled,is_default,created_at
-                 FROM modes WHERE id=?1",
-                [id],
-                mode_from_row,
-            )
-            .optional()
-            .map_err(StorageError::from)
-    }
-
-    pub fn upsert_mode(&self, mode: &Mode) -> Result<(), StorageError> {
-        let mut connection = self.connection()?;
-        let transaction = connection.transaction()?;
-        if mode.is_default {
-            transaction.execute("UPDATE modes SET is_default=0", [])?;
+    /// Words the user says in several transcripts: their own vocabulary, which
+    /// a term is never allowed to overwrite by a near match. Cached, and only
+    /// recounted after another batch of transcripts has been saved.
+    pub fn everyday_words(&self) -> Arc<HashSet<String>> {
+        let Ok(count) = self.connection().and_then(|connection| {
+            Ok(connection.query_row("SELECT COUNT(*) FROM history WHERE status='completed'", [], |row| row.get::<_, i64>(0))?)
+        }) else {
+            return Arc::default();
+        };
+        if let Ok(cached) = self.everyday.lock()
+            && let Some((counted, words)) = cached.as_ref()
+            && (count - counted).abs() < 25
+        {
+            return words.clone();
         }
-        transaction.execute(
-            "INSERT INTO modes
-               (id,config_json,name,description,prompt,enabled,is_default,created_at)
-             VALUES (?1,'{}',?2,?3,?4,?5,?6,?7)
-             ON CONFLICT(id) DO UPDATE SET
-               name=excluded.name,description=excluded.description,prompt=excluded.prompt,
-               enabled=excluded.enabled,is_default=excluded.is_default,
-               created_at=excluded.created_at",
-            params![
-                mode.id,
-                mode.name,
-                mode.description,
-                mode.prompt,
-                mode.enabled,
-                mode.is_default,
-                mode.created_at,
-            ],
-        )?;
-        transaction.commit()?;
-        Ok(())
-    }
-
-    pub fn delete_mode(&self, id: &str) -> Result<bool, StorageError> {
-        if matches!(id, "clean" | "message" | "code") {
-            return Ok(false);
+        let texts = self.recent_transcripts(3000).unwrap_or_default();
+        let words = Arc::new(crate::vocabulary::frequent_words(texts.iter().map(String::as_str), 3));
+        if let Ok(mut cached) = self.everyday.lock() {
+            *cached = Some((count, words.clone()));
         }
-        Ok(self
-            .connection()?
-            .execute("DELETE FROM modes WHERE id=?1", [id])?
-            > 0)
+        words
     }
 
     pub fn reconcile_interrupted(&self) -> Result<usize, StorageError> {
@@ -658,14 +649,18 @@ impl Storage {
     ) -> Result<CleanupReport, StorageError> {
         let reserved = self.reserve_retention_records(retention, now_ms)?;
         let mut deleted_audio = 0;
-        for (index, reservation) in reserved.iter().enumerate() {
-            if let Err(error) = remove(&reservation.canonical_path) {
-                self.restore_retention_reservations(&reserved[index..])?;
-                return Err(error.into());
+        // One locked or busy file must not keep every other expired take on
+        // disk: skip it, give its row the path back, and try again next pass.
+        let mut skipped = Vec::new();
+        for reservation in reserved {
+            match remove(&reservation.canonical_path) {
+                Ok(()) => deleted_audio += 1,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => deleted_audio += 1,
+                Err(_) => skipped.push(reservation),
             }
-            deleted_audio += 1;
         }
-        Ok(CleanupReport { deleted_audio })
+        if !skipped.is_empty() { self.restore_retention_reservations(&skipped)?; }
+        Ok(CleanupReport { deleted_audio, skipped_audio: skipped.len() })
     }
 
     #[cfg(test)]
@@ -766,16 +761,20 @@ fn is_safe_managed_wav_candidate(path: &Path, managed_root: &Path) -> bool {
             .is_some_and(|parent| parent.starts_with(managed_root))
 }
 
-fn mode_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Mode> {
-    Ok(Mode {
-        id: row.get(0)?,
-        name: row.get(1)?,
-        description: row.get(2)?,
-        prompt: row.get(3)?,
-        enabled: row.get(4)?,
-        is_default: row.get(5)?,
-        created_at: row.get(6)?,
-    })
+fn vocabulary_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<VocabularyEntry> {
+    let aliases: String = row.get(2)?;
+    Ok(VocabularyEntry { id: row.get(0)?, term: row.get(1)?, aliases: serde_json::from_str(&aliases).unwrap_or_default() })
+}
+
+/// Adds aliases that are new, not empty and not the term itself.
+fn merge_aliases(aliases: &mut Vec<String>, term: &str, new: impl IntoIterator<Item = String>) {
+    for alias in new {
+        let alias = alias.trim();
+        let lower = alias.to_lowercase();
+        if !alias.is_empty() && lower != term.to_lowercase() && !aliases.iter().any(|known| known.to_lowercase() == lower) {
+            aliases.push(alias.to_owned());
+        }
+    }
 }
 
 struct RawRecording {
@@ -825,182 +824,166 @@ impl TryFrom<RawRecording> for Recording {
     }
 }
 
-/// Applies the user's replacements to one piece of text.
-///
-/// Live dictation types pieces as they arrive, so they cannot wait for the
-/// paragraph pass that a finished transcript gets; the replacements are the
-/// part that has to survive, because they are the user's own spelling.
-pub fn apply_vocabulary_text(text: &str, vocabulary: &[VocabularyEntry]) -> String {
-    apply_vocabulary(text.to_owned(), vocabulary)
+/// The one pipeline every transcript goes through: whitespace and
+/// punctuation cleanup, the user's vocabulary, then sentence case.
+/// Paragraph breaks the recogniser produced are kept.
+pub fn finish_transcript(text: &str, vocabulary: &Vocabulary) -> String {
+    normalize_transcript(&clean_paragraphs(text, vocabulary))
 }
 
-pub fn postprocess(text: &str, vocabulary: &[VocabularyEntry]) -> String {
+fn clean(text: &str, vocabulary: &Vocabulary) -> String {
     let whitespace = Regex::new(r"\s+").expect("static whitespace regex is valid");
-    let punctuation = Regex::new(r"\s+([,.;:!?])").expect("static punctuation regex is valid");
-    let processed = whitespace.replace_all(text.trim(), " ").into_owned();
-    let processed = apply_vocabulary(processed, vocabulary);
-    punctuation.replace_all(&processed, "$1").into_owned()
+    // Only a mark that closes the word before it is pulled in: ".env" or
+    // ":root" after a space is a token of its own, not stray punctuation.
+    let punctuation = Regex::new(r"\s+([,.;:!?])([^\p{L}\p{N}/\\_]|$)")
+        .expect("static punctuation regex is valid");
+    let processed = whitespace.replace_all(text.trim(), " ");
+    let processed = vocabulary.apply(&processed);
+    punctuation.replace_all(&processed, "$1$2").into_owned()
 }
 
-fn clean_paragraphs(text: &str, vocabulary: &[VocabularyEntry]) -> String {
+fn clean_paragraphs(text: &str, vocabulary: &Vocabulary) -> String {
     let paragraph_break =
         Regex::new(r"(?:\r?\n)[ \t]*(?:\r?\n)+").expect("static paragraph regex is valid");
     paragraph_break
         .split(text.trim())
         .filter_map(|paragraph| {
-            let cleaned = postprocess(paragraph, vocabulary);
+            let cleaned = clean(paragraph, vocabulary);
             (!cleaned.is_empty()).then_some(cleaned)
         })
         .collect::<Vec<_>>()
         .join("\n\n")
 }
 
-pub fn postprocess_for_mode(text: &str, vocabulary: &[VocabularyEntry], mode: &Mode) -> String {
-    if !mode.enabled {
-        return clean_paragraphs(text, vocabulary);
-    }
-    match mode.id.as_str() {
-        "clean" => clean_paragraphs(text, vocabulary),
-        "message" => postprocess(text, vocabulary),
-        "code" => {
-            let punctuation =
-                Regex::new(r"[ \t]+([,.;:!?])").expect("static punctuation regex is valid");
-            let processed = apply_vocabulary(text.trim().to_owned(), vocabulary);
-            punctuation.replace_all(&processed, "$1").into_owned()
-        }
-        _ => apply_custom_directives(clean_paragraphs(text, vocabulary), &mode.prompt),
-    }
+/// Abbreviations whose trailing period does not end a sentence, so the word
+/// after them keeps its case ("np. coś", "m.in. to").
+const NON_TERMINAL_ABBREVIATIONS: &[&str] = &[
+    "np", "tzn", "tj", "tzw", "itd", "itp", "m.in", "ok", "godz", "ul", "al", "nr", "str", "dr",
+    "prof", "mgr", "inż", "hab", "ks", "św", "pt", "por", "wg", "zob", "ww", "jw", "sp", "z o.o",
+    "e.g", "i.e", "etc", "vs", "mr", "mrs", "ms", "no", "approx", "cf",
+];
+
+/// Final, conservative tidy-up of a delivered transcript.
+///
+/// Parakeet normally writes sentence case itself, but a take that opens with
+/// a conjunction ("a próbowałeś…") or after a restart can come back starting
+/// lower case. This upper-
+/// cases the first letter of the transcript and of every sentence that
+/// follows `.`, `?` or `!` plus whitespace, collapses runs of spaces inside a
+/// line (indentation is kept), drops spaces before `, . ? ! : ;` when the mark
+/// ends a word (so `.env` or `:root` survive), and trims line ends.
+///
+/// Words that look like code, paths, URLs or e-mail addresses are never
+/// re-cased, nor is anything after an ellipsis or a known abbreviation.
+/// Loquara does not know what is already in the target field, so a take that
+/// continues someone's sentence is still capitalised: the common case is a
+/// fresh sentence.
+pub fn normalize_transcript(text: &str) -> String {
+    capitalize_sentences(&normalize_spacing(text))
 }
 
-fn apply_custom_directives(mut text: String, prompt: &str) -> String {
-    let mut case = None;
-    let mut layout = None;
-    let mut prefix = None;
-    let mut suffix = None;
-    for line in prompt.lines() {
-        let Some((key, value)) = line.split_once(':') else {
-            continue;
-        };
-        let value = value.trim();
-        match key.trim().to_ascii_lowercase().as_str() {
-            "case" if matches!(value, "lower" | "upper" | "sentence") => case = Some(value),
-            "layout" if matches!(value, "bullets" | "plain") => layout = Some(value),
-            "prefix" => prefix = Some(value),
-            "suffix" => suffix = Some(value),
-            _ => {}
-        }
-    }
-    text = match case {
-        Some("lower") => text.to_lowercase(),
-        Some("upper") => text.to_uppercase(),
-        Some("sentence") => sentence_case(&text),
-        _ => text,
-    };
-    if layout == Some("bullets") {
-        text = text
-            .split("\n\n")
-            .filter(|item| !item.trim().is_empty())
-            .map(|item| format!("• {}", item.trim()))
-            .collect::<Vec<_>>()
-            .join("\n");
-    }
-    let mut parts = Vec::new();
-    if let Some(prefix) = prefix.filter(|value| !value.is_empty()) {
-        parts.push(prefix.to_owned());
-    }
-    if !text.is_empty() {
-        parts.push(text);
-    }
-    if let Some(suffix) = suffix.filter(|value| !value.is_empty()) {
-        parts.push(suffix.to_owned());
-    }
-    parts.join("\n")
+fn normalize_spacing(text: &str) -> String {
+    text.split('\n')
+        .map(normalize_line_spacing)
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_owned()
 }
 
-fn sentence_case(text: &str) -> String {
-    let mut sentence_start = true;
-    let mut result = String::new();
-    for character in text.to_lowercase().chars() {
-        if sentence_start && character.is_alphabetic() {
-            result.extend(character.to_uppercase());
-            sentence_start = false;
-        } else {
+fn normalize_line_spacing(line: &str) -> String {
+    let line = line.trim_end_matches([' ', '\t', '\r']);
+    let indent_len = line.len() - line.trim_start_matches([' ', '\t']).len();
+    let (indent, body) = line.split_at(indent_len);
+    let chars: Vec<char> = body.chars().collect();
+    let mut result = String::with_capacity(line.len());
+    result.push_str(indent);
+    let mut index = 0;
+    while index < chars.len() {
+        let character = chars[index];
+        if character != ' ' && character != '\t' {
             result.push(character);
+            index += 1;
+            continue;
         }
-        if matches!(character, '.' | '!' | '?') {
-            sentence_start = true;
+        let mut next = index;
+        while next < chars.len() && (chars[next] == ' ' || chars[next] == '\t') {
+            next += 1;
         }
+        // A mark that closes the word before it ("tak ,") loses the space; one
+        // that starts a token of its own (".env", ":root") keeps it.
+        let closes_word = chars.get(next).is_some_and(|mark| matches!(mark, ',' | '.' | '?' | '!' | ':' | ';'))
+            && chars.get(next + 1).is_none_or(|after| !after.is_alphanumeric() && !matches!(after, '/' | '\\' | '_'));
+        if !closes_word {
+            result.push(' ');
+        }
+        index = next;
     }
     result
 }
 
-fn apply_vocabulary(mut processed: String, vocabulary: &[VocabularyEntry]) -> String {
-    let mut entries = vocabulary.to_vec();
-    entries.sort_by_key(|entry| std::cmp::Reverse(entry.heard.chars().count()));
-    for entry in entries {
-        if entry.heard.trim().is_empty() {
+fn capitalize_sentences(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut result = String::with_capacity(text.len());
+    let mut sentence_start = true;
+    let mut index = 0;
+    while index < chars.len() {
+        let character = chars[index];
+        if character.is_whitespace() || matches!(character, '"' | '\'' | '„' | '“' | '«' | '»' | '(' | '[' | '•' | '–' | '—' | '-') && sentence_start {
+            result.push(character);
+            index += 1;
             continue;
         }
-        let pattern = format!(r"(?iu)\b{}\b", regex::escape(entry.heard.trim()));
-        if let Ok(regex) = Regex::new(&pattern) {
-            processed = regex
-                .replace_all(&processed, regex::NoExpand(&entry.replacement))
-                .into_owned();
+        let end = chars[index..]
+            .iter()
+            .position(|c| c.is_whitespace())
+            .map_or(chars.len(), |offset| index + offset);
+        let word: String = chars[index..end].iter().collect();
+        if sentence_start {
+            result.push_str(&capitalize_word(&word));
+        } else {
+            result.push_str(&word);
         }
-        processed = fuzzy_apply_vocabulary(processed, &entry);
+        sentence_start = ends_sentence(&word);
+        index = end;
     }
-    processed
+    result
 }
 
-fn fuzzy_apply_vocabulary(text: String, entry: &VocabularyEntry) -> String {
-    let heard = entry.heard.trim().to_lowercase();
-    if heard.is_empty() {
-        return text;
+/// Whether the text after `word` (and the whitespace that follows it) starts a
+/// new sentence.
+fn ends_sentence(word: &str) -> bool {
+    let trimmed = word.trim_end_matches(['"', '\'', '”', '»', ')', ']']);
+    if trimmed.ends_with("...") || trimmed.ends_with('…') {
+        return false;
     }
-    let replacement = entry.replacement.trim();
-    let mut rebuilt = String::with_capacity(text.len());
-    let mut word = String::new();
-    let flush = |word: &mut String, rebuilt: &mut String| {
-        if word.is_empty() {
-            return;
-        }
-        let word_lower = word.to_lowercase();
-        let word_clean = word_lower.trim_matches(|c: char| !c.is_alphanumeric());
-        if !word_clean.is_empty() && levenshtein(word_clean, &heard) <= 1 {
-            rebuilt.push_str(replacement);
-        } else {
-            rebuilt.push_str(word);
-        }
-        word.clear();
-    };
-    for character in text.chars() {
-        if character.is_whitespace() {
-            flush(&mut word, &mut rebuilt);
-            rebuilt.push(character);
-        } else {
-            word.push(character);
-        }
+    if trimmed.ends_with('?') || trimmed.ends_with('!') {
+        return true;
     }
-    flush(&mut word, &mut rebuilt);
-    rebuilt
+    let Some(stem) = trimmed.strip_suffix('.') else { return false };
+    let stem = stem.trim_start_matches(['"', '\'', '„', '“', '«', '(', '[']).to_lowercase();
+    !NON_TERMINAL_ABBREVIATIONS.contains(&stem.as_str())
 }
 
-fn levenshtein(left: &str, right: &str) -> usize {
-    let left = left.chars().collect::<Vec<_>>();
-    let right = right.chars().collect::<Vec<_>>();
-    let mut previous = (0..=right.len()).collect::<Vec<_>>();
-    let mut current = vec![0; right.len() + 1];
-    for (i, lc) in left.iter().enumerate() {
-        current[0] = i + 1;
-        for (j, rc) in right.iter().enumerate() {
-            let cost = if lc == rc { 0 } else { 1 };
-            current[j + 1] = (previous[j + 1] + 1)
-                .min(current[j] + 1)
-                .min(previous[j] + cost);
-        }
-        std::mem::swap(&mut previous, &mut current);
+/// Upper-cases the first letter of an ordinary word; leaves anything that
+/// looks like code, a path, a URL, an address or a mixed-case name alone.
+fn capitalize_word(word: &str) -> String {
+    let core = word.trim_end_matches(|c: char| matches!(c, ',' | '.' | '?' | '!' | ':' | ';' | '"' | '\'' | '”' | '»' | ')' | ']'));
+    let looks_like_code = core.chars().any(|c| {
+        c.is_ascii_digit()
+            || matches!(c, '@' | '/' | '\\' | '_' | '`' | '{' | '}' | '[' | ']' | '<' | '>' | '=' | '#' | '$' | '%' | '^' | '&' | '*' | '|' | '~' | '(' | ')' | '+')
+    }) || core.contains(['.', ':'])
+        || core.chars().skip(1).any(char::is_uppercase);
+    let mut characters = word.chars();
+    let Some(first) = characters.next() else { return String::new() };
+    if looks_like_code || !first.is_lowercase() {
+        return word.to_owned();
     }
-    previous[right.len()]
+    let mut upper = first.to_uppercase();
+    match (upper.next(), upper.next()) {
+        (Some(single), None) => std::iter::once(single).chain(characters).collect(),
+        _ => word.to_owned(),
+    }
 }
 
 #[cfg(test)]
@@ -1030,46 +1013,66 @@ mod tests {
     }
 
     #[test]
-    fn migrates_all_tables_and_records_schema_version() {
-        let (_temp, storage) = storage();
+    fn stored_cloud_api_keys_are_dropped_on_open() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("loquara.sqlite3");
+        let storage = Storage::open(&path, temp.path().join("recordings")).unwrap();
+        storage.set_setting("cloud_keys", &serde_json::json!({ "xai": "00ff" })).unwrap();
+        storage.set_setting("kept", &1).unwrap();
+        drop(storage);
 
-        assert_eq!(storage.schema_version().unwrap(), 3);
-        assert_eq!(
-            storage.table_names().unwrap(),
-            vec!["history", "modes", "settings", "vocabulary"]
-        );
+        let storage = Storage::open(&path, temp.path().join("recordings")).unwrap();
+        assert!(storage.get_setting::<serde_json::Value>("cloud_keys").unwrap().is_none());
+        assert_eq!(storage.get_setting::<i32>("kept").unwrap(), Some(1));
     }
 
     #[test]
-    fn reopening_an_older_database_with_partial_migration_is_idempotent() {
+    fn migrates_all_tables_and_records_schema_version() {
+        let (_temp, storage) = storage();
+
+        assert_eq!(storage.schema_version().unwrap(), 4);
+        assert_eq!(storage.table_names().unwrap(), vec!["history", "settings", "vocabulary"]);
+    }
+
+    #[test]
+    fn upgrading_drops_modes_and_turns_replacements_into_terms_with_aliases() {
         let temp = tempfile::tempdir().unwrap();
         let database = temp.path().join("mow.sqlite3");
         let recordings = temp.path().join("recordings");
         let connection = rusqlite::Connection::open(&database).unwrap();
         connection
             .execute_batch(
-                "CREATE TABLE modes (
-                   id TEXT PRIMARY KEY,
-                   config_json TEXT NOT NULL,
-                   name TEXT NOT NULL DEFAULT '',
-                   description TEXT NOT NULL DEFAULT '',
-                   prompt TEXT NOT NULL DEFAULT '',
-                   enabled INTEGER NOT NULL DEFAULT 1,
-                   is_default INTEGER NOT NULL DEFAULT 0,
-                   created_at INTEGER NOT NULL DEFAULT 0
+                "CREATE TABLE vocabulary (
+                   id INTEGER PRIMARY KEY AUTOINCREMENT,
+                   heard TEXT NOT NULL COLLATE NOCASE UNIQUE,
+                   replacement TEXT NOT NULL
                  );
+                 INSERT INTO vocabulary(heard,replacement) VALUES
+                   ('parakit','Parakeet'),('parakyt','Parakeet'),('loquara','Loquara'),('  ',' ');
+                 CREATE TABLE modes (id TEXT PRIMARY KEY, config_json TEXT NOT NULL, name TEXT NOT NULL DEFAULT '');
+                 INSERT INTO modes(id,config_json,name) VALUES ('custom','{}','Mine');
+                 CREATE TABLE settings (key TEXT PRIMARY KEY, value_json TEXT NOT NULL);
+                 INSERT INTO settings VALUES ('app','{\"activeMode\":\"custom\"}');
                  CREATE TABLE schema_version (version INTEGER NOT NULL);
-                 INSERT INTO schema_version(version) VALUES (0);",
+                 INSERT INTO schema_version(version) VALUES (3);",
             )
             .unwrap();
+        drop(connection);
 
         let storage = Storage::open(&database, &recordings).unwrap();
 
-        assert_eq!(storage.schema_version().unwrap(), 3);
+        assert_eq!(storage.schema_version().unwrap(), 4);
+        assert_eq!(storage.table_names().unwrap(), vec!["history", "settings", "vocabulary"]);
+        let terms = storage.list_vocabulary().unwrap();
         assert_eq!(
-            storage.list_modes().unwrap().iter().map(|mode| mode.id.clone()).collect::<Vec<_>>(),
-            vec!["clean", "message", "code"]
+            terms.iter().map(|entry| (entry.term.as_str(), entry.aliases.clone())).collect::<Vec<_>>(),
+            vec![("Parakeet", vec!["parakit".to_owned(), "parakyt".to_owned()]), ("Loquara", vec![])]
         );
+        assert_eq!(storage.get_setting::<serde_json::Value>("app").unwrap().unwrap()["activeMode"], "custom");
+        drop(storage);
+        // Reopening a migrated database changes nothing.
+        let reopened = Storage::open(&database, &recordings).unwrap();
+        assert_eq!(reopened.list_vocabulary().unwrap(), terms);
     }
 
     #[test]
@@ -1114,7 +1117,7 @@ mod tests {
         let migrated = storage.get_recording("old").unwrap().unwrap();
         assert_eq!(migrated.text.as_deref(), Some("spoken before envelopes existed"));
         assert_eq!(migrated.peaks, None);
-        assert_eq!(storage.schema_version().unwrap(), 3);
+        assert_eq!(storage.schema_version().unwrap(), 4);
     }
 
     #[test]
@@ -1137,65 +1140,6 @@ mod tests {
         let (_temp, storage) = storage();
 
         assert!(!storage.store_peaks("gone", &[1, 2, 3]).unwrap());
-    }
-
-    #[test]
-    fn seeds_and_cruds_default_modes() {
-        let (_temp, storage) = storage();
-        let defaults = storage.list_modes().unwrap();
-        assert_eq!(
-            defaults
-                .iter()
-                .map(|mode| mode.name.as_str())
-                .collect::<Vec<_>>(),
-            vec!["Clean", "Message", "Code"]
-        );
-        assert_eq!(defaults.iter().filter(|mode| mode.is_default).count(), 1);
-
-        let custom = Mode {
-            id: "custom".into(),
-            name: "Własny".into(),
-            description: "Firmowy styl".into(),
-            prompt: "Zachowaj terminologię".into(),
-            enabled: true,
-            is_default: false,
-            created_at: 123,
-        };
-        storage.upsert_mode(&custom).unwrap();
-        assert_eq!(storage.get_mode("custom").unwrap(), Some(custom.clone()));
-        assert!(storage.delete_mode("custom").unwrap());
-        assert!(storage.get_mode("custom").unwrap().is_none());
-    }
-
-    #[test]
-    fn built_in_modes_cannot_be_deleted_and_custom_deletion_persists() {
-        let temp = tempfile::tempdir().unwrap();
-        let database = temp.path().join("mow.sqlite3");
-        let recordings = temp.path().join("recordings");
-        let storage = Storage::open(&database, &recordings).unwrap();
-        assert!(!storage.delete_mode("clean").unwrap());
-        assert!(storage.get_mode("clean").unwrap().is_some());
-        storage
-            .upsert_mode(&Mode {
-                id: "custom".into(),
-                name: "Własny".into(),
-                description: String::new(),
-                prompt: String::new(),
-                enabled: true,
-                is_default: false,
-                created_at: 99,
-            })
-            .unwrap();
-        drop(storage);
-
-        let reopened = Storage::open(&database, &recordings).unwrap();
-        assert!(reopened.get_mode("custom").unwrap().is_some());
-        assert!(reopened.delete_mode("custom").unwrap());
-        drop(reopened);
-
-        let reopened = Storage::open(&database, &recordings).unwrap();
-        assert!(reopened.get_mode("custom").unwrap().is_none());
-        assert!(reopened.get_mode("clean").unwrap().is_some());
     }
 
     #[test]
@@ -1421,7 +1365,7 @@ mod tests {
         storage
             .set_setting("retention", &Retention::Days(7))
             .unwrap();
-        let entry = storage.add_vocabulary("żółw", "Żółw™").unwrap();
+        let entry = storage.add_vocabulary(" Żółw™ ", &["żółw".to_owned()]).unwrap();
 
         assert_eq!(
             storage.get_setting::<bool>("autopaste").unwrap(),
@@ -1431,115 +1375,88 @@ mod tests {
             storage.get_setting::<Retention>("retention").unwrap(),
             Some(Retention::Days(7))
         );
+        assert_eq!(entry.term, "Żółw™");
         assert_eq!(storage.list_vocabulary().unwrap(), vec![entry.clone()]);
         storage.delete_vocabulary(entry.id).unwrap();
         assert!(storage.list_vocabulary().unwrap().is_empty());
     }
 
     #[test]
-    fn postprocessing_handles_polish_diacritics_phrases_and_punctuation() {
-        let vocabulary = vec![
-            VocabularyEntry {
-                id: 1,
-                heard: "zolw".into(),
-                replacement: "żółw".into(),
-            },
-            VocabularyEntry {
-                id: 2,
-                heard: "nowy sącz".into(),
-                replacement: "Nowy Sącz".into(),
-            },
-        ];
+    fn adding_a_known_term_merges_its_aliases() {
+        let (_temp, storage) = storage();
+        let first = storage.add_vocabulary("Parakeet", &["parakit".to_owned()]).unwrap();
+        let merged = storage
+            .add_vocabulary("parakeet", &["PARAKIT".to_owned(), " parkit ".to_owned(), "Parakeet".to_owned(), String::new()])
+            .unwrap();
 
-        assert_eq!(
-            postprocess("  ZOLW   jest w nowy SĄCZ  , naprawdę ?  ", &vocabulary),
-            "żółw jest w Nowy Sącz, naprawdę?"
-        );
-        assert_eq!(postprocess("przyzolwowy", &vocabulary), "przyzolwowy");
+        assert_eq!(merged.id, first.id);
+        assert_eq!(merged.term, "Parakeet");
+        assert_eq!(merged.aliases, vec!["parakit", "parkit"]);
+        assert_eq!(storage.list_vocabulary().unwrap(), vec![merged]);
     }
 
     #[test]
-    fn vocabulary_approximates_similar_sounding_words() {
-        let vocabulary = vec![VocabularyEntry {
-            id: 1,
-            heard: "parakit".into(),
-            replacement: "Parakeet".into(),
-        }];
-
-        assert_eq!(
-            postprocess("uruchom parakyt i zobacz", &vocabulary),
-            "uruchom Parakeet i zobacz"
-        );
-        assert_eq!(
-            postprocess("parakit jest gotowy", &vocabulary),
-            "Parakeet jest gotowy"
-        );
-        assert_eq!(
-            postprocess("przetestujmy parakitta", &vocabulary),
-            "przetestujmy parakitta"
-        );
-    }
-
-    fn mode(id: &str, prompt: &str) -> Mode {
-        Mode {
-            id: id.into(),
-            name: id.into(),
-            description: String::new(),
-            prompt: prompt.into(),
-            enabled: true,
-            is_default: false,
-            created_at: 1,
+    fn everyday_words_come_from_several_transcripts() {
+        let (_temp, storage) = storage();
+        for (index, text) in ["tragedia jest", "to tragedia", "tragedia, no", "raz"].into_iter().enumerate() {
+            storage.insert_recording(&recording(&index.to_string(), RecordingStatus::Completed, Some(text))).unwrap();
         }
+        let words = storage.everyday_words();
+        assert!(words.contains("tragedia"));
+        assert!(!words.contains("raz"));
     }
 
     #[test]
-    fn built_in_modes_have_distinct_layout_contracts() {
-        let vocabulary = vec![VocabularyEntry {
-            id: 1,
-            heard: "parakit".into(),
-            replacement: "Parakeet".into(),
-        }];
-        let input = "pierwszy   parakit ;\nciąg\n\nDrugi akapit !";
+    fn every_transcript_gets_cleanup_vocabulary_and_sentence_case() {
+        let entries = vec![
+            VocabularyEntry { id: 1, term: "żółw".into(), aliases: vec!["zolw".into()] },
+            VocabularyEntry { id: 2, term: "Nowy Sącz".into(), aliases: vec![] },
+            VocabularyEntry { id: 3, term: "Parakeet".into(), aliases: vec![] },
+        ];
+        let vocabulary = VocabularyEntry::matcher(&entries);
 
         assert_eq!(
-            postprocess_for_mode(input, &vocabulary, &mode("clean", "")),
-            "pierwszy Parakeet; ciąg\n\nDrugi akapit!"
+            finish_transcript("  ZOLW   jest w nowy SĄCZ  , naprawdę ?  ", &vocabulary),
+            "Żółw jest w Nowy Sącz, naprawdę?"
         );
+        assert_eq!(finish_transcript("przyzolwowy", &vocabulary), "Przyzolwowy");
         assert_eq!(
-            postprocess_for_mode(input, &vocabulary, &mode("message", "")),
-            "pierwszy Parakeet; ciąg Drugi akapit!"
+            finish_transcript("pierwszy   parkit ;\nciąg\n\nDrugi akapit !", &vocabulary),
+            "Pierwszy Parakeet; ciąg\n\nDrugi akapit!"
         );
-        assert_eq!(
-            postprocess_for_mode(
-                "fn main() {\n    parakit () ;\n}",
-                &vocabulary,
-                &mode("code", "")
-            ),
-            "fn main() {\n    Parakeet ();\n}"
-        );
+        assert_eq!(finish_transcript("otwórz plik .env teraz", &vocabulary), "Otwórz plik .env teraz");
+        assert_eq!(finish_transcript("let x = 1;\nfoo()", &vocabulary), "Let x = 1; foo()");
     }
 
     #[test]
-    fn custom_mode_applies_documented_local_directives() {
-        let custom = mode(
-            "custom-notes",
-            "case: upper\nlayout: bullets\nprefix: NOTATKA\nsuffix: KONIEC",
-        );
-
+    fn delivered_transcripts_start_sentences_with_capitals() {
+        // The real take: Parakeet heard the opening "A" as a continuation.
         assert_eq!(
-            postprocess_for_mode("Pierwszy punkt.\n\nDrugi punkt.", &[], &custom),
-            "NOTATKA\n• PIERWSZY PUNKT.\n• DRUGI PUNKT.\nKONIEC"
+            normalize_transcript("a próbowałeś coś zrobić z jakością dźwięku? no i czy jak powiem coś."),
+            "A próbowałeś coś zrobić z jakością dźwięku? No i czy jak powiem coś."
         );
+        assert_eq!(
+            normalize_transcript("żółw idzie.   źle  jest ! ćma leci ; łódź płynie , śnieg pada."),
+            "Żółw idzie. Źle jest! Ćma leci; łódź płynie, śnieg pada."
+        );
+        assert_eq!(normalize_transcript("„dobra, to tyle."), "„Dobra, to tyle.");
+        assert_eq!(normalize_transcript("już.\n\nłatwo"), "Już.\n\nŁatwo");
     }
 
     #[test]
-    fn custom_mode_without_recognized_directive_falls_back_to_clean() {
-        let custom = mode("custom-freeform", "Napisz to pięknie jak poeta");
-
+    fn normalizer_leaves_hesitations_abbreviations_and_code_alone() {
         assert_eq!(
-            postprocess_for_mode("Pierwszy\n\nDrugi", &[], &custom),
-            "Pierwszy\n\nDrugi"
+            normalize_transcript("chyba, że... do czegokolwiek. np. coś, m.in. to, tzn. tak."),
+            "Chyba, że... do czegokolwiek. Np. coś, m.in. to, tzn. tak."
         );
+        assert_eq!(
+            normalize_transcript("wyślij na jan@example.com. www.loquara.io działa. useState nie. src/main.rs też. npm"),
+            "Wyślij na jan@example.com. www.loquara.io działa. useState nie. src/main.rs też. Npm"
+        );
+        assert_eq!(normalize_transcript("otwórz plik .env i :root"), "Otwórz plik .env i :root");
+        assert_eq!(normalize_transcript("wersja 4.0 i 13.52 , ok"), "Wersja 4.0 i 13.52, ok");
+        assert_eq!(normalize_transcript("Już Jest Dobrze."), "Już Jest Dobrze.");
+        assert_eq!(normalize_transcript("  "), "");
     }
 
     #[test]
@@ -1632,7 +1549,7 @@ mod tests {
     }
 
     #[test]
-    fn retention_delete_failure_restores_failing_and_unprocessed_reservations() {
+    fn retention_skips_an_undeletable_file_and_keeps_cleaning_the_rest() {
         let (_temp, storage) = storage();
         let recordings = storage.recordings_dir().to_path_buf();
         fs::create_dir_all(&recordings).unwrap();
@@ -1648,7 +1565,7 @@ mod tests {
         }
         let attempts = std::cell::Cell::new(0);
 
-        let error = storage
+        let report = storage
             .cleanup_retention_with(Retention::Days(1), 172_800_000, |path| {
                 let attempt = attempts.get() + 1;
                 attempts.set(attempt);
@@ -1657,40 +1574,27 @@ mod tests {
                 }
                 fs::remove_file(path)
             })
-            .unwrap_err();
+            .unwrap();
 
-        assert!(matches!(error, StorageError::Io(_)));
+        assert_eq!(report, CleanupReport { deleted_audio: 2, skipped_audio: 1 });
         assert!(!paths[0].exists());
         assert!(paths[1].is_file());
-        assert!(paths[2].is_file());
-        assert!(
-            storage
-                .get_recording("first")
-                .unwrap()
-                .unwrap()
-                .audio_path
-                .is_none()
-        );
-        for (id, path) in [("second", &paths[1]), ("third", &paths[2])] {
-            assert_eq!(
-                storage
-                    .get_recording(id)
-                    .unwrap()
-                    .unwrap()
-                    .audio_path
-                    .as_deref(),
-                Some(path.to_string_lossy().as_ref())
-            );
+        assert!(!paths[2].exists(), "a later file is still cleaned after one failure");
+        for id in ["first", "third"] {
+            assert!(storage.get_recording(id).unwrap().unwrap().audio_path.is_none());
         }
+        assert_eq!(
+            storage.get_recording("second").unwrap().unwrap().audio_path.as_deref(),
+            Some(paths[1].to_string_lossy().as_ref())
+        );
 
         assert_eq!(
             storage
                 .cleanup_retention(Retention::Days(1), 172_800_000)
                 .unwrap()
                 .deleted_audio,
-            2
+            1
         );
         assert!(!paths[1].exists());
-        assert!(!paths[2].exists());
     }
 }

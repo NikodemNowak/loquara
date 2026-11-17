@@ -105,35 +105,7 @@ jobs:
       - name: Build frontend
         run: pnpm build
 
-      # Windows builds sherpa-onnx from source (DirectML). The installed
-      # libraries are cached on their own: rust-cache removes this path
-      # dependency because it sits inside src-tauri. SHERPA_LIB_PATH tells
-      # the build script to link those libraries instead of running CMake.
-      - name: Cache Windows speech engine
-        if: runner.os == 'Windows'
-        uses: actions/cache@v4
-        with:
-          path: src-tauri/.sherpa-directml
-          key: sherpa-directml-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('src-tauri/vendor/sherpa-rs-sys/**') }}
-
-      # The app's build script stages the engine libraries, and Cargo does not
-      # order it after sherpa-rs-sys. Building the engine first is what makes
-      # the staging deterministic.
-      - name: Build speech engine
-        shell: bash
-        run: |
-          if [ "$RUNNER_OS" = "Windows" ] && node scripts/sherpa-directml-cache.mjs check; then
-            export SHERPA_LIB_PATH="$(node scripts/sherpa-directml-cache.mjs print)"
-          fi
-          cargo build --manifest-path src-tauri/Cargo.toml -p sherpa-rs-sys
-          if [ "$RUNNER_OS" = "Windows" ] && ! node scripts/sherpa-directml-cache.mjs check; then
-            node scripts/sherpa-directml-cache.mjs capture
-          fi
-
+      # ONNX Runtime comes statically linked from the `ort` prebuilt
+      # binaries, so there is no separate engine build to run or cache.
       - name: Rust tests
-        shell: bash
-        run: |
-          if [ "$RUNNER_OS" = "Windows" ] && node scripts/sherpa-directml-cache.mjs check; then
-            export SHERPA_LIB_PATH="$(node scripts/sherpa-directml-cache.mjs print)"
-          fi
-          cargo test --manifest-path src-tauri/Cargo.toml --lib
+        run: cargo test --manifest-path src-tauri/Cargo.toml --lib

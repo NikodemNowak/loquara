@@ -3,6 +3,7 @@ import {
   ArrowCounterclockwiseRegular,
   ArrowRightRegular,
   BookOpenRegular,
+  CheckmarkCircleRegular,
   CheckmarkRegular,
   ChevronDownRegular,
   ColorRegular,
@@ -10,8 +11,10 @@ import {
   DeleteRegular,
   DesktopRegular,
   DismissRegular,
+  ErrorCircleRegular,
   HistoryRegular,
   HomeRegular,
+  InfoRegular,
   KeyboardRegular,
   LocalLanguageRegular,
   MicRegular,
@@ -67,3 +70,6 @@ export const Palette = wrap(ColorRegular);
 export const SlidersHorizontal = wrap(OptionsRegular);
 export const ChevronDown = wrap(ChevronDownRegular);
 export const Keyboard = wrap(KeyboardRegular);
+export const ErrorCircle = wrap(ErrorCircleRegular);
+export const CheckCircle = wrap(CheckmarkCircleRegular);
+export const Info = wrap(InfoRegular);

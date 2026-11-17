@@ -40,8 +40,27 @@ describe("historia", () => {
     await user.click(screen.getByRole("button", { name: /Przygotuj proszę/ }));
     await user.click(within(inspector).getByRole("button", { name: "Wklej" }));
     expect(pasteTranscript).toHaveBeenCalledWith("complete-1");
-    // A finished transcript is worth keeping, so no retry is offered.
+    // A finished take is offered to run again, not to retry.
     expect(within(inspector).queryByRole("button", { name: "Ponów" })).not.toBeInTheDocument();
+    await user.click(within(inspector).getByRole("button", { name: "Przetwórz ponownie" }));
+    expect(retryTranscription).toHaveBeenCalledWith("complete-1");
+  });
+
+  test("usuwa nagranie dopiero po potwierdzeniu", async () => {
+    const user = userEvent.setup();
+    const deleteHistory = vi.fn(async () => true);
+    renderPage(adapterStub({ deleteHistory }), undefined, "complete-1");
+    const inspector = screen.getByRole("complementary", { name: "Szczegóły nagrania" });
+
+    await user.click(within(inspector).getByRole("button", { name: "Usuń" }));
+    expect(deleteHistory).not.toHaveBeenCalled();
+    const dialog = screen.getByRole("alertdialog");
+    await user.click(within(dialog).getByRole("button", { name: "Anuluj" }));
+    expect(deleteHistory).not.toHaveBeenCalled();
+
+    await user.click(within(inspector).getByRole("button", { name: "Usuń" }));
+    await user.click(within(screen.getByRole("alertdialog")).getByRole("button", { name: "Usuń" }));
+    expect(deleteHistory).toHaveBeenCalledWith("complete-1");
   });
 
   test("pokazuje brak transkrypcji i pozwala uruchomić ją ponownie", async () => {
