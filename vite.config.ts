@@ -1,6 +1,5 @@
 import { defineConfig } from "vitest/config";
 import react from "@vitejs/plugin-react";
-import { fileURLToPath } from "node:url";
 
 export default defineConfig({
   plugins: [react()],
@@ -22,8 +21,9 @@ export default defineConfig({
   build: {
     rollupOptions: {
       input: {
-        main: fileURLToPath(new URL("./index.html", import.meta.url)),
-        overlay: fileURLToPath(new URL("./overlay.html", import.meta.url)),
+        // Relative to the project root, where Vite and Tauri run it.
+        main: "index.html",
+        overlay: "overlay.html",
       },
     },
   },
